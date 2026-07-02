@@ -65,6 +65,10 @@ legacy file to `privacy_key.json.migrated`.
 
 ## Adoption Recipe
 
+**Migrating a node pack? Follow [ADOPTION_GUIDE.md](ADOPTION_GUIDE.md)** —
+step-by-step agent instructions including legacy key migration, route
+gating, frontend token handling, and test hygiene. Summary:
+
 For each Helto node pack:
 
 1. Add:
