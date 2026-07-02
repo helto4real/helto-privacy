@@ -1,5 +1,9 @@
 """Shared privacy helpers for Helto node packs."""
 
+from .comfy_ui import (
+    register_helto_privacy_ui,
+    register_legacy_key_dir,
+)
 from .envelope import (
     ALGORITHM,
     ENVELOPE_VERSION,
@@ -53,6 +57,8 @@ __all__ = [
     "keystore_status",
     "lock_keystore",
     "primary_session_key",
+    "register_helto_privacy_ui",
+    "register_legacy_key_dir",
     "rotate_primary_key",
     "session_key_for",
     "session_path",

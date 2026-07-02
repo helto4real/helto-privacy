@@ -63,6 +63,38 @@ If the shared keystore already exists, that call verifies the password, imports
 the legacy key as decrypt-only via `add_keys_to_keystore`, and renames the
 legacy file to `privacy_key.json.migrated`.
 
+## Shared UI and Canonical Routes (ComfyUI)
+
+Inside ComfyUI, packs do not implement their own unlock endpoints or dialogs.
+Each pack calls one function at load time:
+
+```python
+from helto_privacy import register_helto_privacy_ui
+
+register_helto_privacy_ui(legacy_key_dir=Path(__file__).parent / "config")
+```
+
+Registration is idempotent across packs (first pack wins); every call also
+records the pack's legacy `privacy_key.json` directory. It registers:
+
+- `GET  /helto_privacy/status`
+- `POST /helto_privacy/unlock`, `/lock`
+- `POST /helto_privacy/keystore/init`, `/keystore/change_password`
+- `GET  /helto_privacy/ui/privacy.js` — the shared unlock dialog (ES module)
+
+Legacy migration is automatic: when the keystore is created or unlocked, every
+registered legacy key is imported as a decrypt-only entry and its file renamed
+to `.migrated` — packs adopted after the keystore exists are picked up on the
+next unlock.
+
+Frontends import the served module instead of shipping their own dialog:
+
+```js
+const privacy = await import("/helto_privacy/ui/privacy.js");
+await privacy.showPrivacyKeystoreDialog("auto");   // setup or unlock as needed
+privacy.ensureStoredPrivacyTokenCookie();          // before rendering privacy-mode <img>
+```
+
 ## Adoption Recipe
 
 **Migrating a node pack? Follow [ADOPTION_GUIDE.md](ADOPTION_GUIDE.md)** —
@@ -74,7 +106,7 @@ For each Helto node pack:
 1. Add:
 
    ```text
-   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.1.0
+   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.2.0
    cryptography>=42.0
    ```
 

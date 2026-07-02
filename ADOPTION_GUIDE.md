@@ -66,7 +66,7 @@ Then pick your case:
 Add to the pack's `requirements.txt` (create it if missing):
 
 ```
-helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.1.0
+helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.2.0
 cryptography>=42.0
 ```
 
@@ -124,29 +124,38 @@ a runtime name, like the Director's `comfyui_helto_director_runtime.*`),
 both copies share state automatically because all state lives in files —
 but keep that in mind when tests monkeypatch module attributes (see Step 5).
 
-## Step 3 — Migration flow (one function, both scenarios)
+## Step 3 — Register the shared UI (this also handles migration)
 
-`initialize_keystore_with_legacy_migration(password, legacy_dir)` already
-handles every state — call it from the pack's "Set password / Protect"
-action and do not write your own branching:
+In the pack's `__init__.py`, right where routes are registered today:
 
-- No keystore yet → creates it, imports the pack's legacy key as
-  decrypt-only, fresh primary key.
-- Keystore exists (the normal case — the Director already created it) →
-  verifies the password, appends the pack's legacy key via
-  `add_keys_to_keystore`, refreshes the session.
-- Either way, the pack's `privacy_key.json` is renamed to
-  `privacy_key.json.migrated` (a recoverable backup — never delete it
-  programmatically, and never commit it; add `config/*.json.migrated` to
-  `.gitignore` alongside `config/*.json`).
+```python
+from helto_privacy import register_helto_privacy_ui
 
-Wrong password raises `PrivacyError`/`PrivacyKeystoreError` with
-`PRIVACY_PASSWORD_INVALID` — surface the message as-is.
+register_helto_privacy_ui(legacy_key_dir=_PACKAGE_ROOT / "config")
+```
 
-## Step 4 — Routes and frontend
+This one call (idempotent across packs — the first pack in the ComfyUI
+process wins, later calls only contribute their legacy dir) registers the
+canonical endpoints `/helto_privacy/status`, `/unlock`, `/lock`,
+`/keystore/init`, `/keystore/change_password`, and serves the shared unlock
+dialog at `/helto_privacy/ui/privacy.js`.
 
-**Gate every privacy route.** Any endpoint that decrypts, encrypts, or serves
-privacy-mode content must call the guard first:
+**Migration is automatic.** Because the pack registered its legacy key
+directory, its `privacy_key.json` is imported as a decrypt-only key at the
+next keystore init *or unlock* — the only moments the password is in hand —
+and renamed to `privacy_key.json.migrated` (a recoverable backup: never
+delete it programmatically, never commit it; gitignore `config/*.json` and
+`config/*.json.migrated`). The pack does NOT need its own "Set password"
+action, unlock endpoints, or migration branching. Wrong passwords surface as
+`PRIVACY_PASSWORD_INVALID` — show the message as-is.
+
+(`initialize_keystore_with_legacy_migration(password, legacy_dir)` still
+exists for non-ComfyUI callers and scripted migration.)
+
+## Step 4 — Gate routes, import the shared frontend
+
+**Gate every privacy route the pack owns.** Any endpoint that decrypts,
+encrypts, or serves privacy-mode content must call the guard first:
 
 ```python
 from helto_privacy import aiohttp_check_privacy_token
@@ -164,25 +173,35 @@ and accepts the token from the header **or** the cookie — the cookie exists
 because `<img>`/media elements cannot send custom headers; gate privacy-mode
 thumbnail/preview routes too, not just JSON endpoints.
 
-**Unlock endpoints:** each pack should expose its own
-`GET {prefix}/privacy/status`, `POST {prefix}/privacy/unlock`, `/lock`, and
-`/keystore/init` under its own route prefix so it works standalone, using
-`keystore_status()`, `unlock_keystore()` (run scrypt via
-`asyncio.to_thread` — it is deliberately slow), `lock_keystore()`, and the
-Step-2 `initialize_privacy_keystore()`. Copy
-`~/git/comfyui-helto-director/routes/privacy.py` — it is exactly this.
+**Frontend: import the served module — do not copy dialog code into the
+pack.**
 
-**Frontend:** copy the token handling from
-`~/git/comfyui-helto-director/web/timeline/privacy.js`: token in
-localStorage key `helto_privacy_token` + same-named cookie
-(`SameSite=Lax; path=/`), attach the header on fetch/XHR, store the token
-returned by unlock/init, clear both on lock. Detect locked state by matching
-`PRIVACY_LOCKED` / `PRIVACY_TOKEN_REQUIRED` in error messages. For the
-unlock dialog either copy
-`web/timeline/privacy_unlock.js` (self-contained, ~170 lines) or show
-"Unlock via Timeline Director → Global Settings" — because the token storage
-keys are shared per origin, a Director unlock immediately works for this
-pack's frontend too.
+```js
+let privacy = null;
+try {
+  privacy = await import("/helto_privacy/ui/privacy.js");
+} catch {
+  /* package not installed server-side: show
+     "Unlock via Timeline Director → Global Settings" instead. */
+}
+
+// When an operation fails with a locked error:
+if (privacy?.isPrivacyLockedError(error)) {
+  const unlocked = await privacy.showPrivacyKeystoreDialog("auto");
+  if (unlocked) retryTheOperation();
+}
+
+// Before rendering privacy-mode <img>/media elements:
+privacy?.ensureStoredPrivacyTokenCookie();
+```
+
+`showPrivacyKeystoreDialog("auto")` picks setup vs unlock from keystore
+status and resolves immediately if already unlocked; explicit modes
+`"unlock"`, `"setup"`, `"change"` exist for settings-menu buttons. The module
+also exports `fetchPrivacyStatus`, `lockPrivacyKeystore`,
+`getStoredPrivacyToken` (attach as `X-Helto-Privacy-Token` on the pack's own
+fetch/XHR calls), and `isPrivacyLockedError`. Token storage is per origin, so
+an unlock through any pack — or the Timeline Director — covers this pack too.
 
 ## Step 5 — Tests (non-negotiable hygiene)
 
