@@ -66,7 +66,7 @@ Then pick your case:
 Add to the pack's `requirements.txt` (create it if missing):
 
 ```
-helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.2.0
+helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.3.0
 cryptography>=42.0
 ```
 
@@ -203,7 +203,86 @@ also exports `fetchPrivacyStatus`, `lockPrivacyKeystore`,
 fetch/XHR calls), and `isPrivacyLockedError`. Token storage is per origin, so
 an unlock through any pack — or the Timeline Director — covers this pack too.
 
-## Step 5 — Tests (non-negotiable hygiene)
+## Step 5 — Privacy Recovery
+
+Register privacy recovery descriptors from the pack frontend after importing
+the shared module. The shared package owns scanning the loaded graph, showing
+the recovery dialog, applying safe resets/encryption, and marking the graph
+dirty. The pack only describes its nodes and sensitive controls:
+
+```js
+const privacy = await import("/helto_privacy/ui/privacy.js");
+
+privacy.registerPrivacyRecoveryDescriptors("comfyui-utils", [
+  {
+    nodeType: "HeltoImageSelector",
+    label: "Helto Multi-Image Selector",
+    schema: "helto.comfyui-utils",
+    privacy: { property: "privacyMode", default: true },
+    fields: [
+      { kind: "widget", name: "selected_images", defaultValue: "[]", sensitive: true, resetOnlyForLegacy: true },
+      { kind: "widget", name: "edited_masks", defaultValue: "{}", sensitive: true, resetOnlyForLegacy: true },
+      { kind: "widget", name: "edited_bboxes", defaultValue: "{}", sensitive: true, resetOnlyForLegacy: true },
+    ],
+    reencrypt: async (plaintext) => selectorApi.encrypt(plaintext),
+  },
+]);
+```
+
+Descriptors can match by `nodeType`/`nodeTypes` or a custom `match(node)`
+function. Fields may target `{ kind: "widget", name }` or
+`{ kind: "property", name }`, with optional `schema`, `schemas`,
+`reencrypt`, `runtimeProperty`, `runtimeProperties`, and
+`clearRuntimeState(node, context)`. Defaults are used for reset recovery;
+`resetOnlyForLegacy: true` limits reset actions to legacy or incompatible
+encrypted values for that field. Non-sensitive operational settings are left
+untouched.
+
+Use the shared dialog for manual or automatic recovery entry points:
+
+```js
+await privacy.showPrivacyRecoveryDialog({ mode: "manual" });
+```
+
+The dialog reports issue counts and node/control labels only. It must never
+show plaintext field contents. The scanner handles:
+
+- legacy `__HELTO_ENC__:` values
+- encrypted-looking JSON that does not match the registered schema
+- plaintext sensitive values while privacy is enabled
+- missing privacy defaults on privacy-capable nodes
+- locked/uninitialized encryption during re-encrypt recovery
+
+Old legacy values without a pack-supplied migration adapter are reset-only.
+Do not try to decrypt or display them in the browser.
+
+Replace fail-open serialization helpers with the shared fail-closed helper.
+If privacy is enabled and encryption fails, this helper opens the shared
+unlock/setup dialog, retries once, then throws a privacy error. Do not catch
+that error and write plaintext.
+
+```js
+selectedImagesWidget.serializeValue = async () => {
+  const plaintext = JSON.stringify(node.selectedPaths || []);
+  return privacy.ensureEncryptedPrivacyValue({
+    owner: node,
+    fieldName: "selected_images",
+    value: plaintext,
+    privacyMode: node.properties?.privacyMode !== false,
+    schema: "helto.comfyui-utils",
+    defaultValue: "[]",
+    encrypt: async (value) => selectorApi.encrypt(value),
+  });
+};
+```
+
+When privacy is disabled, `ensureEncryptedPrivacyValue(...)` returns the
+plaintext serialization and clears its runtime memo. When privacy is enabled,
+it accepts only a valid envelope for the registered schema; otherwise it
+blocks with `PRIVACY_ENCRYPTION_FAILED` or
+`PRIVACY_ENCRYPTION_UNAVAILABLE`.
+
+## Step 6 — Tests (non-negotiable hygiene)
 
 A test run once minted a real key file inside a repo's `config/` and it
 nearly got committed. Every adopting pack must add an **autouse** fixture
@@ -240,7 +319,7 @@ Rules:
   manual testing. Stage paths explicitly and check `git log -p` for anything
   resembling `"key"`/`"wrapped_key"` values before pushing.
 
-## Step 6 — Validation checklist
+## Step 7 — Validation checklist
 
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real

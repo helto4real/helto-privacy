@@ -106,7 +106,7 @@ For each Helto node pack:
 1. Add:
 
    ```text
-   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.2.0
+   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.3.0
    cryptography>=42.0
    ```
 
