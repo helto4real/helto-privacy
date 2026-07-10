@@ -63,6 +63,7 @@ def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path):
     first_count = len(server.routes.paths)
     assert first_count >= 6
     assert ("GET", comfy_ui.UI_MODULE_ROUTE) in server.routes.paths
+    assert ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}") in server.routes.paths
 
     # A second pack registering only contributes its legacy dir.
     assert register_helto_privacy_ui(tmp_path / "pack_b", prompt_server=server) is True
@@ -139,6 +140,8 @@ def test_collect_legacy_keys_skips_malformed_and_duplicate_files(tmp_path):
 def test_ui_module_ships_in_package():
     source = (comfy_ui._WEB_DIR / "privacy_ui.js").read_text(encoding="utf-8")
     assert "export async function showPrivacyKeystoreDialog" in source
+    assert "export async function connectPrivacyPack" in source
+    assert 'export const PRIVACY_CONTRACT_V2 = "helto.privacy.v2"' in source
     assert "/helto_privacy" in source
     assert "helto_privacy_token" in source
     assert "X-Helto-Privacy-Token" in source

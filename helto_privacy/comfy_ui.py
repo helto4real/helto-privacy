@@ -8,6 +8,7 @@ later calls only contribute their legacy key directory.
 Registered surface (pack-neutral, stable):
 
 - ``GET  /helto_privacy/status``
+- ``GET  /helto_privacy/profiles/{pack_id}`` — safe profile attestation
 - ``POST /helto_privacy/unlock`` / ``/lock``
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
@@ -87,6 +88,23 @@ def register_helto_privacy_ui(
     @routes.get(f"{ROUTE_PREFIX}/status")
     async def get_helto_privacy_status(_request):
         return web.json_response({"ok": True, **keystore.keystore_status()})
+
+    @routes.get(f"{ROUTE_PREFIX}/profiles/{{pack_id}}")
+    async def get_helto_privacy_profile(request):
+        from .runtime import PackBlockedError, profile_attestation
+
+        try:
+            result = profile_attestation(str(request.match_info.get("pack_id") or ""))
+            return web.json_response(
+                {"ok": True, **result},
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return web.json_response(
+                {"ok": False, "error": "PRIVACY_PROFILE_UNAVAILABLE"},
+                status=404,
+                headers={"Cache-Control": "no-store"},
+            )
 
     @routes.post(f"{ROUTE_PREFIX}/unlock")
     async def post_helto_privacy_unlock(request):

@@ -3,6 +3,70 @@
 Shared privacy keystore, envelope, and HTTP token-guard helpers for Helto
 ComfyUI node packs.
 
+## Atomic Privacy Profiles
+
+Consumer packs declare product facts once and bind every required server
+adapter atomically. The fixed contract returns typed handles and blocks partial
+or conflicting installations; privacy policy, codecs, keys, and credentials
+are not adapter seams.
+
+```python
+from helto_privacy import (
+    AdapterSlot,
+    PrivacyProfile,
+    ProfileResource,
+    ResourceKind,
+    install,
+)
+
+profile = PrivacyProfile(
+    id="helto.example",
+    distribution="comfyui-helto-example",
+    resources=(
+        ProfileResource(
+            "editor-state",
+            ResourceKind.WORKFLOW,
+            adapter_slots=("editor-state-adapter", "editor-state-editor"),
+        ),
+    ),
+    server_adapters=(
+        AdapterSlot(
+            "editor-state-adapter",
+            ResourceKind.WORKFLOW,
+            "editor-state",
+        ),
+    ),
+    browser_adapters=(
+        AdapterSlot(
+            "editor-state-editor",
+            ResourceKind.WORKFLOW,
+            "editor-state",
+            node_types=("HeltoExample",),
+        ),
+    ),
+)
+
+privacy = install(profile, {"editor-state-adapter": product_adapter})
+workflow = privacy.workflow("editor-state")
+privacy.readiness.require_ready()
+```
+
+The shared browser module uses the same profile fingerprint:
+
+```javascript
+const privacy = await connectPrivacyPack({
+  app,
+  packId: "helto.example",
+  contract: PRIVACY_CONTRACT_V2,
+  profileFingerprint,
+  adapters: { "editor-state-editor": editorAdapter },
+})
+```
+
+`connectPrivacyPack` attests the server declaration before registering the one
+shared ComfyUI extension. It reconciles existing, newly created, and loaded
+nodes and remains blocked if fingerprints, adapter slots, or readiness drift.
+
 ## File Contract
 
 The keystore format is intentionally stable:
