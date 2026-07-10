@@ -6,6 +6,7 @@ import hmac
 from typing import Any, Mapping
 
 from . import keystore
+from .suite_runtime import SuiteBlockedError, require_active_process_suite
 
 
 PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token"
@@ -15,11 +16,9 @@ PRIVACY_TOKEN_COOKIE = "helto_privacy_token"
 def check_privacy_token(request: Any) -> dict[str, Any] | None:
     """Return None when allowed, otherwise a small HTTP error description."""
     try:
-        keystore._require_active_suite()
-    except keystore.PrivacyKeystoreError as exc:
-        if str(exc).startswith("PRIVACY_SUITE_BLOCKED:"):
-            return {"status": 409, "error": "PRIVACY_SUITE_BLOCKED"}
-        raise
+        require_active_process_suite()
+    except SuiteBlockedError:
+        return {"status": 409, "error": "PRIVACY_SUITE_BLOCKED"}
     if not keystore.keystore_exists():
         return None
     expected = keystore.session_token()

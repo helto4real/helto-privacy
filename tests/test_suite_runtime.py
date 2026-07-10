@@ -249,6 +249,9 @@ def test_failed_installation_requires_a_fresh_process_before_activation():
     assert repaired.status is SuiteStatus.MISMATCH
     assert repaired.issue_codes == ("process_restart_required",)
 
+    changed_generation = replace(exact, installation_generation="e" * 64)
+    assert changed_generation.digest != exact.digest
+
 
 def test_process_gate_blocks_missing_pending_and_conflicting_suites(monkeypatch):
     import helto_privacy.suite_runtime as suite_runtime

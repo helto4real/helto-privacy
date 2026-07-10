@@ -12,8 +12,8 @@ That gives the intended lifetime: unlock survives browser refreshes and
 ComfyUI restarts, and expires with the machine session.
 
 The cryptographic mechanics remain independent of ComfyUI. Public mutation and
-secret/session reads lazily consult the exact-suite activation gate so
-verification mode cannot use this module as a bypass.
+secret/session reads consult the exact-suite activation gate so verification
+mode cannot use this module as a bypass.
 """
 
 from __future__ import annotations
@@ -25,6 +25,8 @@ import secrets
 import tempfile
 from pathlib import Path
 from typing import Any
+
+from .suite_runtime import require_active_process_suite
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -112,7 +114,7 @@ def initialize_keystore(
     ``legacy_keys`` are (key_id, key) pairs imported as decrypt-only entries
     so envelopes written by the old plaintext key files stay readable.
     """
-    _require_active_suite()
+    require_active_process_suite()
     _require_crypto()
     password = _valid_password(password)
     path = keystore_path()
@@ -154,7 +156,7 @@ def initialize_keystore(
 
 
 def unlock_keystore(password: str) -> dict[str, Any]:
-    _require_active_suite()
+    require_active_process_suite()
     _require_crypto()
     payload = _load_keystore()
     kdf = payload.get("kdf") or {}
@@ -208,7 +210,7 @@ def lock_keystore() -> dict[str, Any]:
 
 
 def change_keystore_password(current_password: str, new_password: str) -> dict[str, Any]:
-    _require_active_suite()
+    require_active_process_suite()
     _require_crypto()
     new_password = _valid_password(new_password)
     # Re-verify the current password against the file rather than trusting
@@ -247,7 +249,7 @@ def add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[s
     The password is verified against the on-disk keystore, duplicate key IDs
     are ignored, and the refreshed session contains every decryptable key.
     """
-    _require_active_suite()
+    require_active_process_suite()
     _require_crypto()
     unlock_keystore(password)
     payload = _load_keystore()
@@ -283,7 +285,7 @@ def add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[s
 
 def rotate_primary_key(password: str) -> dict[str, Any]:
     """Generate a fresh primary key and keep older keys for decryption."""
-    _require_active_suite()
+    require_active_process_suite()
     _require_crypto()
     unlock_keystore(password)
     payload = _load_keystore()
@@ -311,14 +313,14 @@ def rotate_primary_key(password: str) -> dict[str, Any]:
 
 def primary_session_key() -> tuple[bytes, str]:
     """Return (key, key_id) for encryption, or raise a locked/uninitialized error."""
-    _require_active_suite()
+    require_active_process_suite()
     session = _require_session()
     key_id = session["primary_key_id"]
     return session["keys"][key_id], key_id
 
 
 def session_key_for(key_id: str) -> bytes | None:
-    _require_active_suite()
+    require_active_process_suite()
     session = _read_session()
     if session is None:
         return None
@@ -326,18 +328,9 @@ def session_key_for(key_id: str) -> bytes | None:
 
 
 def session_token() -> str | None:
-    _require_active_suite()
+    require_active_process_suite()
     session = _read_session()
     return session["token"] if session else None
-
-
-def _require_active_suite() -> None:
-    from .suite_runtime import SuiteBlockedError, require_active_process_suite
-
-    try:
-        require_active_process_suite()
-    except SuiteBlockedError as exc:
-        raise PrivacyKeystoreError(f"PRIVACY_SUITE_BLOCKED:{exc.code}") from None
 
 
 def _require_crypto() -> None:

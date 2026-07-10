@@ -98,7 +98,6 @@ class ActivationRecord:
     authorization_signature: str
     previous_suite_id: str | None
     rollback: RollbackClass
-    reactivation_required: bool = False
 
     def __post_init__(self) -> None:
         _require_sha256(self.manifest_digest, "invalid_activation_manifest")
@@ -119,14 +118,14 @@ class ActivationRecord:
             _require_stable_id(self.previous_suite_id, "invalid_previous_suite")
         if not isinstance(self.rollback, RollbackClass):
             raise SuiteActivationError("invalid_rollback_class")
-        if not isinstance(self.reactivation_required, bool):
-            raise SuiteActivationError("invalid_reactivation_state")
 
 
 class ActivationRecordStore(Protocol):
     def load(self) -> ActivationRecord | None: ...
 
     def commit(self, record: ActivationRecord) -> None: ...
+
+    def block(self, record: ActivationRecord) -> None: ...
 
 
 class FileActivationRecordStore:
@@ -156,7 +155,6 @@ class FileActivationRecordStore:
                     else None
                 ),
                 rollback=RollbackClass(str(payload["rollback"])),
-                reactivation_required=payload.get("reactivationRequired", False),
             )
         except (OSError, KeyError, TypeError, ValueError):
             raise SuiteActivationError("activation_record_invalid") from None
@@ -175,7 +173,6 @@ class FileActivationRecordStore:
                 "authorizationSignature": record.authorization_signature,
                 "previousSuiteId": record.previous_suite_id,
                 "rollback": record.rollback.value,
-                "reactivationRequired": record.reactivation_required,
             }
         )
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -202,6 +199,25 @@ class FileActivationRecordStore:
             except OSError:
                 pass
             raise SuiteActivationError("activation_record_commit_failed") from None
+
+    def block(self, record: ActivationRecord) -> None:
+        """Atomically quarantine an activation while retaining its boundary."""
+
+        if not isinstance(record, ActivationRecord):
+            raise SuiteActivationError("invalid_activation_record")
+        blocked_path = self._path.with_name(
+            f"{self._path.name}.blocked.{record.authorization_id}"
+        )
+        try:
+            os.replace(self._path, blocked_path)
+            os.chmod(blocked_path, 0o600)
+            directory_fd = os.open(self._path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except Exception:
+            raise SuiteActivationError("activation_record_block_failed") from None
 
 
 def sign_activation_authorization(

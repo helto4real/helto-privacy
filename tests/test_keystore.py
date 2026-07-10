@@ -14,6 +14,7 @@ from helto_privacy.keystore import (
     KEYSTORE_CRYPTO_AVAILABLE,
     PrivacyKeystoreError,
 )
+from helto_privacy.suite_runtime import SuiteBlockedError
 
 pytestmark = pytest.mark.skipif(
     not KEYSTORE_CRYPTO_AVAILABLE,
@@ -58,7 +59,7 @@ def test_direct_keystore_writers_and_secret_reads_require_active_suite(
 ):
     monkeypatch.setattr(
         keystore,
-        "_require_active_suite",
+        "require_active_process_suite",
         isolated_privacy_paths[2],
     )
 
@@ -73,11 +74,9 @@ def test_direct_keystore_writers_and_secret_reads_require_active_suite(
         keystore.session_token,
     )
     for operation in blocked_operations:
-        with pytest.raises(
-            PrivacyKeystoreError,
-            match="PRIVACY_SUITE_BLOCKED:suite_incomplete",
-        ):
+        with pytest.raises(SuiteBlockedError) as blocked:
             operation()
+        assert blocked.value.code == "suite_incomplete"
 
     assert keystore.lock_keystore()["keystoreInitialized"] is False
 
@@ -86,10 +85,12 @@ def test_route_guard_blocks_before_keystore_initialization_when_suite_inactive(
     monkeypatch,
     isolated_privacy_paths,
 ):
+    import helto_privacy.guard as guard
+
     monkeypatch.setattr(
-        keystore,
-        "_require_active_suite",
-        isolated_privacy_paths[2],
+        guard,
+        "require_active_process_suite",
+        isolated_privacy_paths[3],
     )
 
     assert check_privacy_token(_FakeRequest()) == {

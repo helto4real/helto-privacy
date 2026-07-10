@@ -132,7 +132,8 @@ therefore still requires a new signed activation instead of replaying the old
 record.
 
 If an active installation later becomes incomplete, mismatched, or conflicting,
-the activation record is retained but marked for reactivation. The current
+the activation record is atomically quarantined: its rollback boundary is
+retained, but it is no longer eligible to restore active state. The current
 process remains latched blocked even after an in-process repair. Recovery must
 use `cui-stop`, exact offline repair, `cui-start`, a full browser reload, and a
 new explicit activation; hot repair never restores writers.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import platform
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
@@ -421,10 +422,6 @@ class SuiteInstallation:
                 SuiteStatus.CONFLICT,
                 "rollback_boundary_mismatch",
             )
-        if record.reactivation_required:
-            return self._set_reactivation_required(
-                "explicit_reactivation_required",
-            )
         return self._set_status(SuiteStatus.ACTIVE)
 
     def _set_blocked_status(
@@ -439,7 +436,7 @@ class SuiteInstallation:
         except SuiteActivationError:
             return self._set_status(
                 SuiteStatus.CONFLICT,
-                "reactivation_marker_commit_failed",
+                "activation_record_block_failed",
             )
         return report
 
@@ -452,7 +449,7 @@ class SuiteInstallation:
         except SuiteActivationError:
             return self._set_status(
                 SuiteStatus.CONFLICT,
-                "reactivation_marker_commit_failed",
+                "activation_record_block_failed",
             )
         return self._set_status(SuiteStatus.ACTIVATION_REQUIRED, issue_code)
 
@@ -461,18 +458,12 @@ class SuiteInstallation:
             return
         try:
             record = self._activation_store.load()
-            if (
-                record is not None
-                and record.manifest_digest == self.manifest.digest
-                and not record.reactivation_required
-            ):
-                self._activation_store.commit(
-                    replace(record, reactivation_required=True)
-                )
+            if record is not None and record.manifest_digest == self.manifest.digest:
+                self._activation_store.block(record)
         except SuiteActivationError:
             raise
         except Exception:
-            raise SuiteActivationError("reactivation_marker_commit_failed") from None
+            raise SuiteActivationError("activation_record_block_failed") from None
 
     def _set_status(
         self,
@@ -630,8 +621,7 @@ def measure_installed_suite(
         try:
             if not path.is_file():
                 continue
-            digest = _sha256_file(path)
-            stat = path.stat()
+            digest, stat = _measure_file(path)
         except OSError:
             continue
         measured_artifacts.append(
@@ -676,12 +666,30 @@ def measure_installed_suite(
     )
 
 
-def _sha256_file(path: Path) -> str:
+def _measure_file(path: Path) -> tuple[str, os.stat_result]:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
+        before = os.fstat(handle.fileno())
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
-    return digest.hexdigest()
+        after = os.fstat(handle.fileno())
+    before_identity = (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    )
+    after_identity = (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    )
+    if before_identity != after_identity:
+        raise SuiteInventoryError("artifact_changed_during_measurement")
+    return digest.hexdigest(), after
 
 
 def register_process_suite(installation: SuiteInstallation) -> SuiteInstallation:
