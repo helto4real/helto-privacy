@@ -411,7 +411,8 @@ class SuiteInstallation:
                     SuiteStatus.MISMATCH,
                     "activation_inventory_mismatch",
                 )
-            return self._set_reactivation_required(
+            return self._set_status_after_quarantine(
+                SuiteStatus.ACTIVATION_REQUIRED,
                 "installation_generation_changed",
             )
         if (
@@ -437,22 +438,13 @@ class SuiteInstallation:
         self._restart_required = True
         return self._set_status_after_quarantine(status, issue_code)
 
-    def _set_reactivation_required(
-        self,
-        issue_code: str,
-    ) -> SuiteReadinessReport:
-        return self._set_status_after_quarantine(
-            SuiteStatus.ACTIVATION_REQUIRED,
-            issue_code,
-        )
-
     def _set_status_after_quarantine(
         self,
         status: SuiteStatus,
         issue_code: str,
     ) -> SuiteReadinessReport:
         try:
-            self._mark_reactivation_required()
+            self._quarantine_activation_record()
         except SuiteActivationError:
             return self._set_status(
                 SuiteStatus.CONFLICT,
@@ -460,7 +452,7 @@ class SuiteInstallation:
             )
         return self._set_status(status, issue_code)
 
-    def _mark_reactivation_required(self) -> None:
+    def _quarantine_activation_record(self) -> None:
         if self._activation_store is None:
             return
         try:
