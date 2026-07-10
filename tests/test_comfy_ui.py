@@ -1,4 +1,6 @@
 import json
+import sys
+import types
 
 import pytest
 
@@ -56,8 +58,10 @@ def _legacy_key_file(directory, codec_schema="helto.test-pack"):
     return envelope
 
 
-def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path):
-    pytest.importorskip("aiohttp", reason="route registration needs aiohttp (provided by ComfyUI)")
+def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path, monkeypatch):
+    aiohttp = types.ModuleType("aiohttp")
+    aiohttp.web = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
     server = _FakePromptServer()
     assert register_helto_privacy_ui(tmp_path / "pack_a", prompt_server=server) is True
     first_count = len(server.routes.paths)

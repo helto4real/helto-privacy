@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 import helto_privacy.runtime as runtime
@@ -84,6 +86,8 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
                 "editor-value",
                 "editor-state",
                 "test-scope",
+                "editor-state-adapter",
+                "editor-state-browser",
                 ("HeltoTest",),
                 FieldLocation(FieldLocationKind.WIDGET, "state"),
                 "helto.test.state.v1",
@@ -106,6 +110,7 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
                 "preview",
                 "test-scope",
                 "test-preview",
+                "preview-adapter",
                 1,
                 ArtifactRetention.REGENERABLE_CACHE,
                 ("preview",),
@@ -117,13 +122,21 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
                 "dispatch",
                 "editor-state",
                 "dispatch-adapter",
+                "dispatch-adapter",
             ),
         ),
     )
 
 
 def _adapters(profile):
-    return {slot.id: object() for slot in reversed(profile.server_adapters)}
+    return {
+        adapter_id: SimpleNamespace(
+            **{method: (lambda: None) for method in methods}
+        )
+        for adapter_id, methods in reversed(
+            tuple(profile.server_adapter_contracts.items())
+        )
+    }
 
 
 def test_install_is_atomic_typed_and_idempotent():
@@ -165,6 +178,18 @@ def test_missing_or_unknown_adapters_do_not_partially_install():
     assert profile.id not in runtime._INSTALLATIONS
 
     assert install(profile, _adapters(profile)).profile is profile
+
+
+def test_install_rejects_adapter_without_fixed_contract_methods():
+    profile = _profile(pack_id="helto.adapter-contract")
+    adapters = _adapters(profile)
+    adapters["library-adapter"] = object()
+
+    with pytest.raises(AdapterBindingError) as exc_info:
+        install(profile, adapters)
+
+    assert exc_info.value.code == "adapter_contract_mismatch"
+    assert profile.id not in runtime._INSTALLATIONS
 
 
 def test_conflict_blocks_the_existing_pack_with_sanitized_diagnostics():
@@ -220,7 +245,17 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
         "fingerprint": first.fingerprint,
         "status": "ready",
         "requiredBrowserAdapters": [
-            {"id": "editor-state-browser", "nodeTypes": ["HeltoTest"]},
+            {
+                "id": "editor-state-browser",
+                "nodeTypes": ["HeltoTest"],
+                "methods": [
+                    "apply",
+                    "clear",
+                    "normalize",
+                    "reconcileNode",
+                    "reconcileNodeDefinition",
+                ],
+            },
         ],
         "resources": [
             {"id": "preview", "kind": "artifact"},

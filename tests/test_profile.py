@@ -63,6 +63,8 @@ def test_profile_fingerprint_is_stable_and_order_independent():
                 id="timeline-state",
                 workflow_resource_id="timeline",
                 scope_id="project",
+                state_adapter="timeline-runtime",
+                browser_adapter="timeline-editor",
                 node_types=("HeltoTimeline",),
                 location=FieldLocation(FieldLocationKind.WIDGET, "timeline_data"),
                 current_schema="helto.director.timeline.v2",
@@ -73,7 +75,9 @@ def test_profile_fingerprint_is_stable_and_order_independent():
         ),
     )
 
-    assert profile.fingerprint == "72bb529f716d344676041442d71ed612290e92876efd52eaad615a4dbf116eac"
+    assert profile.fingerprint == (
+        "82bfaface2555793b30c64881b16c76fb56fb32d59417fe298f2f9a1e2db328d"
+    )
 
     reordered = PrivacyProfile(
         id="helto.director",
@@ -180,11 +184,23 @@ def test_profile_rejects_protected_field_without_matching_browser_binding():
             distribution="comfyui-helto-browser-drift",
             resources=(
                 ProfileResource("privacy-mode", ResourceKind.MODE, ("mode-source",)),
-                ProfileResource("editor", ResourceKind.WORKFLOW, ("editor-runtime",)),
+                ProfileResource(
+                    "editor",
+                    ResourceKind.WORKFLOW,
+                    ("editor-browser", "editor-runtime"),
+                ),
             ),
             server_adapters=(
                 AdapterSlot("mode-source", ResourceKind.MODE, "privacy-mode"),
                 AdapterSlot("editor-runtime", ResourceKind.WORKFLOW, "editor"),
+            ),
+            browser_adapters=(
+                AdapterSlot(
+                    "editor-browser",
+                    ResourceKind.WORKFLOW,
+                    "editor",
+                    ("DifferentNode",),
+                ),
             ),
             scopes=(PrivacyScope("editor", "privacy-mode", "mode-source"),),
             protected_fields=(
@@ -192,6 +208,8 @@ def test_profile_rejects_protected_field_without_matching_browser_binding():
                     "editor-state",
                     "editor",
                     "editor",
+                    "editor-runtime",
+                    "editor-browser",
                     ("HeltoEditor",),
                     FieldLocation(FieldLocationKind.WIDGET, "state"),
                     "helto.editor.v1",
@@ -201,3 +219,27 @@ def test_profile_rejects_protected_field_without_matching_browser_binding():
         )
 
     assert exc_info.value.code == "field_browser_binding_mismatch"
+
+
+def test_profile_rejects_browser_adapter_used_as_server_mode_source():
+    with pytest.raises(ProfileValidationError) as exc_info:
+        PrivacyProfile(
+            id="helto.wrong-side",
+            distribution="comfyui-helto-wrong-side",
+            resources=(
+                ProfileResource("privacy-mode", ResourceKind.MODE, ("mode-browser",)),
+            ),
+            browser_adapters=(
+                AdapterSlot(
+                    "mode-browser",
+                    ResourceKind.MODE,
+                    "privacy-mode",
+                    ("HeltoWrongSide",),
+                ),
+            ),
+            scopes=(
+                PrivacyScope("wrong-side", "privacy-mode", "mode-browser"),
+            ),
+        )
+
+    assert exc_info.value.code == "resource_adapter_mismatch"

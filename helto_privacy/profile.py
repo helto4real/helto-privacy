@@ -65,6 +65,7 @@ class PrivacyScope:
     id: str
     mode_resource_id: str
     mode_source_adapter: str
+    mode_editor_adapter: str | None = None
     parent_id: str | None = None
     floor_scope_ids: tuple[str, ...] = ()
 
@@ -72,6 +73,8 @@ class PrivacyScope:
         _validate_stable_id(self.id)
         _validate_stable_id(self.mode_resource_id)
         _validate_stable_id(self.mode_source_adapter)
+        if self.mode_editor_adapter is not None:
+            _validate_stable_id(self.mode_editor_adapter)
         if self.parent_id is not None:
             _validate_stable_id(self.parent_id)
         object.__setattr__(
@@ -102,6 +105,8 @@ class ProtectedField:
     id: str
     workflow_resource_id: str
     scope_id: str
+    state_adapter: str
+    browser_adapter: str
     node_types: tuple[str, ...]
     location: FieldLocation
     current_schema: str
@@ -114,6 +119,8 @@ class ProtectedField:
             self.id,
             self.workflow_resource_id,
             self.scope_id,
+            self.state_adapter,
+            self.browser_adapter,
             self.current_schema,
             self.purpose,
         ):
@@ -166,12 +173,19 @@ class ArtifactDeclaration:
     resource_id: str
     scope_id: str
     purpose: str
+    payload_adapter: str
     format_version: int
     retention: ArtifactRetention
     operations: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        for value in (self.id, self.resource_id, self.scope_id, self.purpose):
+        for value in (
+            self.id,
+            self.resource_id,
+            self.scope_id,
+            self.purpose,
+            self.payload_adapter,
+        ):
             _validate_stable_id(value)
         if (
             not isinstance(self.format_version, int)
@@ -208,13 +222,15 @@ class SemanticExecutionProjection:
     id: str
     execution_resource_id: str
     workflow_resource_id: str
-    adapter_slot: str
+    projection_adapter: str
+    dispatch_adapter: str
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
         _validate_stable_id(self.execution_resource_id)
         _validate_stable_id(self.workflow_resource_id)
-        _validate_stable_id(self.adapter_slot)
+        _validate_stable_id(self.projection_adapter)
+        _validate_stable_id(self.dispatch_adapter)
 
 
 @dataclass(frozen=True, slots=True)
@@ -392,10 +408,30 @@ class PrivacyProfile:
             self.execution_projections,
             "duplicate_execution_projection",
         )
+        server_adapter_ids = {adapter.id for adapter in self.server_adapters}
+        browser_adapter_ids = {adapter.id for adapter in self.browser_adapters}
+        used_server_adapters: set[str] = set()
+        used_browser_adapters: set[str] = set()
 
         for scope in scopes.values():
-            _require_resource_kind(resources, scope.mode_resource_id, ResourceKind.MODE)
-            _require_resource_adapter(resources[scope.mode_resource_id], adapters, scope.mode_source_adapter)
+            resource = _require_resource_kind(
+                resources,
+                scope.mode_resource_id,
+                ResourceKind.MODE,
+            )
+            _require_adapter_side(
+                resource,
+                scope.mode_source_adapter,
+                server_adapter_ids,
+            )
+            used_server_adapters.add(scope.mode_source_adapter)
+            if scope.mode_editor_adapter is not None:
+                _require_adapter_side(
+                    resource,
+                    scope.mode_editor_adapter,
+                    browser_adapter_ids,
+                )
+                used_browser_adapters.add(scope.mode_editor_adapter)
             for related_scope in (scope.parent_id, *scope.floor_scope_ids):
                 if related_scope is not None and related_scope not in scopes:
                     raise ProfileValidationError("unknown_scope_reference")
@@ -409,13 +445,19 @@ class PrivacyProfile:
             )
             if protected_field.scope_id not in scopes:
                 raise ProfileValidationError("unknown_scope_reference")
-            browser_adapter_ids = {adapter.id for adapter in self.browser_adapters}
-            browser_node_types = {
-                node_type
-                for adapter_id in resource.adapter_slots
-                if adapter_id in browser_adapter_ids
-                for node_type in adapters[adapter_id].node_types
-            }
+            _require_adapter_side(
+                resource,
+                protected_field.state_adapter,
+                server_adapter_ids,
+            )
+            _require_adapter_side(
+                resource,
+                protected_field.browser_adapter,
+                browser_adapter_ids,
+            )
+            used_server_adapters.add(protected_field.state_adapter)
+            used_browser_adapters.add(protected_field.browser_adapter)
+            browser_node_types = set(adapters[protected_field.browser_adapter].node_types)
             if not set(protected_field.node_types).issubset(browser_node_types):
                 raise ProfileValidationError("field_browser_binding_mismatch")
 
@@ -423,18 +465,26 @@ class PrivacyProfile:
             resource = _require_resource_kind(resources, record.resource_id, ResourceKind.RECORD)
             if record.scope_id not in scopes:
                 raise ProfileValidationError("unknown_scope_reference")
-            _require_resource_adapter(resource, adapters, record.store_adapter)
+            _require_adapter_side(resource, record.store_adapter, server_adapter_ids)
+            used_server_adapters.add(record.store_adapter)
 
         for artifact in artifacts.values():
-            _require_resource_kind(resources, artifact.resource_id, ResourceKind.ARTIFACT)
+            resource = _require_resource_kind(
+                resources,
+                artifact.resource_id,
+                ResourceKind.ARTIFACT,
+            )
             if artifact.scope_id not in scopes:
                 raise ProfileValidationError("unknown_scope_reference")
+            _require_adapter_side(resource, artifact.payload_adapter, server_adapter_ids)
+            used_server_adapters.add(artifact.payload_adapter)
 
         for operation in operations.values():
             resource = resources.get(operation.resource_id)
             if resource is None:
                 raise ProfileValidationError("unknown_operation_resource")
-            _require_resource_adapter(resource, adapters, operation.adapter_slot)
+            _require_adapter_side(resource, operation.adapter_slot, server_adapter_ids)
+            used_server_adapters.add(operation.adapter_slot)
 
         for projection in projections.values():
             resource = _require_resource_kind(
@@ -447,7 +497,19 @@ class PrivacyProfile:
                 projection.workflow_resource_id,
                 ResourceKind.WORKFLOW,
             )
-            _require_resource_adapter(resource, adapters, projection.adapter_slot)
+            _require_adapter_side(
+                resource,
+                projection.projection_adapter,
+                server_adapter_ids,
+            )
+            _require_adapter_side(
+                resource,
+                projection.dispatch_adapter,
+                server_adapter_ids,
+            )
+            used_server_adapters.update(
+                (projection.projection_adapter, projection.dispatch_adapter)
+            )
 
         facts_by_kind = {
             ResourceKind.MODE: {scope.mode_resource_id for scope in scopes.values()},
@@ -463,6 +525,77 @@ class PrivacyProfile:
         for resource in resources.values():
             if resource.id not in facts_by_kind[resource.kind]:
                 raise ProfileValidationError("missing_resource_product_facts")
+
+        if used_server_adapters != server_adapter_ids:
+            raise ProfileValidationError("unused_server_adapter")
+        if used_browser_adapters != browser_adapter_ids:
+            raise ProfileValidationError("unused_browser_adapter")
+
+    @property
+    def server_adapter_contracts(self) -> dict[str, tuple[str, ...]]:
+        """Fixed method contract derived from typed server-side declarations."""
+
+        contracts: dict[str, set[str]] = {}
+        for scope in self.scopes:
+            _add_contract(
+                contracts,
+                scope.mode_source_adapter,
+                "read_declared_mode",
+                "write_declared_mode",
+            )
+        for field in self.protected_fields:
+            _add_contract(
+                contracts,
+                field.state_adapter,
+                "capture",
+                "normalize",
+                "apply_revealed",
+                "clear_plaintext",
+            )
+        for record in self.records:
+            _add_contract(
+                contracts,
+                record.store_adapter,
+                "list_ids",
+                "read_protected",
+                "write_protected",
+                "delete",
+            )
+        for artifact in self.artifacts:
+            _add_contract(contracts, artifact.payload_adapter, "encode", "decode")
+        for operation in self.protected_operations:
+            _add_contract(contracts, operation.adapter_slot, "invoke")
+        for projection in self.execution_projections:
+            _add_contract(contracts, projection.projection_adapter, "project")
+            _add_contract(contracts, projection.dispatch_adapter, "dispatch")
+        return {adapter_id: tuple(sorted(methods)) for adapter_id, methods in contracts.items()}
+
+    @property
+    def browser_adapter_contracts(self) -> dict[str, tuple[str, ...]]:
+        """Fixed method contract derived from typed browser declarations."""
+
+        contracts: dict[str, set[str]] = {}
+        for scope in self.scopes:
+            if scope.mode_editor_adapter is not None:
+                _add_contract(
+                    contracts,
+                    scope.mode_editor_adapter,
+                    "readDeclaredMode",
+                    "reconcileNode",
+                    "reconcileNodeDefinition",
+                    "writeDeclaredMode",
+                )
+        for field in self.protected_fields:
+            _add_contract(
+                contracts,
+                field.browser_adapter,
+                "apply",
+                "clear",
+                "normalize",
+                "reconcileNode",
+                "reconcileNodeDefinition",
+            )
+        return {adapter_id: tuple(sorted(methods)) for adapter_id, methods in contracts.items()}
 
     @property
     def fingerprint(self) -> str:
@@ -496,6 +629,7 @@ class PrivacyProfile:
                     "id": scope.id,
                     "modeResourceId": scope.mode_resource_id,
                     "modeSourceAdapter": scope.mode_source_adapter,
+                    "modeEditorAdapter": scope.mode_editor_adapter,
                     "parentId": scope.parent_id,
                     "floorScopeIds": list(scope.floor_scope_ids),
                 }
@@ -506,6 +640,8 @@ class PrivacyProfile:
                     "id": field.id,
                     "workflowResourceId": field.workflow_resource_id,
                     "scopeId": field.scope_id,
+                    "stateAdapter": field.state_adapter,
+                    "browserAdapter": field.browser_adapter,
                     "nodeTypes": list(field.node_types),
                     "location": {"kind": field.location.kind.value, "name": field.location.name},
                     "currentSchema": field.current_schema,
@@ -532,6 +668,7 @@ class PrivacyProfile:
                     "resourceId": artifact.resource_id,
                     "scopeId": artifact.scope_id,
                     "purpose": artifact.purpose,
+                    "payloadAdapter": artifact.payload_adapter,
                     "formatVersion": artifact.format_version,
                     "retention": artifact.retention.value,
                     "operations": list(artifact.operations),
@@ -551,7 +688,8 @@ class PrivacyProfile:
                     "id": projection.id,
                     "executionResourceId": projection.execution_resource_id,
                     "workflowResourceId": projection.workflow_resource_id,
-                    "adapterSlot": projection.adapter_slot,
+                    "projectionAdapter": projection.projection_adapter,
+                    "dispatchAdapter": projection.dispatch_adapter,
                 }
                 for projection in self.execution_projections
             ],
@@ -640,14 +778,21 @@ def _require_resource_kind(
     return resource
 
 
-def _require_resource_adapter(
+def _require_adapter_side(
     resource: ProfileResource,
-    adapters: dict[str, AdapterSlot],
     adapter_id: str,
+    allowed_adapter_ids: set[str],
 ) -> None:
-    adapter = adapters.get(adapter_id)
-    if adapter is None or adapter_id not in resource.adapter_slots:
+    if adapter_id not in allowed_adapter_ids or adapter_id not in resource.adapter_slots:
         raise ProfileValidationError("resource_adapter_mismatch")
+
+
+def _add_contract(
+    contracts: dict[str, set[str]],
+    adapter_id: str,
+    *methods: str,
+) -> None:
+    contracts.setdefault(adapter_id, set()).update(methods)
 
 
 def _validate_scope_cycles(scopes: dict[str, PrivacyScope]) -> None:

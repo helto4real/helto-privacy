@@ -250,7 +250,11 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
             "fingerprint": profile.fingerprint,
             "status": installation.status.value,
             "requiredBrowserAdapters": [
-                {"id": slot.id, "nodeTypes": list(slot.node_types)}
+                {
+                    "id": slot.id,
+                    "nodeTypes": list(slot.node_types),
+                    "methods": list(profile.browser_adapter_contracts[slot.id]),
+                }
                 for slot in profile.browser_adapters
             ],
             "resources": [
@@ -275,6 +279,10 @@ def _validate_adapter_bindings(
         raise AdapterBindingError("missing_adapter")
     if supplied_ids - expected:
         raise AdapterBindingError("unknown_adapter")
+    for adapter_id, methods in profile.server_adapter_contracts.items():
+        adapter = supplied[adapter_id]
+        if any(not callable(getattr(adapter, method, None)) for method in methods):
+            raise AdapterBindingError("adapter_contract_mismatch")
     return {slot_id: supplied[slot_id] for slot_id in sorted(expected)}
 
 

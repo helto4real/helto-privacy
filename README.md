@@ -46,7 +46,12 @@ profile = PrivacyProfile(
         ),
     ),
     scopes=(
-        PrivacyScope("example", "privacy-mode", "mode-source"),
+        PrivacyScope(
+            "example",
+            "privacy-mode",
+            "mode-source",
+            mode_editor_adapter="mode-editor",
+        ),
     ),
 )
 
@@ -75,6 +80,10 @@ const privacy = await connectPrivacyPack({
 `connectPrivacyPack` attests the server declaration before registering the one
 shared ComfyUI extension. It reconciles existing, newly created, and loaded
 nodes and remains blocked if fingerprints, adapter slots, or readiness drift.
+Server and browser method contracts are derived from the typed declarations;
+wrong-side, unused, missing, or method-incomplete adapters block atomically.
+`profile.server_adapter_contracts` and `profile.browser_adapter_contracts`
+provide the exact fixed method sets an adoption must implement.
 
 ## File Contract
 

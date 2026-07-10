@@ -173,6 +173,7 @@ export async function connectPrivacyPack({
     requirements: attestation.requiredBrowserAdapters.map((item) => Object.freeze({
       id: String(item.id),
       nodeTypes: Object.freeze([...item.nodeTypes]),
+      methods: Object.freeze([...item.methods]),
     })),
     resources: attestation.resources.map((item) => Object.freeze({
       id: String(item.id),
@@ -247,7 +248,14 @@ function validateServerAttestation({ id, contract, fingerprint, adapters, attest
     throw new PrivacyPackConnectionError("browser_adapter_mismatch");
   }
   for (const requirement of requirements) {
-    if (!Array.isArray(requirement.nodeTypes) || !adapters[requirement.id]) {
+    if (
+      !Array.isArray(requirement.nodeTypes)
+      || !Array.isArray(requirement.methods)
+      || !adapters[requirement.id]
+      || requirement.methods.some(
+        (method) => typeof adapters[requirement.id]?.[method] !== "function",
+      )
+    ) {
       throw new PrivacyPackConnectionError("browser_adapter_mismatch");
     }
   }

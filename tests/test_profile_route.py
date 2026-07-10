@@ -62,7 +62,12 @@ def _profile():
             ),
         ),
         scopes=(
-            PrivacyScope("route-test", "privacy-mode", "mode-server"),
+            PrivacyScope(
+                "route-test",
+                "privacy-mode",
+                "mode-server",
+                mode_editor_adapter="mode-browser",
+            ),
         ),
     )
 
@@ -85,7 +90,15 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_pat
     monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
 
     profile = _profile()
-    runtime.install(profile, {"mode-server": object()})
+    runtime.install(
+        profile,
+        {
+            "mode-server": types.SimpleNamespace(
+                read_declared_mode=lambda: None,
+                write_declared_mode=lambda: None,
+            ),
+        },
+    )
     prompt_server = types.SimpleNamespace(routes=_Routes())
     assert runtime.reconcile_prompt_server(prompt_server) is True
 

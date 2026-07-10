@@ -23,7 +23,17 @@ def run_node_module_test(tmp_path, body: str) -> None:
               contract: privacy.PRIVACY_CONTRACT_V2,
               fingerprint,
               status: "ready",
-              requiredBrowserAdapters: [{{ id: "timeline-editor", nodeTypes: ["HeltoTimeline"] }}],
+              requiredBrowserAdapters: [{{
+                id: "timeline-editor",
+                nodeTypes: ["HeltoTimeline"],
+                methods: [
+                  "apply",
+                  "clear",
+                  "normalize",
+                  "reconcileNode",
+                  "reconcileNodeDefinition",
+                ],
+              }}],
               resources: [
                 {{ id: "privacy-mode", kind: "mode" }},
                 {{ id: "timeline", kind: "workflow" }},
@@ -56,6 +66,9 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         const calls = [];
         const adapter = {
           secret: "MUST_NOT_ESCAPE",
+          apply() {},
+          clear() {},
+          normalize() {},
           reconcileNode(node, context) { calls.push([node.id, context.phase]); },
           reconcileNodeDefinition(_nodeType, nodeData, context) {
             calls.push([nodeData.name, context.phase]);
@@ -118,7 +131,10 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
           app,
           packId: "helto.director",
           profileFingerprint: fingerprint,
-          adapters: { "timeline-editor": {} },
+          adapters: { "timeline-editor": {
+            apply() {}, clear() {}, normalize() {},
+            reconcileNode() {}, reconcileNodeDefinition() {},
+          } },
         };
 
         await assert.rejects(
@@ -140,6 +156,14 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
         await assert.rejects(
           () => privacy.connectPrivacyPack({
             ...base,
+            adapters: { "timeline-editor": {} },
+            fetchProfile: async () => attestation(),
+          }),
+          (error) => error.code === "browser_adapter_mismatch",
+        );
+        await assert.rejects(
+          () => privacy.connectPrivacyPack({
+            ...base,
             fetchProfile: async () => attestation({ status: "waiting_for_prompt_server" }),
           }),
           (error) => error.code === "server_profile_not_ready",
@@ -153,7 +177,10 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
         tmp_path,
         """
         const app = { graph: { nodes: [] }, registerExtension() {} };
-        const adapter = {};
+        const adapter = {
+          apply() {}, clear() {}, normalize() {},
+          reconcileNode() {}, reconcileNodeDefinition() {},
+        };
         const pack = await privacy.connectPrivacyPack({
           app,
           packId: "helto.director",
@@ -166,7 +193,10 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
           app,
           packId: "helto.director",
           profileFingerprint: fingerprint,
-          adapters: { "timeline-editor": {} },
+          adapters: { "timeline-editor": {
+            apply() {}, clear() {}, normalize() {},
+            reconcileNode() {}, reconcileNodeDefinition() {},
+          } },
           fetchProfile: async () => attestation(),
         }), pack);
 
