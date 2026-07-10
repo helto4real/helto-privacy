@@ -123,7 +123,8 @@ def test_signed_manifest_requires_an_exact_trusted_signature():
         {"release-root-2026": private_key.public_key()},
     ) is manifest
 
-    tampered = replace(signed, signature="A" + signed.signature[1:])
+    replacement = "B" if signed.signature[0] == "A" else "A"
+    tampered = replace(signed, signature=replacement + signed.signature[1:])
     with pytest.raises(SuiteSignatureError) as exc_info:
         verify_suite_manifest(
             tampered,

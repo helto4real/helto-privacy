@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
@@ -14,6 +13,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from ._atomic_file import atomic_write_private_bytes, sync_parent_directory
 from ._suite_codec import (
     canonical_json_bytes,
     is_sha256,
@@ -175,25 +175,9 @@ class FileActivationRecordStore:
                 "rollback": record.rollback.value,
             }
         )
-        self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{self._path.name}.",
-            dir=self._path.parent,
-        )
         try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(payload)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, self._path)
-            os.chmod(self._path, 0o600)
-            _sync_parent_directory(self._path)
+            atomic_write_private_bytes(self._path, payload)
         except Exception:
-            try:
-                os.unlink(temp_name)
-            except OSError:
-                pass
             raise SuiteActivationError("activation_record_commit_failed") from None
 
     def block(self, record: ActivationRecord) -> None:
@@ -207,7 +191,7 @@ class FileActivationRecordStore:
         try:
             os.replace(self._path, blocked_path)
             os.chmod(blocked_path, 0o600)
-            _sync_parent_directory(blocked_path)
+            sync_parent_directory(blocked_path)
         except Exception:
             raise SuiteActivationError("activation_record_block_failed") from None
 
@@ -296,11 +280,3 @@ def _require_stable_id(value: object, code: str) -> None:
 def _require_utc_timestamp(value: object) -> None:
     if not is_utc_timestamp(value):
         raise SuiteActivationError("invalid_activation_timestamp")
-
-
-def _sync_parent_directory(path: Path) -> None:
-    directory_fd = os.open(path.parent, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)

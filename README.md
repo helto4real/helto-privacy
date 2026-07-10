@@ -1,7 +1,7 @@
 # helto-privacy
 
-Shared privacy keystore, envelope, and HTTP token-guard helpers for Helto
-ComfyUI node packs.
+Shared privacy authority, transitions, keystore, envelopes, and protected-route
+dispatch for Helto ComfyUI node packs.
 
 ## Atomic Privacy Profiles
 
@@ -95,6 +95,85 @@ wrong-side, unused, missing, or method-incomplete adapters block atomically.
 `profile.server_adapter_contracts` and `profile.browser_adapter_contracts`
 provide the exact fixed method sets an adoption must implement.
 
+## Server-authoritative Mode and Route Dispatch
+
+Every scope has a three-state declaration (`inherit`, `private`, or `public`),
+but only the server resolves its effective mode. Missing, malformed, and
+inherited declarations default private. An explicit public declaration applies
+only when no global, upstream, parent, record, artifact, execution, request, or
+current-state floor requires privacy.
+
+```python
+from helto_privacy import (
+    DeclaredPrivacyMode,
+    EffectivePrivacyMode,
+    ModeEvidence,
+    ModeFacts,
+)
+
+resolution = mode.resolve(
+    "example",
+    ModeFacts(
+        upstream=(
+            ModeEvidence("source-image", EffectivePrivacyMode.PRIVATE),
+        ),
+    ),
+)
+assert resolution.effective is EffectivePrivacyMode.PRIVATE
+```
+
+Mode changes are authorized transactions. Every state, record, and artifact
+adapter in the scope prepares first; shared policy then commits domain adapters
+in deterministic order and the mode source last. Any failure rolls back all
+attempted participants, preserves the prior established mode, and records a
+durable blocked transition. Save, queue, serving, and execution routes for that
+scope remain blocked across process restarts until the user explicitly restores
+the prior declaration or retries the same target. A new persistent privacy floor
+or an out-of-band declaration change also enters this blocked state; the server
+keeps reporting the prior established protection until the registered product
+surfaces have completed their rewrite. Request-only strengthening remains scoped
+to that operation.
+
+Adapters implement these product transformations; they never receive keys,
+tokens, or policy hooks:
+
+```python
+from helto_privacy import ModeTransitionContext
+
+def prepare_mode_transition(context: ModeTransitionContext): ...
+
+def commit_mode_transition(scope_id, transition_id): ...
+def rollback_mode_transition(scope_id, transition_id): ...  # idempotent
+```
+
+Protected routes use the bound authorization handle. It verifies exact-suite
+readiness, requires an initialized and unlocked keystore plus the current
+header/cookie token, checks durable transition state, and passes only an opaque
+pack- and operation-bound capability into product code:
+
+```python
+async def post_use_record(request):
+    async def use_record(authorization):
+        return await product_service.use_record(authorization)
+
+    return await privacy.authorization.dispatch(
+        request,
+        "example",
+        "record.use",
+        use_record,
+    )
+```
+
+Use `privacy.authorization.authorize_request(request, "mode.transition")` for
+protection changes. After showing the shared declassification warning and
+receiving explicit confirmation, the caller must add
+`X-Helto-Privacy-Declassification: confirmed` and call
+`privacy.authorization.authorize_declassification(request, scope_id, target)`.
+Its capability is session-, scope-, and target-bound and is consumed by one
+private-to-public attempt. A missing keystore is never authorization. All
+authorization, dispatch, mode-state, and transition failures are typed and
+product-data-free.
+
 ## Exact Suite Verification and Activation
 
 The five coordinated repositories are one privacy suite. Release tooling signs
@@ -153,12 +232,18 @@ The keystore format is intentionally stable:
   `HELTO_PRIVACY_KEYSTORE`.
 - Session file: `$XDG_RUNTIME_DIR/helto/privacy_session.json`, or
   `HELTO_PRIVACY_SESSION_DIR`.
+- Mode authority ledger: beside the keystore as `privacy_mode_state.json`, or
+  `HELTO_PRIVACY_MODE_STATE`. It stores only modes, declaration/floor IDs,
+  transition IDs/status, and adapter IDs; it never stores product values,
+  credentials, keys, or decrypted content.
 - Keystore schema: `helto.privacy-keystore`, version `1`.
 - Key-wrap AAD: `helto.privacy-keystore|1|<keyId>`.
 - Files are written through a temporary file and atomic replace; keystore and
   session files are mode `0600`, and directories are mode `0700` where the
   platform allows it.
 - Route token names are `X-Helto-Privacy-Token` and `helto_privacy_token`.
+  Confirmed declassification requests additionally use
+  `X-Helto-Privacy-Declassification: confirmed`.
 
 The only runtime dependency is `cryptography>=42.0`. The package does not
 import ComfyUI.
@@ -263,8 +348,8 @@ For each Helto node pack:
 2. Replace local key loading with `PrivacyEnvelopeCodec("<pack schema>")`.
 3. On first password-protect action, call
    `initialize_keystore_with_legacy_migration(password, legacy_config_dir)`.
-4. Protect privacy routes with `check_privacy_token` or
-   `aiohttp_check_privacy_token`.
+4. Dispatch protected routes through the installed pack's bound
+   `privacy.authorization.dispatch(...)` handle.
 5. Reuse the browser token already stored per origin by the Timeline Director
    UI. On `PRIVACY_LOCKED`, prompt the user to unlock via Timeline Director
    Global Settings or vendor the same unlock dialog.
@@ -281,6 +366,7 @@ the lower layers.
 
 ## Test Hygiene
 
-Tests must set `HELTO_PRIVACY_KEYSTORE` and `HELTO_PRIVACY_SESSION_DIR` to
-temporary paths. They must not read or write `~/.config/helto`, the real
-`XDG_RUNTIME_DIR`, or any node-pack `config/` directory.
+Tests must set `HELTO_PRIVACY_KEYSTORE`, `HELTO_PRIVACY_SESSION_DIR`, and
+`HELTO_PRIVACY_MODE_STATE` to temporary paths. They must not read or write
+`~/.config/helto`, the real `XDG_RUNTIME_DIR`, or any node-pack `config/`
+directory.

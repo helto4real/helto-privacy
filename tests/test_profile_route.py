@@ -105,6 +105,9 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             "mode-server": types.SimpleNamespace(
                 read_declared_mode=lambda: None,
                 write_declared_mode=lambda: None,
+                prepare_mode_transition=lambda *_args: None,
+                commit_mode_transition=lambda *_args: None,
+                rollback_mode_transition=lambda *_args: None,
             ),
         },
     )

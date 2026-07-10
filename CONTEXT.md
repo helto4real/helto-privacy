@@ -141,7 +141,9 @@ _Avoid_: Default mode, inherited preference
 **Declassification**:
 An authorized all-or-nothing transition from private to public that rewrites
 protected storage and retires protected derivatives. Setting a public
-declaration alone does not declassify existing data.
+declaration alone does not declassify existing data. Each attempt consumes
+fresh warning-confirmation evidence bound to its session, pack, scope, and
+target.
 _Avoid_: Disable privacy, plaintext fallback
 
 **Protection transition**:

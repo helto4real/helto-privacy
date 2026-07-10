@@ -109,6 +109,9 @@ def _install_manifest_profiles(manifest, monkeypatch):
                 "mode-source": types.SimpleNamespace(
                     read_declared_mode=lambda: None,
                     write_declared_mode=lambda: None,
+                    prepare_mode_transition=lambda *_args: None,
+                    commit_mode_transition=lambda *_args: None,
+                    rollback_mode_transition=lambda *_args: None,
                 )
             },
         )

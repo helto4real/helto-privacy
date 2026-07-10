@@ -89,6 +89,65 @@ class AuthorizationHandle:
 
         require_active_process_suite()
 
+    def authorize_request(self, request, operation_id: str):
+        """Issue one pack-bound authorization capability."""
+
+        self.require_ready()
+        from .guard import authorize_privacy_request
+
+        return authorize_privacy_request(
+            request,
+            operation_id,
+            pack_id=self.pack_id,
+        )
+
+    def authorize_declassification(self, request, scope_id: str, target):
+        """Issue one scope/target-bound, one-use transition capability."""
+
+        self.require_ready()
+        from .guard import authorize_privacy_request
+        from .mode import normalize_declared_mode
+
+        return authorize_privacy_request(
+            request,
+            "mode.transition",
+            pack_id=self.pack_id,
+            declassification_scope_id=scope_id,
+            declassification_target=normalize_declared_mode(target).value,
+        )
+
+    async def dispatch(self, request, scope_id: str, operation_id: str, operation):
+        """Authorize and dispatch protected work only through a stable scope."""
+
+        self.require_ready()
+        from .guard import PrivacyRouteDispatchError, dispatch_privacy_route
+        from .mode import ModePolicyError, ModeTransitionError
+        from .mode_runtime import require_stable_bound_scope
+
+        def require_stable(_authorization) -> None:
+            try:
+                require_stable_bound_scope(self._installation, scope_id)
+            except ModeTransitionError as exc:
+                raise PrivacyRouteDispatchError(exc.code, 409) from None
+            except ModePolicyError as exc:
+                if exc.code == "unknown_mode_scope":
+                    raise PrivacyRouteDispatchError(
+                        "PRIVACY_SCOPE_INVALID",
+                        400,
+                    ) from None
+                raise PrivacyRouteDispatchError(
+                    "PRIVACY_MODE_STATE_UNAVAILABLE",
+                    409,
+                ) from None
+
+        return await dispatch_privacy_route(
+            request,
+            operation_id,
+            operation,
+            pack_id=self.pack_id,
+            before_dispatch=require_stable,
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class _ResourceHandle:
@@ -104,7 +163,34 @@ class _ResourceHandle:
 
 @dataclass(frozen=True, slots=True)
 class ModeHandle(_ResourceHandle):
-    pass
+    def resolve(self, scope_id: str, facts=None):
+        from .mode_runtime import resolve_bound_mode
+
+        return resolve_bound_mode(
+            self._installation,
+            self.resource_id,
+            scope_id,
+            facts,
+        )
+
+    def transition(
+        self,
+        scope_id: str,
+        target,
+        authorization,
+        facts=None,
+    ):
+        self.readiness.require_ready()
+        from .mode_runtime import transition_bound_mode
+
+        return transition_bound_mode(
+            self._installation,
+            self.resource_id,
+            scope_id,
+            target,
+            authorization,
+            facts,
+        )
 
 
 @dataclass(frozen=True, slots=True)

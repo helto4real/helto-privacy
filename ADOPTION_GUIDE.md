@@ -154,24 +154,39 @@ exists for non-ComfyUI callers and scripted migration.)
 
 ## Step 4 — Gate routes, import the shared frontend
 
-**Gate every privacy route the pack owns.** Any endpoint that decrypts,
-encrypts, or serves privacy-mode content must call the guard first:
+**Dispatch every privacy route through the bound pack authorization handle.**
+Any endpoint that decrypts, encrypts, saves, queues, executes, or serves
+privacy-mode content must name its scope and operation:
 
 ```python
-from helto_privacy import aiohttp_check_privacy_token
+from helto_privacy import PrivacyRouteError
 
 @routes.post(f"{PREFIX}/decrypt")
 async def post_decrypt(request):
-    denied = aiohttp_check_privacy_token(request)
-    if denied is not None:
-        return denied
-    ...
+    async def decrypt(authorization):
+        return await product_service.decrypt(authorization)
+
+    try:
+        return await privacy.authorization.dispatch(
+            request,
+            "declared-scope-id",
+            "state.decrypt",
+            decrypt,
+        )
+    except PrivacyRouteError as error:
+        return web.json_response(
+            {"ok": False, "error": error.code},
+            status=error.http_status,
+        )
 ```
 
-The guard is a no-op until a keystore exists (legacy installs keep working),
-and accepts the token from the header **or** the cookie — the cookie exists
-because `<img>`/media elements cannot send custom headers; gate privacy-mode
-thumbnail/preview routes too, not just JSON endpoints.
+Dispatch requires an active exact suite and an initialized, unlocked keystore;
+absence is never authorization. It accepts the current token from the header
+**or** cookie, refuses scopes with incomplete transitions, and gives product
+code only an opaque authorization capability. The cookie exists because
+`<img>`/media elements cannot send custom headers; dispatch privacy-mode
+thumbnail/preview routes too, not just JSON endpoints. The old token guards are
+compatibility wrappers and now fail closed when no keystore exists.
 
 **Frontend: import the served module — do not copy dialog code into the
 pack.**

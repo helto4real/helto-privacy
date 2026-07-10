@@ -73,13 +73,13 @@ all-or-nothing protection changes.
 **Blocked by:** Compile atomic privacy profiles; Verify and activate exact
 suites.
 
-- [ ] Resolve missing, malformed, and inherited state as private; accept public
+- [x] Resolve missing, malformed, and inherited state as private; accept public
       only as a known explicit opt-out when no privacy floor applies.
-- [ ] Enforce upstream, parent, record, artifact, execution, and global privacy
+- [x] Enforce upstream, parent, record, artifact, execution, and global privacy
       floors so request parameters may strengthen but never weaken protection.
-- [ ] Protect shared route dispatch with one authorization model and sanitized
+- [x] Protect shared route dispatch with one authorization model and sanitized
       typed failures; absence of a keystore cannot imply authorization.
-- [ ] Make public-to-private and private-to-public transitions transactional
+- [x] Make public-to-private and private-to-public transitions transactional
       across registered state and derivatives, preserving the prior mode on any
       failure.
 

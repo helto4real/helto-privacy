@@ -240,7 +240,10 @@ class _FakeRequest:
 
 
 def test_check_privacy_token_gates_by_keystore_state():
-    assert check_privacy_token(_FakeRequest()) is None
+    assert check_privacy_token(_FakeRequest()) == {
+        "status": 409,
+        "error": "PRIVACY_KEYSTORE_UNINITIALIZED",
+    }
 
     result = keystore.initialize_keystore(PASSWORD)
     token = result["token"]
@@ -251,10 +254,7 @@ def test_check_privacy_token_gates_by_keystore_state():
     missing = check_privacy_token(_FakeRequest())
     assert missing == {
         "status": 401,
-        "error": (
-            "PRIVACY_TOKEN_REQUIRED: This ComfyUI has a privacy keystore; "
-            "unlock it to obtain a session token."
-        ),
+        "error": "PRIVACY_TOKEN_REQUIRED",
     }
     wrong = check_privacy_token(_FakeRequest(header_token="not-the-token"))
     assert wrong is not None and wrong["status"] == 401
@@ -263,4 +263,4 @@ def test_check_privacy_token_gates_by_keystore_state():
     locked = check_privacy_token(_FakeRequest(header_token=token))
     assert locked is not None
     assert locked["status"] == 401
-    assert locked["error"].startswith("PRIVACY_LOCKED")
+    assert locked["error"] == "PRIVACY_LOCKED"

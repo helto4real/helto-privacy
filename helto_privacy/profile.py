@@ -12,6 +12,11 @@ from typing import Protocol, TypeVar
 
 PRIVACY_CONTRACT_V2 = "helto.privacy.v2"
 _STABLE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_MODE_TRANSITION_METHODS = (
+    "prepare_mode_transition",
+    "commit_mode_transition",
+    "rollback_mode_transition",
+)
 
 
 class _Identified(Protocol):
@@ -542,6 +547,7 @@ class PrivacyProfile:
                 scope.mode_source_adapter,
                 "read_declared_mode",
                 "write_declared_mode",
+                *_MODE_TRANSITION_METHODS,
             )
         for field in self.protected_fields:
             _add_contract(
@@ -551,6 +557,7 @@ class PrivacyProfile:
                 "normalize",
                 "apply_revealed",
                 "clear_plaintext",
+                *_MODE_TRANSITION_METHODS,
             )
         for record in self.records:
             _add_contract(
@@ -560,9 +567,16 @@ class PrivacyProfile:
                 "read_protected",
                 "write_protected",
                 "delete",
+                *_MODE_TRANSITION_METHODS,
             )
         for artifact in self.artifacts:
-            _add_contract(contracts, artifact.payload_adapter, "encode", "decode")
+            _add_contract(
+                contracts,
+                artifact.payload_adapter,
+                "encode",
+                "decode",
+                *_MODE_TRANSITION_METHODS,
+            )
         for operation in self.protected_operations:
             _add_contract(contracts, operation.adapter_slot, "invoke")
         for projection in self.execution_projections:

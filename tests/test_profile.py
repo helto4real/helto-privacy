@@ -103,6 +103,25 @@ def test_profile_fingerprint_is_stable_and_order_independent():
 
     assert reordered.fingerprint == profile.fingerprint
 
+    assert profile.server_adapter_contracts == {
+        "privacy-mode-runtime": (
+            "commit_mode_transition",
+            "prepare_mode_transition",
+            "read_declared_mode",
+            "rollback_mode_transition",
+            "write_declared_mode",
+        ),
+        "timeline-runtime": (
+            "apply_revealed",
+            "capture",
+            "clear_plaintext",
+            "commit_mode_transition",
+            "normalize",
+            "prepare_mode_transition",
+            "rollback_mode_transition",
+        ),
+    }
+
 
 @pytest.mark.parametrize(
     ("profile_kwargs", "error_code"),
