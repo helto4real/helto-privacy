@@ -199,6 +199,17 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
           } },
           fetchProfile: async () => attestation(),
         }), pack);
+        await assert.rejects(
+          () => privacy.connectPrivacyPack({
+            app,
+            packId: "helto.director",
+            profileFingerprint: fingerprint,
+            adapters: { "timeline-editor": {} },
+            fetchProfile: async () => attestation(),
+          }),
+          (error) => error.code === "browser_adapter_mismatch",
+        );
+        assert.equal(pack.readiness.state, "ready");
 
         await assert.rejects(
           () => privacy.connectPrivacyPack({

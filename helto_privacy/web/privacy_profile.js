@@ -149,6 +149,7 @@ export async function connectPrivacyPack({
       existing.status = STATUS.CONFLICT;
       throw new PrivacyPackConnectionError("browser_profile_conflict");
     }
+    validateBrowserAdapterBindings(existing.requirements, adapters);
     return existing.pack;
   }
 
@@ -236,6 +237,10 @@ function validateServerAttestation({ id, contract, fingerprint, adapters, attest
   const requirements = Array.isArray(attestation.requiredBrowserAdapters)
     ? attestation.requiredBrowserAdapters
     : [];
+  validateBrowserAdapterBindings(requirements, adapters);
+}
+
+function validateBrowserAdapterBindings(requirements, adapters) {
   const expectedIds = requirements.map((item) => String(item?.id || "")).sort();
   const suppliedIds = Object.keys(adapters).sort();
   if (expectedIds.some((item) => !item) || new Set(expectedIds).size !== expectedIds.length) {
