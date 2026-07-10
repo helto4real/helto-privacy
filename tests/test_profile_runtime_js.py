@@ -4,12 +4,12 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
+PRIVACY_PROFILE = ROOT / "helto_privacy" / "web" / "privacy_profile.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
-    module_path = tmp_path / "privacy_ui.mjs"
-    module_path.write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
+    module_path = tmp_path / "privacy_profile.mjs"
+    module_path.write_text(PRIVACY_PROFILE.read_text(encoding="utf-8"), encoding="utf-8")
     script_path = tmp_path / "test.mjs"
     script_path.write_text(
         textwrap.dedent(
@@ -24,6 +24,13 @@ def run_node_module_test(tmp_path, body: str) -> None:
               fingerprint,
               status: "ready",
               requiredBrowserAdapters: [{{ id: "timeline-editor", nodeTypes: ["HeltoTimeline"] }}],
+              resources: [
+                {{ id: "privacy-mode", kind: "mode" }},
+                {{ id: "timeline", kind: "workflow" }},
+                {{ id: "library", kind: "record" }},
+                {{ id: "thumbnail", kind: "artifact" }},
+                {{ id: "render", kind: "execution" }},
+              ],
               ...overrides,
             }});
 
@@ -56,6 +63,10 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         };
         const app = {
           graph: { _nodes: [{ id: 1, type: "HeltoTimeline" }, { id: 2, type: "Other" }] },
+          registeredNodeTypes: {
+            HeltoTimeline: { nodeData: { name: "HeltoTimeline" } },
+            Other: { nodeData: { name: "Other" } },
+          },
           registerExtension(extension) { this.extension = extension; this.registerCount = (this.registerCount || 0) + 1; },
         };
         const options = {
@@ -70,12 +81,19 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         assert.equal(pack.readiness.state, "ready");
         pack.readiness.requireReady();
         assert.equal(app.registerCount, 1);
-        assert.deepEqual(calls, [[1, "existing"]]);
+        assert.deepEqual(calls, [["HeltoTimeline", "definition-existing"], [1, "existing"]]);
+        assert(pack.authorization instanceof privacy.BrowserAuthorizationHandle);
+        assert(pack.mode("privacy-mode") instanceof privacy.BrowserModeHandle);
+        assert(pack.workflow("timeline") instanceof privacy.BrowserWorkflowHandle);
+        assert(pack.records("library") instanceof privacy.BrowserRecordHandle);
+        assert(pack.artifacts("thumbnail") instanceof privacy.BrowserArtifactHandle);
+        assert(pack.execution("render") instanceof privacy.BrowserExecutionHandle);
 
         await app.extension.nodeCreated({ id: 3, type: "HeltoTimeline" });
         await app.extension.loadedGraphNode({ id: 4, comfyClass: "HeltoTimeline" });
         await app.extension.beforeRegisterNodeDef(class HeltoTimeline {}, { name: "HeltoTimeline" });
         assert.deepEqual(calls, [
+          ["HeltoTimeline", "definition-existing"],
           [1, "existing"],
           [3, "created"],
           [4, "loaded"],
@@ -130,7 +148,7 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
     )
 
 
-def test_browser_adapter_rebinding_conflicts_and_blocks_existing_pack(tmp_path):
+def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_conflicts(tmp_path):
     run_node_module_test(
         tmp_path,
         """
@@ -144,17 +162,35 @@ def test_browser_adapter_rebinding_conflicts_and_blocks_existing_pack(tmp_path):
           fetchProfile: async () => attestation(),
         });
 
+        assert.equal(await privacy.connectPrivacyPack({
+          app,
+          packId: "helto.director",
+          profileFingerprint: fingerprint,
+          adapters: { "timeline-editor": {} },
+          fetchProfile: async () => attestation(),
+        }), pack);
+
+        await assert.rejects(
+          () => privacy.connectPrivacyPack({
+            app,
+            packId: "helto.director",
+            profileFingerprint: "b".repeat(64),
+            adapters: { "timeline-editor": adapter },
+            fetchProfile: async () => attestation({ fingerprint: "b".repeat(64) }),
+          }),
+          (error) => error.code === "browser_profile_conflict",
+        );
+        assert.equal(pack.readiness.state, "conflict");
+        assert.throws(() => pack.readiness.requireReady(), /incomplete or conflicting/);
         await assert.rejects(
           () => privacy.connectPrivacyPack({
             app,
             packId: "helto.director",
             profileFingerprint: fingerprint,
-            adapters: { "timeline-editor": {} },
+            adapters: { "timeline-editor": adapter },
             fetchProfile: async () => attestation(),
           }),
-          (error) => error.code === "browser_binding_conflict",
+          (error) => error.code === "browser_pack_blocked",
         );
-        assert.equal(pack.readiness.state, "conflict");
-        assert.throws(() => pack.readiness.requireReady(), /incomplete or conflicting/);
         """,
     )

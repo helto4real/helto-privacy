@@ -13,6 +13,7 @@ Registered surface (pack-neutral, stable):
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
   module any pack frontend can ``import()``.
+- ``GET  /helto_privacy/ui/privacy_profile.js`` — atomic browser profile runtime.
 
 Legacy migration is automatic: packs register the directory holding their old
 plaintext ``privacy_key.json``; whenever the keystore is created or unlocked
@@ -35,6 +36,7 @@ from .keystore import KEY_BYTES, PrivacyKeystoreError
 
 ROUTE_PREFIX = "/helto_privacy"
 UI_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy.js"
+PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile.js"
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
 _ROUTES_REGISTERED = False
@@ -159,6 +161,22 @@ def register_helto_privacy_ui(
             source = (_WEB_DIR / "privacy_ui.js").read_text(encoding="utf-8")
         except OSError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        return web.Response(
+            text=source,
+            content_type="application/javascript",
+            charset="utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @routes.get(PROFILE_MODULE_ROUTE)
+    async def get_helto_privacy_profile_module(_request):
+        try:
+            source = (_WEB_DIR / "privacy_profile.js").read_text(encoding="utf-8")
+        except OSError:
+            return web.json_response(
+                {"ok": False, "error": "PRIVACY_BROWSER_MODULE_UNAVAILABLE"},
+                status=500,
+            )
         return web.Response(
             text=source,
             content_type="application/javascript",

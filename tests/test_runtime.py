@@ -1,7 +1,20 @@
 import pytest
 
 import helto_privacy.runtime as runtime
-from helto_privacy.profile import AdapterSlot, PrivacyProfile, ProfileResource, ResourceKind
+from helto_privacy.profile import (
+    AdapterSlot,
+    ArtifactDeclaration,
+    ArtifactRetention,
+    FieldLocation,
+    FieldLocationKind,
+    PrivacyProfile,
+    PrivacyScope,
+    ProtectedField,
+    RecordDeclaration,
+    ProfileResource,
+    ResourceKind,
+    SemanticExecutionProjection,
+)
 from helto_privacy.runtime import (
     AdapterBindingError,
     ArtifactHandle,
@@ -43,6 +56,53 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
         distribution=distribution,
         resources=resources,
         server_adapters=slots,
+        scopes=(
+            PrivacyScope(
+                "test-scope",
+                "privacy-mode",
+                "privacy-mode-adapter",
+            ),
+        ),
+        protected_fields=(
+            ProtectedField(
+                "editor-value",
+                "editor-state",
+                "test-scope",
+                ("HeltoTest",),
+                FieldLocation(FieldLocationKind.WIDGET, "state"),
+                "helto.test.state.v1",
+                "editor-state",
+                execution=True,
+            ),
+        ),
+        records=(
+            RecordDeclaration(
+                "test-record",
+                "library",
+                "test-scope",
+                "helto.test.record.v1",
+                "library-adapter",
+            ),
+        ),
+        artifacts=(
+            ArtifactDeclaration(
+                "test-preview",
+                "preview",
+                "test-scope",
+                "test-preview",
+                1,
+                ArtifactRetention.REGENERABLE_CACHE,
+                ("preview",),
+            ),
+        ),
+        execution_projections=(
+            SemanticExecutionProjection(
+                "test-dispatch",
+                "dispatch",
+                "editor-state",
+                "dispatch-adapter",
+            ),
+        ),
     )
 
 
@@ -104,17 +164,17 @@ def test_conflict_blocks_the_existing_pack_with_sanitized_diagnostics():
     assert pack.readiness.state == "conflict"
     with pytest.raises(PackBlockedError):
         pack.workflow("editor-state")
+    with pytest.raises(ProfileConflictError) as blocked:
+        install(profile, _adapters(profile))
+    assert blocked.value.code == "profile_installation_blocked"
 
 
-def test_same_profile_cannot_rebind_adapters():
+def test_same_fingerprint_is_idempotent_with_fresh_adapter_objects():
     profile = _profile(pack_id="helto.binding-conflict")
     pack = install(profile, _adapters(profile))
 
-    with pytest.raises(ProfileConflictError) as exc_info:
-        install(profile, _adapters(profile))
-
-    assert exc_info.value.code == "adapter_binding_conflict"
-    assert pack.readiness.state == "conflict"
+    assert install(_profile(pack_id="helto.binding-conflict"), _adapters(profile)) is pack
+    assert pack.readiness.state == "waiting_for_prompt_server"
 
 
 def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
@@ -144,6 +204,13 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
         "fingerprint": first.fingerprint,
         "status": "ready",
         "requiredBrowserAdapters": [],
+        "resources": [
+            {"id": "preview", "kind": "artifact"},
+            {"id": "dispatch", "kind": "execution"},
+            {"id": "privacy-mode", "kind": "mode"},
+            {"id": "library", "kind": "record"},
+            {"id": "editor-state", "kind": "workflow"},
+        ],
     }
     assert "token" not in str(public_state).lower()
     assert "secret" not in str(public_state).lower()

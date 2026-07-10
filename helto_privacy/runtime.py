@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from enum import Enum
 from threading import RLock
 from types import MappingProxyType
 from typing import Any, TypeVar
@@ -40,11 +41,17 @@ class UnknownResourceError(PrivacyInstallationError):
         super().__init__("unknown_resource", "Requested privacy resource is not declared.")
 
 
+class InstallationStatus(str, Enum):
+    WAITING_FOR_PROMPT_SERVER = "waiting_for_prompt_server"
+    READY = "ready"
+    CONFLICT = "conflict"
+
+
 @dataclass(slots=True)
 class _Installation:
     profile: PrivacyProfile
     adapters: Mapping[str, object] = field(repr=False)
-    status: str = "waiting_for_prompt_server"
+    status: InstallationStatus = InstallationStatus.WAITING_FOR_PROMPT_SERVER
     pack: BoundPrivacyPack | None = field(default=None, repr=False)
 
 
@@ -56,7 +63,7 @@ class ReadinessHandle:
 
     @property
     def state(self) -> str:
-        return self._installation.status
+        return self._installation.status.value
 
     def require_ready(self) -> None:
         if self.state != "ready":
@@ -160,7 +167,7 @@ class BoundPrivacyPack:
         expected_kind: ResourceKind,
         handle_type: type[_Handle],
     ) -> _Handle:
-        if self.readiness.state == "conflict":
+        if self._installation.status is InstallationStatus.CONFLICT:
             raise PackBlockedError()
         resource = next(
             (
@@ -190,14 +197,13 @@ def install(
     with _LOCK:
         existing = _INSTALLATIONS.get(profile.id)
         if existing is not None:
+            if existing.status is InstallationStatus.CONFLICT:
+                raise ProfileConflictError("profile_installation_blocked")
             if existing.profile.fingerprint != profile.fingerprint:
-                existing.status = "conflict"
+                existing.status = InstallationStatus.CONFLICT
                 raise ProfileConflictError("profile_fingerprint_conflict")
-            if not _same_bindings(existing.adapters, bound_adapters):
-                existing.status = "conflict"
-                raise ProfileConflictError("adapter_binding_conflict")
             if existing.pack is None:  # Defensive invariant; never expose a partial pack.
-                existing.status = "conflict"
+                existing.status = InstallationStatus.CONFLICT
                 raise ProfileConflictError("incomplete_installation")
             return existing.pack
 
@@ -224,8 +230,8 @@ def reconcile_prompt_server(prompt_server: Any = None) -> bool:
         return False
     with _LOCK:
         for installation in _INSTALLATIONS.values():
-            if installation.status != "conflict":
-                installation.status = "ready"
+            if installation.status is not InstallationStatus.CONFLICT:
+                installation.status = InstallationStatus.READY
     return True
 
 
@@ -242,10 +248,14 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
             "distribution": profile.distribution,
             "contract": profile.contract,
             "fingerprint": profile.fingerprint,
-            "status": installation.status,
+            "status": installation.status.value,
             "requiredBrowserAdapters": [
                 {"id": slot.id, "nodeTypes": list(slot.node_types)}
                 for slot in profile.browser_adapters
+            ],
+            "resources": [
+                {"id": resource.id, "kind": resource.kind.value}
+                for resource in profile.resources
             ],
         }
 
@@ -266,10 +276,6 @@ def _validate_adapter_bindings(
     if supplied_ids - expected:
         raise AdapterBindingError("unknown_adapter")
     return {slot_id: supplied[slot_id] for slot_id in sorted(expected)}
-
-
-def _same_bindings(left: Mapping[str, object], right: Mapping[str, object]) -> bool:
-    return left.keys() == right.keys() and all(left[key] is right[key] for key in left)
 
 
 def _adapters_for_resource(

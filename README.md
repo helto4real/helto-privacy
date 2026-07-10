@@ -14,6 +14,7 @@ are not adapter seams.
 from helto_privacy import (
     AdapterSlot,
     PrivacyProfile,
+    PrivacyScope,
     ProfileResource,
     ResourceKind,
     install,
@@ -24,42 +25,50 @@ profile = PrivacyProfile(
     distribution="comfyui-helto-example",
     resources=(
         ProfileResource(
-            "editor-state",
-            ResourceKind.WORKFLOW,
-            adapter_slots=("editor-state-adapter", "editor-state-editor"),
+            "privacy-mode",
+            ResourceKind.MODE,
+            adapter_slots=("mode-source", "mode-editor"),
         ),
     ),
     server_adapters=(
         AdapterSlot(
-            "editor-state-adapter",
-            ResourceKind.WORKFLOW,
-            "editor-state",
+            "mode-source",
+            ResourceKind.MODE,
+            "privacy-mode",
         ),
     ),
     browser_adapters=(
         AdapterSlot(
-            "editor-state-editor",
-            ResourceKind.WORKFLOW,
-            "editor-state",
+            "mode-editor",
+            ResourceKind.MODE,
+            "privacy-mode",
             node_types=("HeltoExample",),
         ),
     ),
+    scopes=(
+        PrivacyScope("example", "privacy-mode", "mode-source"),
+    ),
 )
 
-privacy = install(profile, {"editor-state-adapter": product_adapter})
-workflow = privacy.workflow("editor-state")
+privacy = install(profile, {"mode-source": product_adapter})
+mode = privacy.mode("privacy-mode")
 privacy.readiness.require_ready()
 ```
 
 The shared browser module uses the same profile fingerprint:
 
 ```javascript
+import {
+  connectPrivacyPack,
+  PRIVACY_CONTRACT_V2,
+} from "/helto_privacy/ui/privacy_profile.js";
+
 const privacy = await connectPrivacyPack({
   app,
   packId: "helto.example",
   contract: PRIVACY_CONTRACT_V2,
   profileFingerprint,
-  adapters: { "editor-state-editor": editorAdapter },
+  adapters: { "mode-editor": editorAdapter },
 })
 ```
 
@@ -142,9 +151,11 @@ Registration is idempotent across packs (first pack wins); every call also
 records the pack's legacy `privacy_key.json` directory. It registers:
 
 - `GET  /helto_privacy/status`
+- `GET  /helto_privacy/profiles/{pack_id}`
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`
 - `GET  /helto_privacy/ui/privacy.js` — the shared unlock dialog (ES module)
+- `GET  /helto_privacy/ui/privacy_profile.js` — the browser profile compiler
 
 Legacy migration is automatic: when the keystore is created or unlocked, every
 registered legacy key is imported as a decrypt-only entry and its file renamed

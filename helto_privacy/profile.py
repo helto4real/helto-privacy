@@ -7,10 +7,18 @@ import json
 import re
 from dataclasses import dataclass
 from enum import Enum
+from typing import Protocol, TypeVar
 
 
 PRIVACY_CONTRACT_V2 = "helto.privacy.v2"
 _STABLE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+
+
+class _Identified(Protocol):
+    id: str
+
+
+_IdentifiedType = TypeVar("_IdentifiedType", bound=_Identified)
 
 
 class ProfileValidationError(ValueError):
@@ -31,6 +39,184 @@ class ResourceKind(str, Enum):
     EXECUTION = "execution"
 
 
+class FieldLocationKind(str, Enum):
+    """Closed product locations shared policy knows how to coordinate."""
+
+    WIDGET = "widget"
+    PROPERTY = "property"
+    INPUT = "input"
+    RECORD = "record"
+    BLOB = "blob"
+
+
+class ArtifactRetention(str, Enum):
+    """Shared artifact lifecycle selected by product meaning."""
+
+    DURABLE_ADJUNCT = "durable-adjunct"
+    REGENERABLE_CACHE = "regenerable-cache"
+    RUN_SCOPED_SPILL = "run-scoped-spill"
+    SERVED_TRANSIENT = "served-transient"
+
+
+@dataclass(frozen=True, slots=True)
+class PrivacyScope:
+    """A product scope and the adapter that locates its declared mode."""
+
+    id: str
+    mode_resource_id: str
+    mode_source_adapter: str
+    parent_id: str | None = None
+    floor_scope_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.id)
+        _validate_stable_id(self.mode_resource_id)
+        _validate_stable_id(self.mode_source_adapter)
+        if self.parent_id is not None:
+            _validate_stable_id(self.parent_id)
+        object.__setattr__(
+            self,
+            "floor_scope_ids",
+            _normalized_stable_ids(self.floor_scope_ids, "duplicate_scope_floor"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class FieldLocation:
+    """A non-policy product field location."""
+
+    kind: FieldLocationKind
+    name: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, FieldLocationKind):
+            raise ProfileValidationError("unknown_field_location")
+        if not isinstance(self.name, str) or not self.name.strip():
+            raise ProfileValidationError("invalid_field_location")
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedField:
+    """One protected workflow field and its current persisted identity."""
+
+    id: str
+    workflow_resource_id: str
+    scope_id: str
+    node_types: tuple[str, ...]
+    location: FieldLocation
+    current_schema: str
+    purpose: str
+    legacy_reader_ids: tuple[str, ...] = ()
+    execution: bool = False
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.id,
+            self.workflow_resource_id,
+            self.scope_id,
+            self.current_schema,
+            self.purpose,
+        ):
+            _validate_stable_id(value)
+        if not isinstance(self.location, FieldLocation):
+            raise ProfileValidationError("unknown_field_location")
+        object.__setattr__(self, "node_types", _normalized_node_types(self.node_types))
+        object.__setattr__(
+            self,
+            "legacy_reader_ids",
+            _normalized_stable_ids(self.legacy_reader_ids, "duplicate_legacy_reader"),
+        )
+        if not isinstance(self.execution, bool):
+            raise ProfileValidationError("invalid_execution_declaration")
+
+
+@dataclass(frozen=True, slots=True)
+class RecordDeclaration:
+    """Product facts for one private record kind."""
+
+    id: str
+    resource_id: str
+    scope_id: str
+    current_schema: str
+    store_adapter: str
+    safe_projection_fields: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.id,
+            self.resource_id,
+            self.scope_id,
+            self.current_schema,
+            self.store_adapter,
+        ):
+            _validate_stable_id(value)
+        fields = _normalized_text_values(
+            self.safe_projection_fields,
+            "invalid_safe_projection_field",
+            "duplicate_safe_projection_field",
+        )
+        object.__setattr__(self, "safe_projection_fields", fields)
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactDeclaration:
+    """Product facts for one managed privacy artifact kind."""
+
+    id: str
+    resource_id: str
+    scope_id: str
+    purpose: str
+    format_version: int
+    retention: ArtifactRetention
+    operations: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for value in (self.id, self.resource_id, self.scope_id, self.purpose):
+            _validate_stable_id(value)
+        if (
+            not isinstance(self.format_version, int)
+            or isinstance(self.format_version, bool)
+            or self.format_version < 1
+        ):
+            raise ProfileValidationError("invalid_artifact_version")
+        if not isinstance(self.retention, ArtifactRetention):
+            raise ProfileValidationError("unknown_artifact_retention")
+        operations = _normalized_stable_ids(self.operations, "duplicate_artifact_operation")
+        if not operations:
+            raise ProfileValidationError("missing_artifact_operation")
+        object.__setattr__(self, "operations", operations)
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedOperation:
+    """A product operation dispatched only after shared authorization."""
+
+    id: str
+    resource_id: str
+    adapter_slot: str
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.id)
+        _validate_stable_id(self.resource_id)
+        _validate_stable_id(self.adapter_slot)
+
+
+@dataclass(frozen=True, slots=True)
+class SemanticExecutionProjection:
+    """The product projection used by one protected execution resource."""
+
+    id: str
+    execution_resource_id: str
+    workflow_resource_id: str
+    adapter_slot: str
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.id)
+        _validate_stable_id(self.execution_resource_id)
+        _validate_stable_id(self.workflow_resource_id)
+        _validate_stable_id(self.adapter_slot)
+
+
 @dataclass(frozen=True, slots=True)
 class AdapterSlot:
     """One consumer product adapter required by an immutable profile."""
@@ -45,15 +231,15 @@ class AdapterSlot:
         _validate_stable_id(self.resource_id)
         if not isinstance(self.capability, ResourceKind):
             raise ProfileValidationError("unknown_resource_kind")
-        try:
-            node_types = tuple(self.node_types)
-        except TypeError:
-            raise ProfileValidationError("invalid_node_types") from None
-        if any(not isinstance(item, str) or not item.strip() for item in node_types):
-            raise ProfileValidationError("invalid_node_type")
-        if len(node_types) != len(set(node_types)):
-            raise ProfileValidationError("duplicate_node_type")
-        object.__setattr__(self, "node_types", tuple(sorted(node_types)))
+        object.__setattr__(
+            self,
+            "node_types",
+            _normalized_text_values(
+                self.node_types,
+                "invalid_node_type",
+                "duplicate_node_type",
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,15 +254,14 @@ class ProfileResource:
         _validate_stable_id(self.id)
         if not isinstance(self.kind, ResourceKind):
             raise ProfileValidationError("unknown_resource_kind")
-        try:
-            adapter_slots = tuple(self.adapter_slots)
-        except TypeError:
-            raise ProfileValidationError("invalid_adapter_references") from None
-        if any(not _is_stable_id(item) for item in adapter_slots):
-            raise ProfileValidationError("invalid_stable_id")
-        if len(adapter_slots) != len(set(adapter_slots)):
-            raise ProfileValidationError("duplicate_adapter_reference")
-        object.__setattr__(self, "adapter_slots", tuple(sorted(adapter_slots)))
+        object.__setattr__(
+            self,
+            "adapter_slots",
+            _normalized_stable_ids(
+                self.adapter_slots,
+                "duplicate_adapter_reference",
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +274,12 @@ class PrivacyProfile:
     resources: tuple[ProfileResource, ...] = ()
     server_adapters: tuple[AdapterSlot, ...] = ()
     browser_adapters: tuple[AdapterSlot, ...] = ()
+    scopes: tuple[PrivacyScope, ...] = ()
+    protected_fields: tuple[ProtectedField, ...] = ()
+    records: tuple[RecordDeclaration, ...] = ()
+    artifacts: tuple[ArtifactDeclaration, ...] = ()
+    protected_operations: tuple[ProtectedOperation, ...] = ()
+    execution_projections: tuple[SemanticExecutionProjection, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
@@ -97,12 +288,33 @@ class PrivacyProfile:
             resources = tuple(self.resources)
             server_adapters = tuple(self.server_adapters)
             browser_adapters = tuple(self.browser_adapters)
+            scopes = tuple(self.scopes)
+            protected_fields = tuple(self.protected_fields)
+            records = tuple(self.records)
+            artifacts = tuple(self.artifacts)
+            protected_operations = tuple(self.protected_operations)
+            execution_projections = tuple(self.execution_projections)
         except TypeError:
             raise ProfileValidationError("invalid_profile_declaration") from None
         if any(not isinstance(item, ProfileResource) for item in resources):
             raise ProfileValidationError("unknown_resource_declaration")
         if any(not isinstance(item, AdapterSlot) for item in server_adapters + browser_adapters):
             raise ProfileValidationError("unknown_adapter_declaration")
+        typed_declarations = (
+            (scopes, PrivacyScope, "unknown_scope_declaration"),
+            (protected_fields, ProtectedField, "unknown_field_declaration"),
+            (records, RecordDeclaration, "unknown_record_declaration"),
+            (artifacts, ArtifactDeclaration, "unknown_artifact_declaration"),
+            (protected_operations, ProtectedOperation, "unknown_operation_declaration"),
+            (
+                execution_projections,
+                SemanticExecutionProjection,
+                "unknown_execution_projection",
+            ),
+        )
+        for declarations, expected_type, error_code in typed_declarations:
+            if any(not isinstance(item, expected_type) for item in declarations):
+                raise ProfileValidationError(error_code)
         object.__setattr__(
             self,
             "resources",
@@ -118,6 +330,19 @@ class PrivacyProfile:
             "browser_adapters",
             tuple(sorted(browser_adapters, key=lambda item: item.id)),
         )
+        for field_name, declarations in (
+            ("scopes", scopes),
+            ("protected_fields", protected_fields),
+            ("records", records),
+            ("artifacts", artifacts),
+            ("protected_operations", protected_operations),
+            ("execution_projections", execution_projections),
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                tuple(sorted(declarations, key=lambda item: item.id)),
+            )
         self._validate()
 
     def _validate(self) -> None:
@@ -151,6 +376,85 @@ class PrivacyProfile:
         if not self.resources or any(not resource.adapter_slots for resource in self.resources):
             raise ProfileValidationError("partial_profile")
 
+        self._validate_product_facts(resource_by_id, adapter_by_id)
+
+    def _validate_product_facts(
+        self,
+        resources: dict[str, ProfileResource],
+        adapters: dict[str, AdapterSlot],
+    ) -> None:
+        scopes = _unique_by_id(self.scopes, "duplicate_scope")
+        fields = _unique_by_id(self.protected_fields, "duplicate_protected_field")
+        records = _unique_by_id(self.records, "duplicate_record_declaration")
+        artifacts = _unique_by_id(self.artifacts, "duplicate_artifact_declaration")
+        operations = _unique_by_id(self.protected_operations, "duplicate_protected_operation")
+        projections = _unique_by_id(
+            self.execution_projections,
+            "duplicate_execution_projection",
+        )
+
+        for scope in scopes.values():
+            _require_resource_kind(resources, scope.mode_resource_id, ResourceKind.MODE)
+            _require_resource_adapter(resources[scope.mode_resource_id], adapters, scope.mode_source_adapter)
+            for related_scope in (scope.parent_id, *scope.floor_scope_ids):
+                if related_scope is not None and related_scope not in scopes:
+                    raise ProfileValidationError("unknown_scope_reference")
+        _validate_scope_cycles(scopes)
+
+        for protected_field in fields.values():
+            _require_resource_kind(
+                resources,
+                protected_field.workflow_resource_id,
+                ResourceKind.WORKFLOW,
+            )
+            if protected_field.scope_id not in scopes:
+                raise ProfileValidationError("unknown_scope_reference")
+
+        for record in records.values():
+            resource = _require_resource_kind(resources, record.resource_id, ResourceKind.RECORD)
+            if record.scope_id not in scopes:
+                raise ProfileValidationError("unknown_scope_reference")
+            _require_resource_adapter(resource, adapters, record.store_adapter)
+
+        for artifact in artifacts.values():
+            _require_resource_kind(resources, artifact.resource_id, ResourceKind.ARTIFACT)
+            if artifact.scope_id not in scopes:
+                raise ProfileValidationError("unknown_scope_reference")
+
+        for operation in operations.values():
+            resource = resources.get(operation.resource_id)
+            if resource is None:
+                raise ProfileValidationError("unknown_operation_resource")
+            _require_resource_adapter(resource, adapters, operation.adapter_slot)
+
+        for projection in projections.values():
+            resource = _require_resource_kind(
+                resources,
+                projection.execution_resource_id,
+                ResourceKind.EXECUTION,
+            )
+            _require_resource_kind(
+                resources,
+                projection.workflow_resource_id,
+                ResourceKind.WORKFLOW,
+            )
+            _require_resource_adapter(resource, adapters, projection.adapter_slot)
+
+        facts_by_kind = {
+            ResourceKind.MODE: {scope.mode_resource_id for scope in scopes.values()},
+            ResourceKind.WORKFLOW: {
+                protected_field.workflow_resource_id for protected_field in fields.values()
+            },
+            ResourceKind.RECORD: {record.resource_id for record in records.values()},
+            ResourceKind.ARTIFACT: {artifact.resource_id for artifact in artifacts.values()},
+            ResourceKind.EXECUTION: {
+                projection.execution_resource_id for projection in projections.values()
+            },
+        }
+        for resource in resources.values():
+            if resource.id not in facts_by_kind[resource.kind]:
+                raise ProfileValidationError("missing_resource_product_facts")
+
     @property
     def fingerprint(self) -> str:
         """Return the stable SHA-256 identity shared by Python and the browser."""
@@ -178,6 +482,70 @@ class PrivacyProfile:
             ],
             "serverAdapters": [_canonical_adapter(slot) for slot in self.server_adapters],
             "browserAdapters": [_canonical_adapter(slot) for slot in self.browser_adapters],
+            "scopes": [
+                {
+                    "id": scope.id,
+                    "modeResourceId": scope.mode_resource_id,
+                    "modeSourceAdapter": scope.mode_source_adapter,
+                    "parentId": scope.parent_id,
+                    "floorScopeIds": list(scope.floor_scope_ids),
+                }
+                for scope in self.scopes
+            ],
+            "protectedFields": [
+                {
+                    "id": field.id,
+                    "workflowResourceId": field.workflow_resource_id,
+                    "scopeId": field.scope_id,
+                    "nodeTypes": list(field.node_types),
+                    "location": {"kind": field.location.kind.value, "name": field.location.name},
+                    "currentSchema": field.current_schema,
+                    "purpose": field.purpose,
+                    "legacyReaderIds": list(field.legacy_reader_ids),
+                    "execution": field.execution,
+                }
+                for field in self.protected_fields
+            ],
+            "records": [
+                {
+                    "id": record.id,
+                    "resourceId": record.resource_id,
+                    "scopeId": record.scope_id,
+                    "currentSchema": record.current_schema,
+                    "storeAdapter": record.store_adapter,
+                    "safeProjectionFields": list(record.safe_projection_fields),
+                }
+                for record in self.records
+            ],
+            "artifacts": [
+                {
+                    "id": artifact.id,
+                    "resourceId": artifact.resource_id,
+                    "scopeId": artifact.scope_id,
+                    "purpose": artifact.purpose,
+                    "formatVersion": artifact.format_version,
+                    "retention": artifact.retention.value,
+                    "operations": list(artifact.operations),
+                }
+                for artifact in self.artifacts
+            ],
+            "protectedOperations": [
+                {
+                    "id": operation.id,
+                    "resourceId": operation.resource_id,
+                    "adapterSlot": operation.adapter_slot,
+                }
+                for operation in self.protected_operations
+            ],
+            "executionProjections": [
+                {
+                    "id": projection.id,
+                    "executionResourceId": projection.execution_resource_id,
+                    "workflowResourceId": projection.workflow_resource_id,
+                    "adapterSlot": projection.adapter_slot,
+                }
+                for projection in self.execution_projections
+            ],
         }
 
 
@@ -197,3 +565,99 @@ def _is_stable_id(value: object) -> bool:
 def _validate_stable_id(value: object) -> None:
     if not _is_stable_id(value):
         raise ProfileValidationError("invalid_stable_id")
+
+
+def _normalized_stable_ids(values: object, duplicate_code: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise ProfileValidationError("invalid_stable_ids")
+    try:
+        normalized = tuple(values)  # type: ignore[arg-type]
+    except TypeError:
+        raise ProfileValidationError("invalid_stable_ids") from None
+    if any(not _is_stable_id(item) for item in normalized):
+        raise ProfileValidationError("invalid_stable_id")
+    if len(normalized) != len(set(normalized)):
+        raise ProfileValidationError(duplicate_code)
+    return tuple(sorted(normalized))
+
+
+def _normalized_node_types(values: object) -> tuple[str, ...]:
+    normalized = _normalized_text_values(
+        values,
+        "invalid_node_type",
+        "duplicate_node_type",
+    )
+    if not normalized:
+        raise ProfileValidationError("missing_node_type")
+    return normalized
+
+
+def _normalized_text_values(
+    values: object,
+    invalid_code: str,
+    duplicate_code: str,
+) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)):
+        raise ProfileValidationError(invalid_code)
+    try:
+        normalized = tuple(values)  # type: ignore[arg-type]
+    except TypeError:
+        raise ProfileValidationError(invalid_code) from None
+    if any(not isinstance(item, str) or not item.strip() for item in normalized):
+        raise ProfileValidationError(invalid_code)
+    if len(normalized) != len(set(normalized)):
+        raise ProfileValidationError(duplicate_code)
+    return tuple(sorted(normalized))
+
+
+def _unique_by_id(
+    declarations: tuple[_IdentifiedType, ...],
+    error_code: str,
+) -> dict[str, _IdentifiedType]:
+    by_id = {declaration.id: declaration for declaration in declarations}
+    if len(by_id) != len(declarations):
+        raise ProfileValidationError(error_code)
+    return by_id
+
+
+def _require_resource_kind(
+    resources: dict[str, ProfileResource],
+    resource_id: str,
+    expected_kind: ResourceKind,
+) -> ProfileResource:
+    resource = resources.get(resource_id)
+    if resource is None or resource.kind is not expected_kind:
+        raise ProfileValidationError("resource_kind_mismatch")
+    return resource
+
+
+def _require_resource_adapter(
+    resource: ProfileResource,
+    adapters: dict[str, AdapterSlot],
+    adapter_id: str,
+) -> None:
+    adapter = adapters.get(adapter_id)
+    if adapter is None or adapter_id not in resource.adapter_slots:
+        raise ProfileValidationError("resource_adapter_mismatch")
+
+
+def _validate_scope_cycles(scopes: dict[str, PrivacyScope]) -> None:
+    visiting: set[str] = set()
+    visited: set[str] = set()
+
+    def visit(scope_id: str) -> None:
+        if scope_id in visiting:
+            raise ProfileValidationError("scope_cycle")
+        if scope_id in visited:
+            return
+        visiting.add(scope_id)
+        scope = scopes[scope_id]
+        related = (scope.parent_id, *scope.floor_scope_ids)
+        for related_id in related:
+            if related_id is not None:
+                visit(related_id)
+        visiting.remove(scope_id)
+        visited.add(scope_id)
+
+    for scope_id in scopes:
+        visit(scope_id)
