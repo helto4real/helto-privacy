@@ -32,15 +32,15 @@ its product adapters satisfy the fixed shared contract.
 
 **Blocked by:** None — can start immediately.
 
-- [ ] Define the fixed contract identity, profile vocabulary, canonical
+- [x] Define the fixed contract identity, profile vocabulary, canonical
       validation, deterministic fingerprint, and immutable installed form.
-- [ ] Make installation atomic, idempotent for identical fingerprints, and
+- [x] Make installation atomic, idempotent for identical fingerprints, and
       order-independent across PromptServer and node-definition lifecycle
       timing.
-- [ ] Return typed readiness, authorization, workflow, record, artifact, mode,
+- [x] Return typed readiness, authorization, workflow, record, artifact, mode,
       and execution handles without exposing raw codecs, keys, tokens, or
       policy hooks.
-- [ ] Block conflicting fingerprints, missing adapters, unknown declarations,
+- [x] Block conflicting fingerprints, missing adapters, unknown declarations,
       partial profiles, and browser/server attestation drift with sanitized
       diagnostics.
 
