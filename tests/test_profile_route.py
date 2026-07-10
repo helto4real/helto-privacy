@@ -131,7 +131,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
 
     monkeypatch.setattr(
         comfy_ui,
-        "_require_active_suite",
+        "require_active_process_suite",
         isolated_privacy_paths[1],
     )
 
@@ -182,6 +182,23 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     suite = SuiteInstallation(release)
     suite._verify_inventory(_inventory(release.manifest))
     register_process_suite(suite)
+
+    async def browser_attestation_payload():
+        return {"manifestDigest": release.manifest.digest}
+
+    browser_attestation_handler = prompt_server.routes.handlers[
+        ("POST", f"{comfy_ui.ROUTE_PREFIX}/suite/browser-attestation")
+    ]
+    browser_attestation = asyncio.run(
+        browser_attestation_handler(
+            types.SimpleNamespace(json=browser_attestation_payload)
+        )
+    )
+    assert browser_attestation.status == 200
+    assert browser_attestation.data == {
+        "ok": True,
+        "suiteManifestDigest": release.manifest.digest,
+    }
     module_request = types.SimpleNamespace(
         match_info={"manifest_digest": release.manifest.digest}
     )
@@ -211,3 +228,17 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         "ok": False,
         "error": "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
     }
+
+    conflicting_browser = asyncio.run(
+        browser_attestation_handler(
+            types.SimpleNamespace(
+                json=lambda: _async_value({"manifestDigest": "e" * 64})
+            )
+        )
+    )
+    assert conflicting_browser.status == 409
+    assert suite_runtime.process_suite_status_payload()["suiteStatus"] == "conflict"
+
+
+async def _async_value(value):
+    return value

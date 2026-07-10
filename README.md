@@ -114,8 +114,10 @@ inventory digest.
 
 Production callers use `SuiteInstallation.verify_installed(...)`, which hashes
 the five immutable artifact files and reads profile fingerprints and embedded
-suite declarations from the live process registries. Callers do not construct
-or assert their own inventory. The interpreter identity is measured by
+suite declarations from the live process registries. The loaded browser module
+posts its observed manifest digest to the canonical attestation route, and that
+server-recorded value is included in verification. Callers do not construct or
+assert their own inventory. The interpreter identity is measured by
 `measure_runtime_environment(...)`; the ComfyUI backend/frontend identities and
 renderer come from the host installation probe.
 
@@ -123,6 +125,11 @@ Activation does not decrypt product data. It atomically records the signed
 authorization and the pre-activation snapshot digest as the rollback boundary,
 then changes the installation to `active`. Restart verification reloads and
 revalidates that record before restoring active state.
+
+The activation inventory digest also binds a measured installation generation
+derived from the five artifact files. Reinstalling or repairing exact bytes
+therefore still requires a new signed activation instead of replaying the old
+record.
 
 If an active installation later becomes incomplete, mismatched, or conflicting,
 the activation record is retained but marked for reactivation. The current
@@ -215,6 +222,7 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 
 - `GET  /helto_privacy/status`
 - `GET  /helto_privacy/profiles/{pack_id}`
+- `POST /helto_privacy/suite/browser-attestation`
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`
 - `GET  /helto_privacy/ui/privacy.js` — the shared unlock dialog (ES module)

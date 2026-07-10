@@ -52,6 +52,52 @@ def test_initialize_unlock_lock_lifecycle():
     assert codec.decrypt_state(envelope) == {"secret": "prompt"}
 
 
+def test_direct_keystore_writers_and_secret_reads_require_active_suite(
+    monkeypatch,
+    isolated_privacy_paths,
+):
+    monkeypatch.setattr(
+        keystore,
+        "_require_active_suite",
+        isolated_privacy_paths[2],
+    )
+
+    blocked_operations = (
+        lambda: keystore.initialize_keystore(PASSWORD),
+        lambda: keystore.unlock_keystore(PASSWORD),
+        lambda: keystore.change_keystore_password(PASSWORD, "new password"),
+        lambda: keystore.add_keys_to_keystore(PASSWORD, []),
+        lambda: keystore.rotate_primary_key(PASSWORD),
+        keystore.primary_session_key,
+        lambda: keystore.session_key_for("opaque-key"),
+        keystore.session_token,
+    )
+    for operation in blocked_operations:
+        with pytest.raises(
+            PrivacyKeystoreError,
+            match="PRIVACY_SUITE_BLOCKED:suite_incomplete",
+        ):
+            operation()
+
+    assert keystore.lock_keystore()["keystoreInitialized"] is False
+
+
+def test_route_guard_blocks_before_keystore_initialization_when_suite_inactive(
+    monkeypatch,
+    isolated_privacy_paths,
+):
+    monkeypatch.setattr(
+        keystore,
+        "_require_active_suite",
+        isolated_privacy_paths[2],
+    )
+
+    assert check_privacy_token(_FakeRequest()) == {
+        "status": 409,
+        "error": "PRIVACY_SUITE_BLOCKED",
+    }
+
+
 def test_unlock_rejects_wrong_password():
     keystore.initialize_keystore(PASSWORD)
     keystore.lock_keystore()

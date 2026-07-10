@@ -22,6 +22,7 @@ from helto_privacy.suite_runtime import (
     SuiteStatus,
     measure_runtime_environment,
     process_suite_status_payload,
+    record_browser_manifest_attestation,
     register_consumer_suite_declaration,
     register_process_suite,
     require_active_process_suite,
@@ -67,6 +68,7 @@ def _inventory(manifest):
         ),
         server_manifest_digest=manifest.digest,
         browser_manifest_digest=manifest.digest,
+        installation_generation="a" * 64,
     )
 
 
@@ -170,11 +172,17 @@ def test_public_verification_hashes_artifacts_and_live_profile_registry(
             )
         )
 
+    unattested = SuiteInstallation(release).verify_installed(
+        artifact_files=artifact_files,
+        environment=environment,
+    )
+    assert unattested.status is SuiteStatus.INCOMPLETE
+
+    record_browser_manifest_attestation(manifest.digest)
     installation = SuiteInstallation(release)
     exact = installation.verify_installed(
         artifact_files=artifact_files,
         environment=environment,
-        browser_manifest_digest=manifest.digest,
     )
     assert exact.status is SuiteStatus.ACTIVATION_REQUIRED
 
@@ -182,7 +190,6 @@ def test_public_verification_hashes_artifacts_and_live_profile_registry(
     tampered = SuiteInstallation(release).verify_installed(
         artifact_files=artifact_files,
         environment=environment,
-        browser_manifest_digest=manifest.digest,
     )
     assert tampered.status is SuiteStatus.MISMATCH
 

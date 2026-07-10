@@ -40,6 +40,8 @@ _PROCESS_SUITE_LOCK = RLock()
 _PROCESS_SUITE_INSTALLATION: SuiteInstallation | None = None
 _PROCESS_SUITE_CONFLICT = False
 _PROCESS_CONSUMER_DECLARATIONS: list[ConsumerSuiteDeclaration] = []
+_PROCESS_BROWSER_MANIFEST_DIGEST: str | None = None
+_PROCESS_BROWSER_CONFLICT = False
 
 
 class SuiteStatus(str, Enum):
@@ -88,7 +90,8 @@ class InstalledSuiteInventory:
     environment: EnvironmentTuple
     consumer_declarations: tuple[ConsumerSuiteDeclaration, ...]
     server_manifest_digest: str
-    browser_manifest_digest: str
+    browser_manifest_digest: str | None
+    installation_generation: str
 
     def __post_init__(self) -> None:
         artifacts = typed_tuple(
@@ -111,10 +114,14 @@ class InstalledSuiteInventory:
         )
         if not isinstance(self.environment, EnvironmentTuple):
             raise SuiteInventoryError("invalid_installed_environment")
-        if not is_sha256(self.server_manifest_digest) or not is_sha256(
+        if not is_sha256(self.server_manifest_digest):
+            raise SuiteInventoryError("invalid_runtime_manifest_digest")
+        if self.browser_manifest_digest is not None and not is_sha256(
             self.browser_manifest_digest
         ):
-            raise SuiteInventoryError("invalid_runtime_manifest_digest")
+            raise SuiteInventoryError("invalid_browser_manifest_digest")
+        if not is_sha256(self.installation_generation):
+            raise SuiteInventoryError("invalid_installation_generation")
         object.__setattr__(self, "artifacts", artifacts)
         object.__setattr__(self, "profiles", profiles)
         object.__setattr__(self, "consumer_declarations", declarations)
@@ -179,7 +186,6 @@ class SuiteInstallation:
         *,
         artifact_files: Mapping[str, str | Path],
         environment: EnvironmentTuple,
-        browser_manifest_digest: str,
     ) -> SuiteReadinessReport:
         """Measure installed bytes and live registrations before verification."""
 
@@ -188,7 +194,6 @@ class SuiteInstallation:
                 self,
                 artifact_files=artifact_files,
                 environment=environment,
-                browser_manifest_digest=browser_manifest_digest,
             )
         except SuiteInventoryError:
             with self._lock:
@@ -253,6 +258,7 @@ class SuiteInstallation:
                 expected_artifact_ids - installed_artifact_ids
                 or expected_profile_ids - installed_profile_ids
                 or expected_distributions - installed_distributions
+                or inventory.browser_manifest_digest is None
             ):
                 return self._set_blocked_status(
                     SuiteStatus.INCOMPLETE,
@@ -379,11 +385,6 @@ class SuiteInstallation:
             )
         if record is None or record.manifest_digest != self.manifest.digest:
             return None
-        if record.inventory_digest != inventory.digest:
-            return self._set_blocked_status(
-                SuiteStatus.MISMATCH,
-                "activation_inventory_mismatch",
-            )
         authorization = SignedActivationAuthorization(
             manifest_digest=record.manifest_digest,
             inventory_digest=record.inventory_digest,
@@ -403,6 +404,15 @@ class SuiteInstallation:
                 SuiteStatus.CONFLICT,
                 "activation_record_invalid",
             )
+        if record.inventory_digest != inventory.digest:
+            if self._status is SuiteStatus.ACTIVE:
+                return self._set_blocked_status(
+                    SuiteStatus.MISMATCH,
+                    "activation_inventory_mismatch",
+                )
+            return self._set_reactivation_required(
+                "installation_generation_changed",
+            )
         if (
             record.previous_suite_id != self.manifest.previous_suite_id
             or record.rollback is not self.manifest.rollback
@@ -412,8 +422,7 @@ class SuiteInstallation:
                 "rollback_boundary_mismatch",
             )
         if record.reactivation_required:
-            return self._set_status(
-                SuiteStatus.ACTIVATION_REQUIRED,
+            return self._set_reactivation_required(
                 "explicit_reactivation_required",
             )
         return self._set_status(SuiteStatus.ACTIVE)
@@ -424,8 +433,28 @@ class SuiteInstallation:
         issue_code: str,
     ) -> SuiteReadinessReport:
         self._restart_required = True
-        self._mark_reactivation_required()
-        return self._set_status(status, issue_code)
+        report = self._set_status(status, issue_code)
+        try:
+            self._mark_reactivation_required()
+        except SuiteActivationError:
+            return self._set_status(
+                SuiteStatus.CONFLICT,
+                "reactivation_marker_commit_failed",
+            )
+        return report
+
+    def _set_reactivation_required(
+        self,
+        issue_code: str,
+    ) -> SuiteReadinessReport:
+        try:
+            self._mark_reactivation_required()
+        except SuiteActivationError:
+            return self._set_status(
+                SuiteStatus.CONFLICT,
+                "reactivation_marker_commit_failed",
+            )
+        return self._set_status(SuiteStatus.ACTIVATION_REQUIRED, issue_code)
 
     def _mark_reactivation_required(self) -> None:
         if self._activation_store is None:
@@ -440,8 +469,10 @@ class SuiteInstallation:
                 self._activation_store.commit(
                     replace(record, reactivation_required=True)
                 )
+        except SuiteActivationError:
+            raise
         except Exception:
-            return
+            raise SuiteActivationError("reactivation_marker_commit_failed") from None
 
     def _set_status(
         self,
@@ -504,6 +535,7 @@ def _inventory_canonical_bytes(inventory: InstalledSuiteInventory) -> bytes:
             ],
             "serverManifestDigest": inventory.server_manifest_digest,
             "browserManifestDigest": inventory.browser_manifest_digest,
+            "installationGeneration": inventory.installation_generation,
         }
     )
 
@@ -544,12 +576,37 @@ def register_consumer_suite_declaration(
     return declaration
 
 
+def record_browser_manifest_attestation(manifest_digest: str) -> str:
+    """Record the manifest digest observed by the loaded browser runtime."""
+
+    global _PROCESS_BROWSER_CONFLICT, _PROCESS_BROWSER_MANIFEST_DIGEST
+    global _PROCESS_SUITE_CONFLICT
+    if not is_sha256(manifest_digest):
+        raise SuiteInventoryError("invalid_browser_manifest_digest")
+    with _PROCESS_SUITE_LOCK:
+        if _PROCESS_BROWSER_CONFLICT:
+            raise SuiteInventoryError("browser_manifest_conflict")
+        if (
+            _PROCESS_SUITE_INSTALLATION is not None
+            and manifest_digest != _PROCESS_SUITE_INSTALLATION.manifest.digest
+        ):
+            _PROCESS_BROWSER_CONFLICT = True
+            _PROCESS_SUITE_CONFLICT = True
+            raise SuiteInventoryError("browser_manifest_conflict")
+        if _PROCESS_BROWSER_MANIFEST_DIGEST is None:
+            _PROCESS_BROWSER_MANIFEST_DIGEST = manifest_digest
+        elif _PROCESS_BROWSER_MANIFEST_DIGEST != manifest_digest:
+            _PROCESS_BROWSER_CONFLICT = True
+            _PROCESS_SUITE_CONFLICT = True
+            raise SuiteInventoryError("browser_manifest_conflict")
+        return manifest_digest
+
+
 def measure_installed_suite(
     installation: SuiteInstallation,
     *,
     artifact_files: Mapping[str, str | Path],
     environment: EnvironmentTuple,
-    browser_manifest_digest: str,
 ) -> InstalledSuiteInventory:
     """Hash exact artifacts and read profiles/declarations from live registries."""
 
@@ -564,6 +621,7 @@ def measure_installed_suite(
         raise SuiteInventoryError("unexpected_artifact_file")
 
     measured_artifacts = []
+    generation_entries = []
     for distribution, artifact in expected.items():
         raw_path = artifact_files.get(distribution)
         if raw_path is None:
@@ -573,6 +631,7 @@ def measure_installed_suite(
             if not path.is_file():
                 continue
             digest = _sha256_file(path)
+            stat = path.stat()
         except OSError:
             continue
         measured_artifacts.append(
@@ -581,6 +640,16 @@ def measure_installed_suite(
                 filename=path.name,
                 sha256=digest,
             )
+        )
+        generation_entries.append(
+            {
+                "distribution": distribution,
+                "device": stat.st_dev,
+                "inode": stat.st_ino,
+                "size": stat.st_size,
+                "modifiedNs": stat.st_mtime_ns,
+                "changedNs": stat.st_ctime_ns,
+            }
         )
 
     try:
@@ -591,6 +660,9 @@ def measure_installed_suite(
         raise SuiteInventoryError("profile_registry_conflict") from None
     with _PROCESS_SUITE_LOCK:
         declarations = tuple(_PROCESS_CONSUMER_DECLARATIONS)
+        if _PROCESS_BROWSER_CONFLICT:
+            raise SuiteInventoryError("browser_manifest_conflict")
+        browser_manifest_digest = _PROCESS_BROWSER_MANIFEST_DIGEST
     return InstalledSuiteInventory(
         artifacts=tuple(measured_artifacts),
         profiles=profiles,
@@ -598,6 +670,9 @@ def measure_installed_suite(
         consumer_declarations=declarations,
         server_manifest_digest=installation.manifest.digest,
         browser_manifest_digest=browser_manifest_digest,
+        installation_generation=hashlib.sha256(
+            canonical_json_bytes(generation_entries)
+        ).hexdigest(),
     )
 
 
@@ -616,7 +691,15 @@ def register_process_suite(installation: SuiteInstallation) -> SuiteInstallation
     if not isinstance(installation, SuiteInstallation):
         raise SuiteBlockedError("invalid_process_suite")
     with _PROCESS_SUITE_LOCK:
-        if _PROCESS_SUITE_CONFLICT:
+        if (
+            _PROCESS_SUITE_CONFLICT
+            or _PROCESS_BROWSER_CONFLICT
+            or (
+                _PROCESS_BROWSER_MANIFEST_DIGEST is not None
+                and _PROCESS_BROWSER_MANIFEST_DIGEST != installation.manifest.digest
+            )
+        ):
+            _PROCESS_SUITE_CONFLICT = True
             raise SuiteBlockedError("suite_process_conflict")
         if _PROCESS_SUITE_INSTALLATION is None:
             _PROCESS_SUITE_INSTALLATION = installation

@@ -133,6 +133,7 @@ export async function connectPrivacyPack({
   suiteManifestDigest,
   adapters = {},
   fetchProfile = fetchPrivacyProfile,
+  attestBrowser = attestBrowserManifest,
 }) {
   const id = String(packId || "").trim();
   const fingerprint = String(profileFingerprint || "").trim();
@@ -146,6 +147,7 @@ export async function connectPrivacyPack({
     || !adapters
     || typeof adapters !== "object"
     || Array.isArray(adapters)
+    || typeof attestBrowser !== "function"
   ) {
     throw new PrivacyPackConnectionError("invalid_browser_declaration");
   }
@@ -182,6 +184,11 @@ export async function connectPrivacyPack({
     adapters,
     attestation,
   });
+  try {
+    await attestBrowser(suiteDigest);
+  } catch {
+    throw new PrivacyPackConnectionError("browser_manifest_attestation_failed");
+  }
 
   if (PRIVACY_EXTENSION_APP && PRIVACY_EXTENSION_APP !== app) {
     throw new PrivacyPackConnectionError("comfyui_app_conflict");
@@ -228,6 +235,22 @@ async function fetchPrivacyProfile(packId) {
   });
   const payload = await response.json();
   if (!response.ok || payload?.ok === false) throw new Error("Profile attestation failed.");
+  return payload;
+}
+
+async function attestBrowserManifest(manifestDigest) {
+  const response = await fetch(`${ROUTE_PREFIX}/suite/browser-attestation`, {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ manifestDigest }),
+  });
+  const payload = await response.json();
+  if (!response.ok || payload?.ok === false) {
+    throw new Error("Browser manifest attestation failed.");
+  }
   return payload;
 }
 

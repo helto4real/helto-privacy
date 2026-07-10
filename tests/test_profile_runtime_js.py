@@ -19,6 +19,10 @@ def run_node_module_test(tmp_path, body: str) -> None:
 
             const fingerprint = "a".repeat(64);
             const suiteDigest = "d".repeat(64);
+            globalThis.fetch = async () => ({{
+              ok: true,
+              async json() {{ return {{ ok: true }}; }},
+            }});
             const attestation = (overrides = {{}}) => ({{
               id: "helto.director",
               contract: privacy.PRIVACY_CONTRACT_V2,

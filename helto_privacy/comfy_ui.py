@@ -118,10 +118,32 @@ def register_helto_privacy_ui(
                 headers={"Cache-Control": "no-store"},
             )
 
+    @routes.post(f"{ROUTE_PREFIX}/suite/browser-attestation")
+    async def post_helto_privacy_browser_attestation(request):
+        from .suite_runtime import (
+            SuiteInventoryError,
+            record_browser_manifest_attestation,
+        )
+
+        try:
+            payload = await request.json()
+            digest = str(payload.get("manifestDigest") or "")
+            record_browser_manifest_attestation(digest)
+            return web.json_response(
+                {"ok": True, "suiteManifestDigest": digest},
+                headers={"Cache-Control": "no-store"},
+            )
+        except SuiteInventoryError:
+            return web.json_response(
+                {"ok": False, "error": "PRIVACY_SUITE_ASSET_MISMATCH"},
+                status=409,
+                headers={"Cache-Control": "no-store"},
+            )
+
     @routes.post(f"{ROUTE_PREFIX}/unlock")
     async def post_helto_privacy_unlock(request):
         try:
-            _require_active_suite()
+            require_active_process_suite()
             payload = await request.json()
             password = str(payload.get("password") or "")
             # scrypt is deliberately slow; keep it off the event loop.
@@ -130,10 +152,7 @@ def register_helto_privacy_ui(
         except PrivacyKeystoreError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except SuiteBlockedError:
-            return web.json_response(
-                {"ok": False, "error": "PRIVACY_SUITE_BLOCKED"},
-                status=409,
-            )
+            return _suite_blocked_response(web)
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
@@ -147,7 +166,7 @@ def register_helto_privacy_ui(
     @routes.post(f"{ROUTE_PREFIX}/keystore/init")
     async def post_helto_privacy_init(request):
         try:
-            _require_active_suite()
+            require_active_process_suite()
             payload = await request.json()
             password = str(payload.get("password") or "")
             result = await asyncio.to_thread(_initialize_and_migrate, password)
@@ -155,17 +174,14 @@ def register_helto_privacy_ui(
         except PrivacyKeystoreError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except SuiteBlockedError:
-            return web.json_response(
-                {"ok": False, "error": "PRIVACY_SUITE_BLOCKED"},
-                status=409,
-            )
+            return _suite_blocked_response(web)
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
     @routes.post(f"{ROUTE_PREFIX}/keystore/change_password")
     async def post_helto_privacy_change_password(request):
         try:
-            _require_active_suite()
+            require_active_process_suite()
             payload = await request.json()
             result = await asyncio.to_thread(
                 keystore.change_keystore_password,
@@ -176,10 +192,7 @@ def register_helto_privacy_ui(
         except PrivacyKeystoreError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
         except SuiteBlockedError:
-            return web.json_response(
-                {"ok": False, "error": "PRIVACY_SUITE_BLOCKED"},
-                status=409,
-            )
+            return _suite_blocked_response(web)
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
@@ -230,7 +243,7 @@ def register_helto_privacy_ui(
 
 
 def _initialize_and_migrate(password: str) -> dict[str, Any]:
-    _require_active_suite()
+    require_active_process_suite()
     legacy = _collect_legacy_keys()
     result = keystore.initialize_keystore(
         password, legacy_keys=[(key_id, key) for key_id, key, _path in legacy]
@@ -240,7 +253,7 @@ def _initialize_and_migrate(password: str) -> dict[str, Any]:
 
 
 def _unlock_and_migrate(password: str) -> dict[str, Any]:
-    _require_active_suite()
+    require_active_process_suite()
     result = keystore.unlock_keystore(password)
     legacy = _collect_legacy_keys()
     if legacy:
@@ -253,8 +266,11 @@ def _unlock_and_migrate(password: str) -> dict[str, Any]:
     return result
 
 
-def _require_active_suite() -> None:
-    require_active_process_suite()
+def _suite_blocked_response(web):
+    return web.json_response(
+        {"ok": False, "error": "PRIVACY_SUITE_BLOCKED"},
+        status=409,
+    )
 
 
 def _collect_legacy_keys() -> list[tuple[str, bytes, Path]]:

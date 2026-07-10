@@ -74,10 +74,30 @@ def test_explicit_digest_bound_activation_persists_rollback_boundary(
     )
     assert restarted._verify_inventory(inventory).status is SuiteStatus.ACTIVE
 
+    original_commit = store.commit
+
+    def fail_reactivation_commit(_record):
+        raise OSError("synthetic persistence failure")
+
+    monkeypatch.setattr(store, "commit", fail_reactivation_commit)
     mismatched = replace(inventory, browser_manifest_digest="e" * 64)
-    assert restarted._verify_inventory(mismatched).status is SuiteStatus.MISMATCH
+    failed_marker = restarted._verify_inventory(mismatched)
+    assert failed_marker.status is SuiteStatus.CONFLICT
+    assert failed_marker.issue_codes == ("reactivation_marker_commit_failed",)
     blocked_repair = restarted._verify_inventory(inventory)
     assert blocked_repair.issue_codes == ("process_restart_required",)
+    assert store.load().reactivation_required is False
+
+    monkeypatch.setattr(store, "commit", original_commit)
+    changed_installation = replace(inventory, installation_generation="e" * 64)
+    changed_process = SuiteInstallation(
+        release,
+        activation_store=store,
+        trusted_activation_keys={"user-activation-2026": activation_key.public_key()},
+    )
+    changed_generation = changed_process._verify_inventory(changed_installation)
+    assert changed_generation.status is SuiteStatus.ACTIVATION_REQUIRED
+    assert changed_generation.issue_codes == ("installation_generation_changed",)
     assert store.load().reactivation_required is True
 
     repaired_process = SuiteInstallation(

@@ -14,6 +14,12 @@ PRIVACY_TOKEN_COOKIE = "helto_privacy_token"
 
 def check_privacy_token(request: Any) -> dict[str, Any] | None:
     """Return None when allowed, otherwise a small HTTP error description."""
+    try:
+        keystore._require_active_suite()
+    except keystore.PrivacyKeystoreError as exc:
+        if str(exc).startswith("PRIVACY_SUITE_BLOCKED:"):
+            return {"status": 409, "error": "PRIVACY_SUITE_BLOCKED"}
+        raise
     if not keystore.keystore_exists():
         return None
     expected = keystore.session_token()
