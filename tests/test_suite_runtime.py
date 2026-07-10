@@ -1,16 +1,28 @@
+import hashlib
+import types
 from dataclasses import replace
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from helto_privacy.suite import sign_suite_manifest, sign_suite_promotion, verify_suite_release
+from helto_privacy.profile import (
+    AdapterSlot,
+    PrivacyProfile,
+    PrivacyScope,
+    ProfileResource,
+    ResourceKind,
+)
+from helto_privacy.suite import ProfileIdentity
 from helto_privacy.suite_runtime import (
     ConsumerSuiteDeclaration,
     InstalledSuiteInventory,
     SuiteBlockedError,
     SuiteInstallation,
     SuiteStatus,
+    measure_runtime_environment,
     process_suite_status_payload,
+    register_consumer_suite_declaration,
     register_process_suite,
     require_active_process_suite,
 )
@@ -58,11 +70,61 @@ def _inventory(manifest):
     )
 
 
+def _install_manifest_profiles(manifest, monkeypatch):
+    import helto_privacy.runtime as runtime
+
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    identities = []
+    for declared in manifest.profiles:
+        profile = PrivacyProfile(
+            id=declared.id,
+            distribution=declared.distribution,
+            resources=(
+                ProfileResource(
+                    "privacy-mode",
+                    ResourceKind.MODE,
+                    ("mode-source",),
+                ),
+            ),
+            server_adapters=(
+                AdapterSlot(
+                    "mode-source",
+                    ResourceKind.MODE,
+                    "privacy-mode",
+                ),
+            ),
+            scopes=(
+                PrivacyScope(
+                    "default",
+                    "privacy-mode",
+                    "mode-source",
+                ),
+            ),
+        )
+        runtime.install(
+            profile,
+            {
+                "mode-source": types.SimpleNamespace(
+                    read_declared_mode=lambda: None,
+                    write_declared_mode=lambda: None,
+                )
+            },
+        )
+        identities.append(
+            ProfileIdentity(
+                id=profile.id,
+                distribution=profile.distribution,
+                fingerprint=profile.fingerprint,
+            )
+        )
+    return tuple(identities)
+
+
 def test_pending_suite_verifies_but_cannot_activate():
     release = _release(ready=False)
     installation = SuiteInstallation(release)
 
-    report = installation.verify(_inventory(release.manifest))
+    report = installation._verify_inventory(_inventory(release.manifest))
 
     assert report.status is SuiteStatus.CUTOVER_PENDING
     assert report.issue_codes == ("suite_not_promoted",)
@@ -71,22 +133,82 @@ def test_pending_suite_verifies_but_cannot_activate():
     assert exc_info.value.code == "suite_cutover_pending"
 
 
+def test_public_verification_hashes_artifacts_and_live_profile_registry(
+    tmp_path,
+    monkeypatch,
+):
+    base = suite_manifest()
+    profiles = _install_manifest_profiles(base, monkeypatch)
+    environment = measure_runtime_environment(
+        comfyui_backend="e2a6e30d",
+        comfyui_frontend="1.45.20",
+        renderer="vue",
+    )
+    artifact_files = {}
+    artifacts = []
+    for artifact in base.artifacts:
+        path = tmp_path / artifact.filename
+        payload = f"synthetic artifact: {artifact.distribution}".encode()
+        path.write_bytes(payload)
+        artifact_files[artifact.distribution] = path
+        artifacts.append(
+            replace(artifact, sha256=hashlib.sha256(payload).hexdigest())
+        )
+    manifest = replace(
+        base,
+        artifacts=tuple(artifacts),
+        profiles=profiles,
+        environments=(environment,),
+    )
+    release = _release(ready=True, manifest=manifest)
+    for profile in profiles:
+        register_consumer_suite_declaration(
+            ConsumerSuiteDeclaration(
+                distribution=profile.distribution,
+                suite_id=manifest.id,
+                manifest_digest=manifest.digest,
+            )
+        )
+
+    installation = SuiteInstallation(release)
+    exact = installation.verify_installed(
+        artifact_files=artifact_files,
+        environment=environment,
+        browser_manifest_digest=manifest.digest,
+    )
+    assert exact.status is SuiteStatus.ACTIVATION_REQUIRED
+
+    next(iter(artifact_files.values())).write_bytes(b"tampered artifact")
+    tampered = SuiteInstallation(release).verify_installed(
+        artifact_files=artifact_files,
+        environment=environment,
+        browser_manifest_digest=manifest.digest,
+    )
+    assert tampered.status is SuiteStatus.MISMATCH
+
+
 def test_ready_suite_reports_incomplete_mismatch_conflict_then_activation_required():
     release = _release(ready=True)
     manifest = release.manifest
-    installation = SuiteInstallation(release)
-    assert installation.status is SuiteStatus.READY
-
     exact = _inventory(manifest)
     incomplete = replace(exact, artifacts=exact.artifacts[:-1])
-    assert installation.verify(incomplete).status is SuiteStatus.INCOMPLETE
+    assert (
+        SuiteInstallation(release)._verify_inventory(incomplete).status
+        is SuiteStatus.INCOMPLETE
+    )
 
     wrong_artifact = replace(exact.artifacts[0], sha256="f" * 64)
     mismatch = replace(exact, artifacts=(wrong_artifact, *exact.artifacts[1:]))
-    assert installation.verify(mismatch).status is SuiteStatus.MISMATCH
+    assert (
+        SuiteInstallation(release)._verify_inventory(mismatch).status
+        is SuiteStatus.MISMATCH
+    )
 
     duplicated = replace(exact, artifacts=(*exact.artifacts, exact.artifacts[0]))
-    assert installation.verify(duplicated).status is SuiteStatus.MISMATCH
+    assert (
+        SuiteInstallation(release)._verify_inventory(duplicated).status
+        is SuiteStatus.MISMATCH
+    )
 
     conflicting = replace(
         exact,
@@ -95,13 +217,30 @@ def test_ready_suite_reports_incomplete_mismatch_conflict_then_activation_requir
             replace(exact.consumer_declarations[0], suite_id="other-suite"),
         ),
     )
-    assert installation.verify(conflicting).status is SuiteStatus.CONFLICT
+    assert (
+        SuiteInstallation(release)._verify_inventory(conflicting).status
+        is SuiteStatus.CONFLICT
+    )
 
-    report = installation.verify(exact)
+    installation = SuiteInstallation(release)
+    report = installation._verify_inventory(exact)
     assert report.status is SuiteStatus.ACTIVATION_REQUIRED
     assert report.issue_codes == ("explicit_activation_required",)
     with pytest.raises(SuiteBlockedError):
         installation.require_active()
+
+
+def test_failed_installation_requires_a_fresh_process_before_activation():
+    release = _release(ready=True)
+    installation = SuiteInstallation(release)
+    exact = _inventory(release.manifest)
+
+    incomplete = replace(exact, artifacts=exact.artifacts[:-1])
+    assert installation._verify_inventory(incomplete).status is SuiteStatus.INCOMPLETE
+
+    repaired = installation._verify_inventory(exact)
+    assert repaired.status is SuiteStatus.MISMATCH
+    assert repaired.issue_codes == ("process_restart_required",)
 
 
 def test_process_gate_blocks_missing_pending_and_conflicting_suites(monkeypatch):
@@ -120,7 +259,7 @@ def test_process_gate_blocks_missing_pending_and_conflicting_suites(monkeypatch)
 
     pending_release = _release(ready=False)
     pending = SuiteInstallation(pending_release)
-    pending.verify(_inventory(pending_release.manifest))
+    pending._verify_inventory(_inventory(pending_release.manifest))
     assert register_process_suite(pending) is pending
     assert process_suite_status_payload()["suiteStatus"] == "cutover-pending"
     with pytest.raises(SuiteBlockedError):

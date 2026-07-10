@@ -35,7 +35,7 @@ def test_explicit_digest_bound_activation_persists_rollback_boundary(
         trusted_activation_keys={"user-activation-2026": activation_key.public_key()},
     )
     inventory = _inventory(release.manifest)
-    assert installation.verify(inventory).status is SuiteStatus.ACTIVATION_REQUIRED
+    assert installation._verify_inventory(inventory).status is SuiteStatus.ACTIVATION_REQUIRED
     request = installation.activation_request()
     authorization = sign_activation_authorization(
         request,
@@ -72,4 +72,19 @@ def test_explicit_digest_bound_activation_persists_rollback_boundary(
         activation_store=store,
         trusted_activation_keys={"user-activation-2026": activation_key.public_key()},
     )
-    assert restarted.verify(inventory).status is SuiteStatus.ACTIVE
+    assert restarted._verify_inventory(inventory).status is SuiteStatus.ACTIVE
+
+    mismatched = replace(inventory, browser_manifest_digest="e" * 64)
+    assert restarted._verify_inventory(mismatched).status is SuiteStatus.MISMATCH
+    blocked_repair = restarted._verify_inventory(inventory)
+    assert blocked_repair.issue_codes == ("process_restart_required",)
+    assert store.load().reactivation_required is True
+
+    repaired_process = SuiteInstallation(
+        release,
+        activation_store=store,
+        trusted_activation_keys={"user-activation-2026": activation_key.public_key()},
+    )
+    reactivation = repaired_process._verify_inventory(inventory)
+    assert reactivation.status is SuiteStatus.ACTIVATION_REQUIRED
+    assert reactivation.issue_codes == ("explicit_reactivation_required",)

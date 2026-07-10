@@ -42,7 +42,7 @@ class SyntheticMaintenanceBackend:
 def test_maintenance_capability_is_operator_blind_and_product_data_free():
     release = _release(ready=True)
     installation = SuiteInstallation(release)
-    installation.verify(_inventory(release.manifest))
+    installation._verify_inventory(_inventory(release.manifest))
     backend = SyntheticMaintenanceBackend()
     maintenance = installation.maintenance_capability(backend)
     source = OpaqueObjectReference("source-1")

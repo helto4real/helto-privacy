@@ -10,6 +10,7 @@ from helto_privacy.envelope import (
     ENVELOPE_VERSION,
     PrivacyEnvelopeCodec,
     PrivacyError,
+    initialize_keystore_with_legacy_migration,
 )
 from helto_privacy.keystore import KEYSTORE_CRYPTO_AVAILABLE
 
@@ -108,6 +109,30 @@ def test_chunked_byte_envelope_round_trip_and_tamper_detection(tmp_path, monkeyp
     tampered["chunks"][0]["ciphertext"] = replacement + ciphertext[1:]
     with pytest.raises(PrivacyError, match="Could not decrypt chunked byte payload"):
         codec.decrypt_bytes(tampered, "spill", base_dir=tmp_path)
+
+
+def test_codec_writers_and_reveals_require_an_active_exact_suite(
+    tmp_path,
+    monkeypatch,
+    isolated_privacy_paths,
+):
+    codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
+    payload = codec.encrypt_state({"synthetic": "value"}, base_dir=tmp_path)
+    monkeypatch.setattr(
+        envelope_module,
+        "_require_active_privacy_operation",
+        isolated_privacy_paths[0],
+    )
+
+    with pytest.raises(PrivacyError, match="PRIVACY_SUITE_BLOCKED:suite_incomplete"):
+        codec.encrypt_state({"synthetic": "blocked"}, base_dir=tmp_path)
+    with pytest.raises(PrivacyError, match="PRIVACY_SUITE_BLOCKED:suite_incomplete"):
+        codec.decrypt_state(payload, base_dir=tmp_path)
+    with pytest.raises(PrivacyError, match="PRIVACY_SUITE_BLOCKED:suite_incomplete"):
+        initialize_keystore_with_legacy_migration(
+            "synthetic password",
+            tmp_path,
+        )
 
 
 def _b64url_encode(data: bytes) -> str:

@@ -7,10 +7,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from threading import RLock
 from types import MappingProxyType
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from .comfy_ui import register_helto_privacy_ui
 from .profile import PrivacyProfile, ProfileResource, ResourceKind
+
+if TYPE_CHECKING:
+    from .suite import ProfileIdentity
 
 
 class PrivacyInstallationError(RuntimeError):
@@ -268,6 +271,32 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
     from .suite_runtime import process_suite_status_payload
 
     return {**result, **process_suite_status_payload()}
+
+
+def installed_profile_identities() -> tuple[ProfileIdentity, ...]:
+    """Measure safe identities from the live immutable profile registry."""
+
+    from .suite import ProfileIdentity
+
+    with _LOCK:
+        if any(
+            installation.status is InstallationStatus.CONFLICT
+            for installation in _INSTALLATIONS.values()
+        ):
+            raise ProfileConflictError("profile_registry_conflict")
+        return tuple(
+            sorted(
+                (
+                    ProfileIdentity(
+                        id=installation.profile.id,
+                        distribution=installation.profile.distribution,
+                        fingerprint=installation.profile.fingerprint,
+                    )
+                    for installation in _INSTALLATIONS.values()
+                ),
+                key=lambda identity: identity.id,
+            )
+        )
 
 
 def _validate_adapter_bindings(

@@ -75,7 +75,11 @@ def _profile():
     )
 
 
-def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_path):
+def test_profile_routes_are_safe_and_independent_of_aiohttp(
+    monkeypatch,
+    tmp_path,
+    isolated_privacy_paths,
+):
     monkeypatch.setattr(comfy_ui, "_ROUTES_REGISTERED", False)
     monkeypatch.setattr(comfy_ui, "_LEGACY_KEY_DIRS", [])
     monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
@@ -125,6 +129,27 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_pat
         "suiteIssueCodes": ["suite_not_configured"],
     }
 
+    monkeypatch.setattr(
+        comfy_ui,
+        "_require_active_suite",
+        isolated_privacy_paths[1],
+    )
+
+    async def unlock_payload():
+        return {"password": "synthetic password"}
+
+    unlock_handler = prompt_server.routes.handlers[
+        ("POST", f"{comfy_ui.ROUTE_PREFIX}/unlock")
+    ]
+    blocked_unlock = asyncio.run(
+        unlock_handler(types.SimpleNamespace(json=unlock_payload))
+    )
+    assert blocked_unlock.status == 409
+    assert blocked_unlock.data == {
+        "ok": False,
+        "error": "PRIVACY_SUITE_BLOCKED",
+    }
+
     handler = prompt_server.routes.handlers[
         ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}")
     ]
@@ -155,7 +180,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_pat
     ]
     release = _release(ready=False)
     suite = SuiteInstallation(release)
-    suite.verify(_inventory(release.manifest))
+    suite._verify_inventory(_inventory(release.manifest))
     register_process_suite(suite)
     module_request = types.SimpleNamespace(
         match_info={"manifest_digest": release.manifest.digest}

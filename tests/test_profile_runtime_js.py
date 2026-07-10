@@ -162,13 +162,6 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
         await assert.rejects(
           () => privacy.connectPrivacyPack({
             ...base,
-            fetchProfile: async () => attestation({ suiteStatus: "activation-required" }),
-          }),
-          (error) => error.code === "server_suite_not_active",
-        );
-        await assert.rejects(
-          () => privacy.connectPrivacyPack({
-            ...base,
             adapters: {},
             fetchProfile: async () => attestation(),
           }),
@@ -188,6 +181,16 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
             fetchProfile: async () => attestation({ status: "waiting_for_prompt_server" }),
           }),
           (error) => error.code === "server_profile_not_ready",
+        );
+
+        const verificationPack = await privacy.connectPrivacyPack({
+          ...base,
+          fetchProfile: async () => attestation({ suiteStatus: "activation-required" }),
+        });
+        verificationPack.readiness.requireReady();
+        assert.throws(
+          () => verificationPack.authorization.requireReady(),
+          (error) => error.code === "server_suite_not_active",
         );
         """,
     )

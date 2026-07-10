@@ -9,6 +9,12 @@ const STATUS = Object.freeze({
   CONFLICT: "conflict",
   SUITE_ACTIVE: "active",
 });
+const VERIFICATION_SUITE_STATUSES = new Set([
+  "cutover-pending",
+  "ready",
+  "activation-required",
+  STATUS.SUITE_ACTIVE,
+]);
 const RESOURCE_KIND = Object.freeze({
   MODE: "mode",
   WORKFLOW: "workflow",
@@ -60,6 +66,9 @@ export class BrowserAuthorizationHandle {
 
   requireReady() {
     this.readiness.requireReady();
+    if (HANDLE_ENTRIES.get(this).suiteStatus !== STATUS.SUITE_ACTIVE) {
+      throw new PrivacyPackConnectionError("server_suite_not_active");
+    }
   }
 }
 
@@ -184,6 +193,7 @@ export async function connectPrivacyPack({
     contract,
     fingerprint,
     suiteManifestDigest: suiteDigest,
+    suiteStatus: attestation.suiteStatus,
     adapters: Object.freeze({ ...adapters }),
     requirements: attestation.requiredBrowserAdapters.map((item) => Object.freeze({
       id: String(item.id),
@@ -241,8 +251,8 @@ function validateServerAttestation({
   if (attestation.status !== STATUS.READY) {
     throw new PrivacyPackConnectionError("server_profile_not_ready");
   }
-  if (attestation.suiteStatus !== STATUS.SUITE_ACTIVE) {
-    throw new PrivacyPackConnectionError("server_suite_not_active");
+  if (!VERIFICATION_SUITE_STATUSES.has(attestation.suiteStatus)) {
+    throw new PrivacyPackConnectionError("server_suite_blocked");
   }
   if (!Array.isArray(attestation.resources)) {
     throw new PrivacyPackConnectionError("invalid_server_resource_declaration");

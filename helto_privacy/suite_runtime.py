@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+import platform
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from enum import Enum
+from pathlib import Path
 from threading import RLock
-from typing import Mapping
 
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
-from ._suite_codec import canonical_json_bytes, is_sha256, is_stable_id
+from ._suite_codec import canonical_json_bytes, is_sha256, is_stable_id, typed_tuple
 from .suite import (
     ArtifactIdentity,
     EnvironmentTuple,
@@ -37,6 +39,7 @@ from .suite_maintenance import (
 _PROCESS_SUITE_LOCK = RLock()
 _PROCESS_SUITE_INSTALLATION: SuiteInstallation | None = None
 _PROCESS_SUITE_CONFLICT = False
+_PROCESS_CONSUMER_DECLARATIONS: list[ConsumerSuiteDeclaration] = []
 
 
 class SuiteStatus(str, Enum):
@@ -88,20 +91,23 @@ class InstalledSuiteInventory:
     browser_manifest_digest: str
 
     def __post_init__(self) -> None:
-        artifacts = _inventory_tuple(
+        artifacts = typed_tuple(
             self.artifacts,
             ArtifactIdentity,
             "invalid_installed_artifacts",
+            SuiteInventoryError,
         )
-        profiles = _inventory_tuple(
+        profiles = typed_tuple(
             self.profiles,
             ProfileIdentity,
             "invalid_installed_profiles",
+            SuiteInventoryError,
         )
-        declarations = _inventory_tuple(
+        declarations = typed_tuple(
             self.consumer_declarations,
             ConsumerSuiteDeclaration,
             "invalid_consumer_declarations",
+            SuiteInventoryError,
         )
         if not isinstance(self.environment, EnvironmentTuple):
             raise SuiteInventoryError("invalid_installed_environment")
@@ -141,6 +147,7 @@ class SuiteInstallation:
         self._activation_store = activation_store
         self._trusted_activation_keys = dict(trusted_activation_keys or {})
         self._lock = RLock()
+        self._restart_required = False
         self._status = (
             SuiteStatus.CUTOVER_PENDING
             if release.status is SuitePublicationStatus.CUTOVER_PENDING
@@ -167,12 +174,48 @@ class SuiteInstallation:
     def manifest(self) -> SuiteManifest:
         return self._release.manifest
 
-    def verify(self, inventory: InstalledSuiteInventory) -> SuiteReadinessReport:
+    def verify_installed(
+        self,
+        *,
+        artifact_files: Mapping[str, str | Path],
+        environment: EnvironmentTuple,
+        browser_manifest_digest: str,
+    ) -> SuiteReadinessReport:
+        """Measure installed bytes and live registrations before verification."""
+
+        try:
+            inventory = measure_installed_suite(
+                self,
+                artifact_files=artifact_files,
+                environment=environment,
+                browser_manifest_digest=browser_manifest_digest,
+            )
+        except SuiteInventoryError:
+            with self._lock:
+                return self._set_blocked_status(
+                    SuiteStatus.CONFLICT,
+                    "suite_measurement_failed",
+                )
+        return self._verify_inventory(inventory)
+
+    def _verify_inventory(
+        self,
+        inventory: InstalledSuiteInventory,
+    ) -> SuiteReadinessReport:
         if not isinstance(inventory, InstalledSuiteInventory):
             with self._lock:
-                return self._set_status(SuiteStatus.CONFLICT, "invalid_inventory")
+                return self._set_blocked_status(
+                    SuiteStatus.CONFLICT,
+                    "invalid_inventory",
+                )
         with self._lock:
             self._inventory = inventory
+
+            if self._restart_required:
+                return self._set_status(
+                    SuiteStatus.MISMATCH,
+                    "process_restart_required",
+                )
 
             declaration_pairs = {
                 (declaration.suite_id, declaration.manifest_digest)
@@ -193,7 +236,7 @@ class SuiteInstallation:
                 or _has_identity_conflict(inventory.artifacts, "id")
                 or _has_identity_conflict(inventory.profiles, "id")
             ):
-                return self._set_status(
+                return self._set_blocked_status(
                     SuiteStatus.CONFLICT,
                     "conflicting_suite_declarations",
                 )
@@ -211,7 +254,10 @@ class SuiteInstallation:
                 or expected_profile_ids - installed_profile_ids
                 or expected_distributions - installed_distributions
             ):
-                return self._set_status(SuiteStatus.INCOMPLETE, "suite_components_missing")
+                return self._set_blocked_status(
+                    SuiteStatus.INCOMPLETE,
+                    "suite_components_missing",
+                )
 
             expected_declarations = {
                 ConsumerSuiteDeclaration(
@@ -232,7 +278,10 @@ class SuiteInstallation:
                 or inventory.server_manifest_digest != self.manifest.digest
                 or inventory.browser_manifest_digest != self.manifest.digest
             ):
-                return self._set_status(SuiteStatus.MISMATCH, "suite_identity_mismatch")
+                return self._set_blocked_status(
+                    SuiteStatus.MISMATCH,
+                    "suite_identity_mismatch",
+                )
 
             if self._release.status is SuitePublicationStatus.CUTOVER_PENDING:
                 return self._set_status(SuiteStatus.CUTOVER_PENDING, "suite_not_promoted")
@@ -324,11 +373,17 @@ class SuiteInstallation:
         try:
             record = self._activation_store.load()
         except SuiteActivationError:
-            return self._set_status(SuiteStatus.CONFLICT, "activation_record_invalid")
+            return self._set_blocked_status(
+                SuiteStatus.CONFLICT,
+                "activation_record_invalid",
+            )
         if record is None or record.manifest_digest != self.manifest.digest:
             return None
         if record.inventory_digest != inventory.digest:
-            return self._set_status(SuiteStatus.MISMATCH, "activation_inventory_mismatch")
+            return self._set_blocked_status(
+                SuiteStatus.MISMATCH,
+                "activation_inventory_mismatch",
+            )
         authorization = SignedActivationAuthorization(
             manifest_digest=record.manifest_digest,
             inventory_digest=record.inventory_digest,
@@ -344,13 +399,49 @@ class SuiteInstallation:
                 self._trusted_activation_keys,
             )
         except SuiteActivationError:
-            return self._set_status(SuiteStatus.CONFLICT, "activation_record_invalid")
+            return self._set_blocked_status(
+                SuiteStatus.CONFLICT,
+                "activation_record_invalid",
+            )
         if (
             record.previous_suite_id != self.manifest.previous_suite_id
             or record.rollback is not self.manifest.rollback
         ):
-            return self._set_status(SuiteStatus.CONFLICT, "rollback_boundary_mismatch")
+            return self._set_blocked_status(
+                SuiteStatus.CONFLICT,
+                "rollback_boundary_mismatch",
+            )
+        if record.reactivation_required:
+            return self._set_status(
+                SuiteStatus.ACTIVATION_REQUIRED,
+                "explicit_reactivation_required",
+            )
         return self._set_status(SuiteStatus.ACTIVE)
+
+    def _set_blocked_status(
+        self,
+        status: SuiteStatus,
+        issue_code: str,
+    ) -> SuiteReadinessReport:
+        self._restart_required = True
+        self._mark_reactivation_required()
+        return self._set_status(status, issue_code)
+
+    def _mark_reactivation_required(self) -> None:
+        if self._activation_store is None:
+            return
+        try:
+            record = self._activation_store.load()
+            if (
+                record is not None
+                and record.manifest_digest == self.manifest.digest
+                and not record.reactivation_required
+            ):
+                self._activation_store.commit(
+                    replace(record, reactivation_required=True)
+                )
+        except Exception:
+            return
 
     def _set_status(
         self,
@@ -417,23 +508,105 @@ def _inventory_canonical_bytes(inventory: InstalledSuiteInventory) -> bytes:
     )
 
 
-def _inventory_tuple(values, expected_type, error_code):
-    if isinstance(values, (str, bytes)):
-        raise SuiteInventoryError(error_code)
-    try:
-        normalized = tuple(values)
-    except TypeError:
-        raise SuiteInventoryError(error_code) from None
-    if any(not isinstance(item, expected_type) for item in normalized):
-        raise SuiteInventoryError(error_code)
-    return normalized
-
-
 def _has_identity_conflict(values, attribute: str) -> bool:
     identities: dict[object, set[object]] = {}
     for value in values:
         identities.setdefault(getattr(value, attribute), set()).add(value)
     return any(len(entries) > 1 for entries in identities.values())
+
+
+def measure_runtime_environment(
+    *,
+    comfyui_backend: str,
+    comfyui_frontend: str,
+    renderer: str,
+) -> EnvironmentTuple:
+    """Measure the interpreter while binding host-reported ComfyUI identities."""
+
+    return EnvironmentTuple(
+        python=platform.python_version(),
+        comfyui_backend=comfyui_backend,
+        comfyui_frontend=comfyui_frontend,
+        renderer=renderer,
+    )
+
+
+def register_consumer_suite_declaration(
+    declaration: ConsumerSuiteDeclaration,
+) -> ConsumerSuiteDeclaration:
+    """Record one consumer's embedded exact-suite declaration idempotently."""
+
+    if not isinstance(declaration, ConsumerSuiteDeclaration):
+        raise SuiteInventoryError("invalid_consumer_suite_declaration")
+    with _PROCESS_SUITE_LOCK:
+        if declaration not in _PROCESS_CONSUMER_DECLARATIONS:
+            _PROCESS_CONSUMER_DECLARATIONS.append(declaration)
+    return declaration
+
+
+def measure_installed_suite(
+    installation: SuiteInstallation,
+    *,
+    artifact_files: Mapping[str, str | Path],
+    environment: EnvironmentTuple,
+    browser_manifest_digest: str,
+) -> InstalledSuiteInventory:
+    """Hash exact artifacts and read profiles/declarations from live registries."""
+
+    if not isinstance(installation, SuiteInstallation):
+        raise SuiteInventoryError("invalid_suite_installation")
+    if not isinstance(artifact_files, Mapping):
+        raise SuiteInventoryError("invalid_artifact_files")
+    expected = {
+        artifact.distribution: artifact for artifact in installation.manifest.artifacts
+    }
+    if set(artifact_files) - set(expected):
+        raise SuiteInventoryError("unexpected_artifact_file")
+
+    measured_artifacts = []
+    for distribution, artifact in expected.items():
+        raw_path = artifact_files.get(distribution)
+        if raw_path is None:
+            continue
+        path = Path(raw_path)
+        try:
+            if not path.is_file():
+                continue
+            digest = _sha256_file(path)
+        except OSError:
+            continue
+        measured_artifacts.append(
+            replace(
+                artifact,
+                filename=path.name,
+                sha256=digest,
+            )
+        )
+
+    try:
+        from .runtime import installed_profile_identities
+
+        profiles = installed_profile_identities()
+    except Exception:
+        raise SuiteInventoryError("profile_registry_conflict") from None
+    with _PROCESS_SUITE_LOCK:
+        declarations = tuple(_PROCESS_CONSUMER_DECLARATIONS)
+    return InstalledSuiteInventory(
+        artifacts=tuple(measured_artifacts),
+        profiles=profiles,
+        environment=environment,
+        consumer_declarations=declarations,
+        server_manifest_digest=installation.manifest.digest,
+        browser_manifest_digest=browser_manifest_digest,
+    )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def register_process_suite(installation: SuiteInstallation) -> SuiteInstallation:

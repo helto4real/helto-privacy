@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 
-from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -17,10 +15,12 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from ._suite_codec import (
     canonical_json_bytes,
-    decode_signature,
     is_sha256,
     is_stable_id,
     is_utc_timestamp,
+    sign_canonical_record,
+    typed_tuple,
+    verify_canonical_record_signature,
 )
 from .profile import PRIVACY_CONTRACT_V2
 
@@ -162,12 +162,23 @@ class SuiteManifest:
         if not isinstance(self.rollback, RollbackClass):
             raise SuiteManifestError("invalid_rollback_class")
 
-        artifacts = _typed_tuple(self.artifacts, ArtifactIdentity, "invalid_artifact_identity")
-        profiles = _typed_tuple(self.profiles, ProfileIdentity, "invalid_profile_identity")
-        environments = _typed_tuple(
+        artifacts = typed_tuple(
+            self.artifacts,
+            ArtifactIdentity,
+            "invalid_artifact_identity",
+            SuiteManifestError,
+        )
+        profiles = typed_tuple(
+            self.profiles,
+            ProfileIdentity,
+            "invalid_profile_identity",
+            SuiteManifestError,
+        )
+        environments = typed_tuple(
             self.environments,
             EnvironmentTuple,
             "invalid_environment_tuple",
+            SuiteManifestError,
         )
         if len(artifacts) != 5:
             raise SuiteManifestError("suite_artifact_count_mismatch")
@@ -353,12 +364,16 @@ def sign_suite_manifest(
     if not isinstance(private_key, Ed25519PrivateKey):
         raise SuiteSignatureError("invalid_signing_key")
     digest = manifest.digest
-    signature = private_key.sign(_MANIFEST_SIGNATURE_DOMAIN + manifest.canonical_bytes())
+    signature = sign_canonical_record(
+        private_key,
+        _MANIFEST_SIGNATURE_DOMAIN,
+        manifest.canonical_bytes(),
+    )
     return SignedSuiteManifest(
         manifest=manifest,
         manifest_digest=digest,
         signer_key_id=signer_key_id,
-        signature=base64.urlsafe_b64encode(signature).decode("ascii"),
+        signature=signature,
     )
 
 
@@ -377,13 +392,12 @@ def verify_suite_manifest(
     public_key = trusted_public_keys.get(signed_manifest.signer_key_id)
     if not isinstance(public_key, Ed25519PublicKey):
         raise SuiteSignatureError("untrusted_suite_signer")
-    try:
-        signature = decode_signature(signed_manifest.signature)
-        public_key.verify(
-            signature,
-            _MANIFEST_SIGNATURE_DOMAIN + signed_manifest.manifest.canonical_bytes(),
-        )
-    except (InvalidSignature, ValueError, UnicodeEncodeError):
+    if not verify_canonical_record_signature(
+        public_key,
+        signed_manifest.signature,
+        _MANIFEST_SIGNATURE_DOMAIN,
+        signed_manifest.manifest.canonical_bytes(),
+    ):
         raise SuiteSignatureError("invalid_suite_signature") from None
     return signed_manifest.manifest
 
@@ -409,13 +423,17 @@ def sign_suite_promotion(
         signer_key_id=signer_key_id,
         signature="unsigned",
     )
-    signature = private_key.sign(_PROMOTION_SIGNATURE_DOMAIN + unsigned.canonical_bytes())
+    signature = sign_canonical_record(
+        private_key,
+        _PROMOTION_SIGNATURE_DOMAIN,
+        unsigned.canonical_bytes(),
+    )
     return SignedSuitePromotion(
         manifest_digest=unsigned.manifest_digest,
         evidence_sha256=unsigned.evidence_sha256,
         promoted_at=unsigned.promoted_at,
         signer_key_id=signer_key_id,
-        signature=base64.urlsafe_b64encode(signature).decode("ascii"),
+        signature=signature,
     )
 
 
@@ -447,13 +465,12 @@ def verify_suite_release(
     public_key = trusted_promotion_keys.get(promotion.signer_key_id)
     if not isinstance(public_key, Ed25519PublicKey):
         raise SuiteSignatureError("untrusted_promotion_signer")
-    try:
-        signature = decode_signature(promotion.signature)
-        public_key.verify(
-            signature,
-            _PROMOTION_SIGNATURE_DOMAIN + promotion.canonical_bytes(),
-        )
-    except (InvalidSignature, ValueError, UnicodeEncodeError):
+    if not verify_canonical_record_signature(
+        public_key,
+        promotion.signature,
+        _PROMOTION_SIGNATURE_DOMAIN,
+        promotion.canonical_bytes(),
+    ):
         raise SuiteSignatureError("invalid_promotion_signature") from None
     return VerifiedSuiteRelease(
         manifest,
@@ -476,18 +493,6 @@ def _validate_sha256(value: object) -> None:
 def _validate_utc_timestamp(value: object) -> None:
     if not is_utc_timestamp(value):
         raise SuiteManifestError("invalid_utc_timestamp")
-
-
-def _typed_tuple(values, expected_type, error_code):
-    if isinstance(values, (str, bytes)):
-        raise SuiteManifestError(error_code)
-    try:
-        normalized = tuple(values)
-    except TypeError:
-        raise SuiteManifestError(error_code) from None
-    if any(not isinstance(item, expected_type) for item in normalized):
-        raise SuiteManifestError(error_code)
-    return normalized
 
 
 def _require_unique(values, attribute, error_code):

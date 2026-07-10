@@ -48,6 +48,7 @@ def initialize_keystore_with_legacy_migration(
     legacy_dir: str | os.PathLike[str] | None,
 ) -> dict[str, Any]:
     """Initialize or extend the shared keystore with a legacy plaintext key."""
+    _require_active_privacy_operation()
     codec = PrivacyEnvelopeCodec("helto.legacy-migration")
     path = key_path(legacy_dir)
     legacy_keys: list[tuple[str, bytes]] = []
@@ -117,6 +118,7 @@ class PrivacyEnvelopeCodec:
         )
 
     def encrypt_state(self, state: Mapping[str, Any], base_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+        _require_active_privacy_operation()
         key, key_id = self._load_or_create_key(base_dir, create=True)
         nonce = secrets.token_bytes(12)
         plaintext = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -132,6 +134,7 @@ class PrivacyEnvelopeCodec:
         }
 
     def decrypt_state(self, payload: Any, base_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
+        _require_active_privacy_operation()
         if isinstance(payload, str):
             try:
                 payload = json.loads(payload)
@@ -164,6 +167,7 @@ class PrivacyEnvelopeCodec:
         purpose: str,
         base_dir: str | os.PathLike[str] | None = None,
     ) -> dict[str, Any]:
+        _require_active_privacy_operation()
         key, key_id = self._load_or_create_key(base_dir, create=True)
         chunk_size = self._byte_chunk_size()
         if len(data) > chunk_size:
@@ -187,6 +191,7 @@ class PrivacyEnvelopeCodec:
         purpose: str,
         base_dir: str | os.PathLike[str] | None = None,
     ) -> bytes:
+        _require_active_privacy_operation()
         if isinstance(payload, str):
             try:
                 payload = json.loads(payload)
@@ -386,6 +391,15 @@ def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
+
+
+def _require_active_privacy_operation() -> None:
+    from .suite_runtime import SuiteBlockedError, require_active_process_suite
+
+    try:
+        require_active_process_suite()
+    except SuiteBlockedError as exc:
+        raise PrivacyError(f"PRIVACY_SUITE_BLOCKED:{exc.code}") from None
 
 
 def _b64url_decode(value: str) -> bytes:

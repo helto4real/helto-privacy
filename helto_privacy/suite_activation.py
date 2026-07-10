@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import os
 import tempfile
@@ -10,7 +9,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol
 
-from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PrivateKey,
     Ed25519PublicKey,
@@ -18,10 +16,11 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from ._suite_codec import (
     canonical_json_bytes,
-    decode_signature,
     is_sha256,
     is_stable_id,
     is_utc_timestamp,
+    sign_canonical_record,
+    verify_canonical_record_signature,
 )
 from .suite import RollbackClass
 
@@ -99,6 +98,7 @@ class ActivationRecord:
     authorization_signature: str
     previous_suite_id: str | None
     rollback: RollbackClass
+    reactivation_required: bool = False
 
     def __post_init__(self) -> None:
         _require_sha256(self.manifest_digest, "invalid_activation_manifest")
@@ -119,6 +119,8 @@ class ActivationRecord:
             _require_stable_id(self.previous_suite_id, "invalid_previous_suite")
         if not isinstance(self.rollback, RollbackClass):
             raise SuiteActivationError("invalid_rollback_class")
+        if not isinstance(self.reactivation_required, bool):
+            raise SuiteActivationError("invalid_reactivation_state")
 
 
 class ActivationRecordStore(Protocol):
@@ -154,6 +156,7 @@ class FileActivationRecordStore:
                     else None
                 ),
                 rollback=RollbackClass(str(payload["rollback"])),
+                reactivation_required=payload.get("reactivationRequired", False),
             )
         except (OSError, KeyError, TypeError, ValueError):
             raise SuiteActivationError("activation_record_invalid") from None
@@ -172,6 +175,7 @@ class FileActivationRecordStore:
                 "authorizationSignature": record.authorization_signature,
                 "previousSuiteId": record.previous_suite_id,
                 "rollback": record.rollback.value,
+                "reactivationRequired": record.reactivation_required,
             }
         )
         self._path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -228,8 +232,10 @@ def sign_activation_authorization(
         signer_key_id=signer_key_id,
         signature="unsigned",
     )
-    signature = private_key.sign(
-        _ACTIVATION_SIGNATURE_DOMAIN + unsigned.canonical_bytes()
+    signature = sign_canonical_record(
+        private_key,
+        _ACTIVATION_SIGNATURE_DOMAIN,
+        unsigned.canonical_bytes(),
     )
     return SignedActivationAuthorization(
         manifest_digest=unsigned.manifest_digest,
@@ -238,7 +244,7 @@ def sign_activation_authorization(
         authorization_id=unsigned.authorization_id,
         authorized_at=unsigned.authorized_at,
         signer_key_id=unsigned.signer_key_id,
-        signature=base64.urlsafe_b64encode(signature).decode("ascii"),
+        signature=signature,
     )
 
 
@@ -260,13 +266,12 @@ def verify_activation_authorization(
     public_key = trusted_keys.get(authorization.signer_key_id)
     if not isinstance(public_key, Ed25519PublicKey):
         raise SuiteActivationError("untrusted_activation_signer")
-    try:
-        signature = decode_signature(authorization.signature)
-        public_key.verify(
-            signature,
-            _ACTIVATION_SIGNATURE_DOMAIN + authorization.canonical_bytes(),
-        )
-    except (InvalidSignature, ValueError, UnicodeEncodeError):
+    if not verify_canonical_record_signature(
+        public_key,
+        authorization.signature,
+        _ACTIVATION_SIGNATURE_DOMAIN,
+        authorization.canonical_bytes(),
+    ):
         raise SuiteActivationError("invalid_activation_signature") from None
 
 

@@ -112,10 +112,23 @@ are `conflict`. An exact promoted installation becomes
 authorized activation is signed for both the manifest digest and measured
 inventory digest.
 
+Production callers use `SuiteInstallation.verify_installed(...)`, which hashes
+the five immutable artifact files and reads profile fingerprints and embedded
+suite declarations from the live process registries. Callers do not construct
+or assert their own inventory. The interpreter identity is measured by
+`measure_runtime_environment(...)`; the ComfyUI backend/frontend identities and
+renderer come from the host installation probe.
+
 Activation does not decrypt product data. It atomically records the signed
 authorization and the pre-activation snapshot digest as the rollback boundary,
 then changes the installation to `active`. Restart verification reloads and
 revalidates that record before restoring active state.
+
+If an active installation later becomes incomplete, mismatched, or conflicting,
+the activation record is retained but marked for reactivation. The current
+process remains latched blocked even after an in-process repair. Recovery must
+use `cui-stop`, exact offline repair, `cui-start`, a full browser reload, and a
+new explicit activation; hot repair never restores writers.
 
 Maintenance code receives only `MaintenanceCapability`: signed manifest and
 generic readiness, structurally filtered envelope headers, opaque key
@@ -149,6 +162,10 @@ codec = PrivacyEnvelopeCodec("helto.my-pack")
 envelope = codec.encrypt_state({"prompt": "private"})
 state = codec.decrypt_state(envelope)
 ```
+
+These writer/reveal methods require the process-wide exact suite to be active;
+verification, pending, incomplete, mismatched, and conflicting states fail
+closed. Verification tooling uses `MaintenanceCapability` instead of the codec.
 
 For byte payloads:
 
