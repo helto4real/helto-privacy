@@ -38,7 +38,15 @@ def isolated_runtime(monkeypatch):
 
 def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
     resources = tuple(
-        ProfileResource(resource_id, kind, (f"{resource_id}-adapter",))
+        ProfileResource(
+            resource_id,
+            kind,
+            (
+                (f"{resource_id}-adapter", "editor-state-browser")
+                if resource_id == "editor-state"
+                else (f"{resource_id}-adapter",)
+            ),
+        )
         for resource_id, kind in (
             ("privacy-mode", ResourceKind.MODE),
             ("editor-state", ResourceKind.WORKFLOW),
@@ -56,6 +64,14 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
         distribution=distribution,
         resources=resources,
         server_adapters=slots,
+        browser_adapters=(
+            AdapterSlot(
+                "editor-state-browser",
+                ResourceKind.WORKFLOW,
+                "editor-state",
+                ("HeltoTest",),
+            ),
+        ),
         scopes=(
             PrivacyScope(
                 "test-scope",
@@ -203,7 +219,9 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
         "contract": "helto.privacy.v2",
         "fingerprint": first.fingerprint,
         "status": "ready",
-        "requiredBrowserAdapters": [],
+        "requiredBrowserAdapters": [
+            {"id": "editor-state-browser", "nodeTypes": ["HeltoTest"]},
+        ],
         "resources": [
             {"id": "preview", "kind": "artifact"},
             {"id": "dispatch", "kind": "execution"},

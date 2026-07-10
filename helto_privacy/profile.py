@@ -402,13 +402,22 @@ class PrivacyProfile:
         _validate_scope_cycles(scopes)
 
         for protected_field in fields.values():
-            _require_resource_kind(
+            resource = _require_resource_kind(
                 resources,
                 protected_field.workflow_resource_id,
                 ResourceKind.WORKFLOW,
             )
             if protected_field.scope_id not in scopes:
                 raise ProfileValidationError("unknown_scope_reference")
+            browser_adapter_ids = {adapter.id for adapter in self.browser_adapters}
+            browser_node_types = {
+                node_type
+                for adapter_id in resource.adapter_slots
+                if adapter_id in browser_adapter_ids
+                for node_type in adapters[adapter_id].node_types
+            }
+            if not set(protected_field.node_types).issubset(browser_node_types):
+                raise ProfileValidationError("field_browser_binding_mismatch")
 
         for record in records.values():
             resource = _require_resource_kind(resources, record.resource_id, ResourceKind.RECORD)

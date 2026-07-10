@@ -67,7 +67,7 @@ def _profile():
     )
 
 
-def test_profile_route_is_no_store_safe_and_independent_of_aiohttp(monkeypatch):
+def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_path):
     monkeypatch.setattr(comfy_ui, "_ROUTES_REGISTERED", False)
     monkeypatch.setattr(comfy_ui, "_LEGACY_KEY_DIRS", [])
     monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
@@ -111,3 +111,20 @@ def test_profile_route_is_no_store_safe_and_independent_of_aiohttp(monkeypatch):
     assert missing.status == 404
     assert missing.headers == {"Cache-Control": "no-store"}
     assert missing.data == {"ok": False, "error": "PRIVACY_PROFILE_UNAVAILABLE"}
+
+    module_handler = prompt_server.routes.handlers[
+        ("GET", comfy_ui.PROFILE_MODULE_ROUTE)
+    ]
+    module_response = asyncio.run(module_handler(None))
+    assert module_response.status == 200
+    assert module_response.headers == {"Cache-Control": "no-cache"}
+    assert module_response.kwargs["content_type"] == "application/javascript"
+    assert "export async function connectPrivacyPack" in module_response.kwargs["text"]
+
+    monkeypatch.setattr(comfy_ui, "_WEB_DIR", tmp_path / "missing-web-directory")
+    unavailable = asyncio.run(module_handler(None))
+    assert unavailable.status == 500
+    assert unavailable.data == {
+        "ok": False,
+        "error": "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
+    }

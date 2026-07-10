@@ -171,3 +171,33 @@ def test_profile_rejects_incomplete_or_unknown_declarations(profile_kwargs, erro
 
     assert exc_info.value.code == error_code
     assert "helto.director" not in str(exc_info.value)
+
+
+def test_profile_rejects_protected_field_without_matching_browser_binding():
+    with pytest.raises(ProfileValidationError) as exc_info:
+        PrivacyProfile(
+            id="helto.browser-drift",
+            distribution="comfyui-helto-browser-drift",
+            resources=(
+                ProfileResource("privacy-mode", ResourceKind.MODE, ("mode-source",)),
+                ProfileResource("editor", ResourceKind.WORKFLOW, ("editor-runtime",)),
+            ),
+            server_adapters=(
+                AdapterSlot("mode-source", ResourceKind.MODE, "privacy-mode"),
+                AdapterSlot("editor-runtime", ResourceKind.WORKFLOW, "editor"),
+            ),
+            scopes=(PrivacyScope("editor", "privacy-mode", "mode-source"),),
+            protected_fields=(
+                ProtectedField(
+                    "editor-state",
+                    "editor",
+                    "editor",
+                    ("HeltoEditor",),
+                    FieldLocation(FieldLocationKind.WIDGET, "state"),
+                    "helto.editor.v1",
+                    "editor-state",
+                ),
+            ),
+        )
+
+    assert exc_info.value.code == "field_browser_binding_mismatch"
