@@ -82,6 +82,9 @@ class AuthorizationHandle:
 
     def require_ready(self) -> None:
         ReadinessHandle(self._installation).require_ready()
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
 
 
 @dataclass(frozen=True, slots=True)
@@ -243,7 +246,7 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
         if installation is None:
             raise PackBlockedError("privacy_pack_missing")
         profile = installation.profile
-        return {
+        result = {
             "id": profile.id,
             "distribution": profile.distribution,
             "contract": profile.contract,
@@ -262,6 +265,9 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                 for resource in profile.resources
             ],
         }
+    from .suite_runtime import process_suite_status_payload
+
+    return {**result, **process_suite_status_payload()}
 
 
 def _validate_adapter_bindings(

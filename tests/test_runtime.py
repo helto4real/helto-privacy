@@ -30,6 +30,7 @@ from helto_privacy.runtime import (
     profile_attestation,
     reconcile_prompt_server,
 )
+from helto_privacy.suite_runtime import SuiteBlockedError
 
 
 @pytest.fixture(autouse=True)
@@ -236,6 +237,9 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
     assert first.readiness.state == "ready"
     assert second.readiness.state == "ready"
     first.readiness.require_ready()
+    with pytest.raises(SuiteBlockedError) as suite_blocked:
+        first.authorization.require_ready()
+    assert suite_blocked.value.code == "suite_incomplete"
 
     public_state = profile_attestation("helto.first")
     assert public_state == {
@@ -264,6 +268,9 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
             {"id": "library", "kind": "record"},
             {"id": "editor-state", "kind": "workflow"},
         ],
+        "suiteStatus": "incomplete",
+        "suiteManifestDigest": None,
+        "suiteIssueCodes": ["suite_not_configured"],
     }
     assert "token" not in str(public_state).lower()
     assert "secret" not in str(public_state).lower()

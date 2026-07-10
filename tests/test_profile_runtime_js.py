@@ -18,11 +18,14 @@ def run_node_module_test(tmp_path, body: str) -> None:
             import * as privacy from {module_path.as_uri()!r};
 
             const fingerprint = "a".repeat(64);
+            const suiteDigest = "d".repeat(64);
             const attestation = (overrides = {{}}) => ({{
               id: "helto.director",
               contract: privacy.PRIVACY_CONTRACT_V2,
               fingerprint,
               status: "ready",
+              suiteStatus: "active",
+              suiteManifestDigest: suiteDigest,
               requiredBrowserAdapters: [{{
                 id: "timeline-editor",
                 nodeTypes: ["HeltoTimeline"],
@@ -86,12 +89,14 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
           app,
           packId: "helto.director",
           profileFingerprint: fingerprint,
+          suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": adapter },
           fetchProfile: async () => attestation(),
         };
 
         const pack = await privacy.connectPrivacyPack(options);
         assert.equal(pack.readiness.state, "ready");
+        assert.equal(pack.suiteManifestDigest, suiteDigest);
         pack.readiness.requireReady();
         assert.equal(app.registerCount, 1);
         assert.deepEqual(calls, [["HeltoTimeline", "definition-existing"], [1, "existing"]]);
@@ -131,6 +136,7 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
           app,
           packId: "helto.director",
           profileFingerprint: fingerprint,
+          suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": {
             apply() {}, clear() {}, normalize() {},
             reconcileNode() {}, reconcileNodeDefinition() {},
@@ -144,6 +150,21 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
           }),
           (error) => error.code === "browser_server_attestation_drift"
             && !error.message.includes("helto.director"),
+        );
+        await assert.rejects(
+          () => privacy.connectPrivacyPack({
+            ...base,
+            suiteManifestDigest: "e".repeat(64),
+            fetchProfile: async () => attestation(),
+          }),
+          (error) => error.code === "browser_server_attestation_drift",
+        );
+        await assert.rejects(
+          () => privacy.connectPrivacyPack({
+            ...base,
+            fetchProfile: async () => attestation({ suiteStatus: "activation-required" }),
+          }),
+          (error) => error.code === "server_suite_not_active",
         );
         await assert.rejects(
           () => privacy.connectPrivacyPack({
@@ -185,6 +206,7 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
           app,
           packId: "helto.director",
           profileFingerprint: fingerprint,
+          suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": adapter },
           fetchProfile: async () => attestation(),
         });
@@ -193,6 +215,7 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
           app,
           packId: "helto.director",
           profileFingerprint: fingerprint,
+          suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": {
             apply() {}, clear() {}, normalize() {},
             reconcileNode() {}, reconcileNodeDefinition() {},
@@ -204,6 +227,7 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
             app,
             packId: "helto.director",
             profileFingerprint: fingerprint,
+            suiteManifestDigest: suiteDigest,
             adapters: { "timeline-editor": {} },
             fetchProfile: async () => attestation(),
           }),
@@ -216,6 +240,7 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
             app,
             packId: "helto.director",
             profileFingerprint: "b".repeat(64),
+            suiteManifestDigest: suiteDigest,
             adapters: { "timeline-editor": adapter },
             fetchProfile: async () => attestation({ fingerprint: "b".repeat(64) }),
           }),
@@ -228,6 +253,7 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
             app,
             packId: "helto.director",
             profileFingerprint: fingerprint,
+            suiteManifestDigest: suiteDigest,
             adapters: { "timeline-editor": adapter },
             fetchProfile: async () => attestation(),
           }),

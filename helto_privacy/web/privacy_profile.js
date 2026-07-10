@@ -7,6 +7,7 @@ export const PRIVACY_CONTRACT_V2 = "helto.privacy.v2";
 const STATUS = Object.freeze({
   READY: "ready",
   CONFLICT: "conflict",
+  SUITE_ACTIVE: "active",
 });
 const RESOURCE_KIND = Object.freeze({
   MODE: "mode",
@@ -87,6 +88,7 @@ class BrowserPrivacyPack {
     this.packId = entry.id;
     this.contract = entry.contract;
     this.fingerprint = entry.fingerprint;
+    this.suiteManifestDigest = entry.suiteManifestDigest;
     this.readiness = new BrowserReadinessHandle(entry);
     this.authorization = new BrowserAuthorizationHandle(entry);
     Object.freeze(this);
@@ -119,15 +121,18 @@ export async function connectPrivacyPack({
   packId,
   contract = PRIVACY_CONTRACT_V2,
   profileFingerprint,
+  suiteManifestDigest,
   adapters = {},
   fetchProfile = fetchPrivacyProfile,
 }) {
   const id = String(packId || "").trim();
   const fingerprint = String(profileFingerprint || "").trim();
+  const suiteDigest = String(suiteManifestDigest || "").trim();
   if (
     !app
     || !id
     || !fingerprint
+    || !/^[0-9a-f]{64}$/.test(suiteDigest)
     || contract !== PRIVACY_CONTRACT_V2
     || !adapters
     || typeof adapters !== "object"
@@ -144,6 +149,7 @@ export async function connectPrivacyPack({
     if (
       existing.fingerprint !== fingerprint
       || existing.contract !== contract
+      || existing.suiteManifestDigest !== suiteDigest
       || existing.app !== app
     ) {
       existing.status = STATUS.CONFLICT;
@@ -159,7 +165,14 @@ export async function connectPrivacyPack({
   } catch {
     throw new PrivacyPackConnectionError("server_attestation_unavailable");
   }
-  validateServerAttestation({ id, contract, fingerprint, adapters, attestation });
+  validateServerAttestation({
+    id,
+    contract,
+    fingerprint,
+    suiteDigest,
+    adapters,
+    attestation,
+  });
 
   if (PRIVACY_EXTENSION_APP && PRIVACY_EXTENSION_APP !== app) {
     throw new PrivacyPackConnectionError("comfyui_app_conflict");
@@ -170,6 +183,7 @@ export async function connectPrivacyPack({
     id,
     contract,
     fingerprint,
+    suiteManifestDigest: suiteDigest,
     adapters: Object.freeze({ ...adapters }),
     requirements: attestation.requiredBrowserAdapters.map((item) => Object.freeze({
       id: String(item.id),
@@ -207,17 +221,28 @@ async function fetchPrivacyProfile(packId) {
   return payload;
 }
 
-function validateServerAttestation({ id, contract, fingerprint, adapters, attestation }) {
+function validateServerAttestation({
+  id,
+  contract,
+  fingerprint,
+  suiteDigest,
+  adapters,
+  attestation,
+}) {
   if (
     !attestation
     || attestation.id !== id
     || attestation.contract !== contract
     || attestation.fingerprint !== fingerprint
+    || attestation.suiteManifestDigest !== suiteDigest
   ) {
     throw new PrivacyPackConnectionError("browser_server_attestation_drift");
   }
   if (attestation.status !== STATUS.READY) {
     throw new PrivacyPackConnectionError("server_profile_not_ready");
+  }
+  if (attestation.suiteStatus !== STATUS.SUITE_ACTIVE) {
+    throw new PrivacyPackConnectionError("server_suite_not_active");
   }
   if (!Array.isArray(attestation.resources)) {
     throw new PrivacyPackConnectionError("invalid_server_resource_declaration");

@@ -4,6 +4,7 @@ import types
 
 import helto_privacy.comfy_ui as comfy_ui
 import helto_privacy.runtime as runtime
+import helto_privacy.suite_runtime as suite_runtime
 from helto_privacy.profile import (
     AdapterSlot,
     PrivacyProfile,
@@ -11,6 +12,8 @@ from helto_privacy.profile import (
     ProfileResource,
     ResourceKind,
 )
+from helto_privacy.suite_runtime import SuiteInstallation, register_process_suite
+from test_suite_runtime import _inventory, _release
 
 
 class _Response:
@@ -76,6 +79,8 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_pat
     monkeypatch.setattr(comfy_ui, "_ROUTES_REGISTERED", False)
     monkeypatch.setattr(comfy_ui, "_LEGACY_KEY_DIRS", [])
     monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(suite_runtime, "_PROCESS_SUITE_INSTALLATION", None)
+    monkeypatch.setattr(suite_runtime, "_PROCESS_SUITE_CONFLICT", False)
 
     server_module = types.ModuleType("server")
     server_module.PromptServer = types.SimpleNamespace(instance=None)
@@ -102,6 +107,24 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_pat
     prompt_server = types.SimpleNamespace(routes=_Routes())
     assert runtime.reconcile_prompt_server(prompt_server) is True
 
+    monkeypatch.setattr(
+        comfy_ui.keystore,
+        "keystore_status",
+        lambda: {"exists": True, "unlocked": False},
+    )
+    status_handler = prompt_server.routes.handlers[
+        ("GET", f"{comfy_ui.ROUTE_PREFIX}/status")
+    ]
+    status_response = asyncio.run(status_handler(types.SimpleNamespace()))
+    assert status_response.data == {
+        "ok": True,
+        "exists": True,
+        "unlocked": False,
+        "suiteStatus": "incomplete",
+        "suiteManifestDigest": None,
+        "suiteIssueCodes": ["suite_not_configured"],
+    }
+
     handler = prompt_server.routes.handlers[
         ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}")
     ]
@@ -114,6 +137,8 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_pat
     assert response.data["ok"] is True
     assert response.data["status"] == "ready"
     assert response.data["fingerprint"] == profile.fingerprint
+    assert response.data["suiteStatus"] == "incomplete"
+    assert response.data["suiteManifestDigest"] is None
     assert response.data["resources"] == [{"id": "privacy-mode", "kind": "mode"}]
     assert "token" not in str(response.data).lower()
     assert "secret" not in str(response.data).lower()
@@ -128,14 +153,34 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(monkeypatch, tmp_pat
     module_handler = prompt_server.routes.handlers[
         ("GET", comfy_ui.PROFILE_MODULE_ROUTE)
     ]
-    module_response = asyncio.run(module_handler(None))
+    release = _release(ready=False)
+    suite = SuiteInstallation(release)
+    suite.verify(_inventory(release.manifest))
+    register_process_suite(suite)
+    module_request = types.SimpleNamespace(
+        match_info={"manifest_digest": release.manifest.digest}
+    )
+    module_response = asyncio.run(module_handler(module_request))
     assert module_response.status == 200
-    assert module_response.headers == {"Cache-Control": "no-cache"}
+    assert module_response.headers == {
+        "Cache-Control": "public, max-age=31536000, immutable"
+    }
     assert module_response.kwargs["content_type"] == "application/javascript"
     assert "export async function connectPrivacyPack" in module_response.kwargs["text"]
 
+    wrong_digest = asyncio.run(
+        module_handler(
+            types.SimpleNamespace(match_info={"manifest_digest": "e" * 64})
+        )
+    )
+    assert wrong_digest.status == 409
+    assert wrong_digest.data == {
+        "ok": False,
+        "error": "PRIVACY_SUITE_ASSET_MISMATCH",
+    }
+
     monkeypatch.setattr(comfy_ui, "_WEB_DIR", tmp_path / "missing-web-directory")
-    unavailable = asyncio.run(module_handler(None))
+    unavailable = asyncio.run(module_handler(module_request))
     assert unavailable.status == 500
     assert unavailable.data == {
         "ok": False,

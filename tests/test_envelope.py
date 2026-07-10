@@ -103,7 +103,9 @@ def test_chunked_byte_envelope_round_trip_and_tamper_detection(tmp_path, monkeyp
     assert codec.decrypt_bytes(payload, "spill", base_dir=tmp_path) == b"abcdefghijk"
 
     tampered = json.loads(json.dumps(payload))
-    tampered["chunks"][0]["ciphertext"] = "A" + tampered["chunks"][0]["ciphertext"][1:]
+    ciphertext = tampered["chunks"][0]["ciphertext"]
+    replacement = "B" if ciphertext[0] == "A" else "A"
+    tampered["chunks"][0]["ciphertext"] = replacement + ciphertext[1:]
     with pytest.raises(PrivacyError, match="Could not decrypt chunked byte payload"):
         codec.decrypt_bytes(tampered, "spill", base_dir=tmp_path)
 

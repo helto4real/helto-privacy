@@ -58,21 +58,31 @@ profile = PrivacyProfile(
 privacy = install(profile, {"mode-source": product_adapter})
 mode = privacy.mode("privacy-mode")
 privacy.readiness.require_ready()
+privacy.authorization.require_ready()  # Also requires an active exact suite.
 ```
 
-The shared browser module uses the same profile fingerprint:
+The shared browser module is keyed by the exact active suite digest and uses
+the same profile fingerprint:
 
 ```javascript
-import {
+const status = await fetch("/helto_privacy/status", { cache: "no-store" })
+  .then((response) => response.json());
+if (!status.ok || status.suiteStatus !== "active" || !status.suiteManifestDigest) {
+  throw new Error("Helto privacy suite is not active");
+}
+const {
   connectPrivacyPack,
   PRIVACY_CONTRACT_V2,
-} from "/helto_privacy/ui/privacy_profile.js";
+} = await import(
+  `/helto_privacy/ui/privacy_profile/${status.suiteManifestDigest}.js`
+);
 
 const privacy = await connectPrivacyPack({
   app,
   packId: "helto.example",
   contract: PRIVACY_CONTRACT_V2,
   profileFingerprint,
+  suiteManifestDigest: status.suiteManifestDigest,
   adapters: { "mode-editor": editorAdapter },
 })
 ```
@@ -84,6 +94,33 @@ Server and browser method contracts are derived from the typed declarations;
 wrong-side, unused, missing, or method-incomplete adapters block atomically.
 `profile.server_adapter_contracts` and `profile.browser_adapter_contracts`
 provide the exact fixed method sets an adoption must implement.
+
+## Exact Suite Verification and Activation
+
+The five coordinated repositories are one privacy suite. Release tooling signs
+an immutable `SuiteManifest` that binds exact source revisions, artifacts and
+hashes, all four profile fingerprints, supported environment tuples,
+acceptance evidence, the previous suite, and its rollback class. A separate
+signed promotion moves that unchanged candidate from `cutover-pending` to
+`ready`.
+
+An installation must then measure an exact `InstalledSuiteInventory`. No
+version compatibility is inferred: missing components are `incomplete`, any
+identity or environment difference is `mismatch`, and competing declarations
+are `conflict`. An exact promoted installation becomes
+`activation-required`; privacy-bearing operations remain blocked until an
+authorized activation is signed for both the manifest digest and measured
+inventory digest.
+
+Activation does not decrypt product data. It atomically records the signed
+authorization and the pre-activation snapshot digest as the rollback boundary,
+then changes the installation to `active`. Restart verification reloads and
+revalidates that record before restoring active state.
+
+Maintenance code receives only `MaintenanceCapability`: signed manifest and
+generic readiness, structurally filtered envelope headers, opaque key
+availability, and encrypted byte copying. The interface deliberately has no
+decrypt, reveal, key-export, or live-payload validation operation.
 
 ## File Contract
 
@@ -164,7 +201,8 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`
 - `GET  /helto_privacy/ui/privacy.js` — the shared unlock dialog (ES module)
-- `GET  /helto_privacy/ui/privacy_profile.js` — the browser profile compiler
+- `GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js` — the exact
+  browser profile compiler
 
 Legacy migration is automatic: when the keystore is created or unlocked, every
 registered legacy key is imported as a decrypt-only entry and its file renamed

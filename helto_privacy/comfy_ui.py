@@ -13,7 +13,8 @@ Registered surface (pack-neutral, stable):
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
   module any pack frontend can ``import()``.
-- ``GET  /helto_privacy/ui/privacy_profile.js`` — atomic browser profile runtime.
+- ``GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js`` — exact-suite
+  browser profile runtime.
 
 Legacy migration is automatic: packs register the directory holding their old
 plaintext ``privacy_key.json``; whenever the keystore is created or unlocked
@@ -36,7 +37,7 @@ from .keystore import KEY_BYTES, PrivacyKeystoreError
 
 ROUTE_PREFIX = "/helto_privacy"
 UI_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy.js"
-PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile.js"
+PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile/{{manifest_digest}}.js"
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
 _ROUTES_REGISTERED = False
@@ -89,7 +90,15 @@ def register_helto_privacy_ui(
 
     @routes.get(f"{ROUTE_PREFIX}/status")
     async def get_helto_privacy_status(_request):
-        return web.json_response({"ok": True, **keystore.keystore_status()})
+        from .suite_runtime import process_suite_status_payload
+
+        return web.json_response(
+            {
+                "ok": True,
+                **keystore.keystore_status(),
+                **process_suite_status_payload(),
+            }
+        )
 
     @routes.get(f"{ROUTE_PREFIX}/profiles/{{pack_id}}")
     async def get_helto_privacy_profile(request):
@@ -169,7 +178,20 @@ def register_helto_privacy_ui(
         )
 
     @routes.get(PROFILE_MODULE_ROUTE)
-    async def get_helto_privacy_profile_module(_request):
+    async def get_helto_privacy_profile_module(request):
+        from .suite_runtime import process_suite_status_payload
+
+        suite_status = process_suite_status_payload()
+        requested_digest = str(request.match_info.get("manifest_digest") or "")
+        if (
+            not suite_status["suiteManifestDigest"]
+            or requested_digest != suite_status["suiteManifestDigest"]
+        ):
+            return web.json_response(
+                {"ok": False, "error": "PRIVACY_SUITE_ASSET_MISMATCH"},
+                status=409,
+                headers={"Cache-Control": "no-store"},
+            )
         try:
             source = (_WEB_DIR / "privacy_profile.js").read_text(encoding="utf-8")
         except OSError:
@@ -181,7 +203,7 @@ def register_helto_privacy_ui(
             text=source,
             content_type="application/javascript",
             charset="utf-8",
-            headers={"Cache-Control": "no-cache"},
+            headers={"Cache-Control": "public, max-age=31536000, immutable"},
         )
 
     _ROUTES_REGISTERED = True
