@@ -123,8 +123,10 @@ renderer come from the host installation probe.
 
 Activation does not decrypt product data. It atomically records the signed
 authorization and the pre-activation snapshot digest as the rollback boundary,
-then changes the installation to `active`. Restart verification reloads and
-revalidates that record before restoring active state.
+then changes the installation to `active`. The record remains the rollback
+boundary, but activation is process-scoped: every new ComfyUI process verifies
+the record and still re-enters `activation-required`. This prevents a crashed
+or storage-failed blocked process from replaying an old activation.
 
 The activation inventory digest also binds a measured installation generation
 derived from the five artifact files. Reinstalling or repairing exact bytes

@@ -422,6 +422,11 @@ class SuiteInstallation:
                 SuiteStatus.CONFLICT,
                 "rollback_boundary_mismatch",
             )
+        if self._status is not SuiteStatus.ACTIVE:
+            return self._set_status(
+                SuiteStatus.ACTIVATION_REQUIRED,
+                "explicit_process_activation_required",
+            )
         return self._set_status(SuiteStatus.ACTIVE)
 
     def _set_blocked_status(
@@ -430,18 +435,20 @@ class SuiteInstallation:
         issue_code: str,
     ) -> SuiteReadinessReport:
         self._restart_required = True
-        report = self._set_status(status, issue_code)
-        try:
-            self._mark_reactivation_required()
-        except SuiteActivationError:
-            return self._set_status(
-                SuiteStatus.CONFLICT,
-                "activation_record_block_failed",
-            )
-        return report
+        return self._set_status_after_quarantine(status, issue_code)
 
     def _set_reactivation_required(
         self,
+        issue_code: str,
+    ) -> SuiteReadinessReport:
+        return self._set_status_after_quarantine(
+            SuiteStatus.ACTIVATION_REQUIRED,
+            issue_code,
+        )
+
+    def _set_status_after_quarantine(
+        self,
+        status: SuiteStatus,
         issue_code: str,
     ) -> SuiteReadinessReport:
         try:
@@ -451,7 +458,7 @@ class SuiteInstallation:
                 SuiteStatus.CONFLICT,
                 "activation_record_block_failed",
             )
-        return self._set_status(SuiteStatus.ACTIVATION_REQUIRED, issue_code)
+        return self._set_status(status, issue_code)
 
     def _mark_reactivation_required(self) -> None:
         if self._activation_store is None:

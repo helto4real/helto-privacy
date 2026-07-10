@@ -72,12 +72,45 @@ def test_explicit_digest_bound_activation_persists_rollback_boundary(
         activation_store=store,
         trusted_activation_keys={"user-activation-2026": activation_key.public_key()},
     )
-    assert restarted._verify_inventory(inventory).status is SuiteStatus.ACTIVE
+    restarted_report = restarted._verify_inventory(inventory)
+    assert restarted_report.status is SuiteStatus.ACTIVATION_REQUIRED
+    assert restarted_report.issue_codes == ("explicit_process_activation_required",)
 
+    original_block = store.block
+
+    def fail_quarantine(_record):
+        raise SuiteActivationError("synthetic_block_failure")
+
+    monkeypatch.setattr(store, "block", fail_quarantine)
     mismatched = replace(inventory, browser_manifest_digest="e" * 64)
-    blocked = restarted._verify_inventory(mismatched)
+    block_failure = installation._verify_inventory(mismatched)
+    assert block_failure.status is SuiteStatus.CONFLICT
+    assert block_failure.issue_codes == ("activation_record_block_failed",)
+    assert store.load() is not None
+
+    replay_guard = SuiteInstallation(
+        release,
+        activation_store=store,
+        trusted_activation_keys={"user-activation-2026": activation_key.public_key()},
+    )
+    replay_report = replay_guard._verify_inventory(inventory)
+    assert replay_report.status is SuiteStatus.ACTIVATION_REQUIRED
+    assert replay_report.issue_codes == ("explicit_process_activation_required",)
+
+    monkeypatch.setattr(store, "block", original_block)
+    reauthorization = sign_activation_authorization(
+        replay_guard.activation_request(),
+        pre_activation_snapshot_digest="d" * 64,
+        authorization_id="activation-2026-07-10.2",
+        authorized_at="2026-07-10T21:05:00Z",
+        signer_key_id="user-activation-2026",
+        private_key=activation_key,
+    )
+    replay_guard.activate(reauthorization)
+
+    blocked = replay_guard._verify_inventory(mismatched)
     assert blocked.status is SuiteStatus.MISMATCH
-    blocked_repair = restarted._verify_inventory(inventory)
+    blocked_repair = replay_guard._verify_inventory(inventory)
     assert blocked_repair.issue_codes == ("process_restart_required",)
     assert store.load() is None
     assert list(tmp_path.glob("activation.json.blocked.*"))

@@ -188,11 +188,7 @@ class FileActivationRecordStore:
                 os.fsync(handle.fileno())
             os.replace(temp_name, self._path)
             os.chmod(self._path, 0o600)
-            directory_fd = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            _sync_parent_directory(self._path)
         except Exception:
             try:
                 os.unlink(temp_name)
@@ -211,11 +207,7 @@ class FileActivationRecordStore:
         try:
             os.replace(self._path, blocked_path)
             os.chmod(blocked_path, 0o600)
-            directory_fd = os.open(self._path.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
+            _sync_parent_directory(blocked_path)
         except Exception:
             raise SuiteActivationError("activation_record_block_failed") from None
 
@@ -304,3 +296,11 @@ def _require_stable_id(value: object, code: str) -> None:
 def _require_utc_timestamp(value: object) -> None:
     if not is_utc_timestamp(value):
         raise SuiteActivationError("invalid_activation_timestamp")
+
+
+def _sync_parent_directory(path: Path) -> None:
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
