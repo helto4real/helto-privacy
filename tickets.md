@@ -52,16 +52,16 @@ authorized activation.
 
 **Blocked by:** Compile atomic privacy profiles.
 
-- [ ] Define immutable signed suite manifests that bind exact source and
+- [x] Define immutable signed suite manifests that bind exact source and
       artifact identities, profile fingerprints, environment tuples, hashes,
       previous suite, and rollback class.
-- [ ] Implement publication and installation states for `cutover-pending`,
+- [x] Implement publication and installation states for `cutover-pending`,
       `ready`, `activation-required`, `active`, `incomplete`, `mismatch`, and
       `conflict` without inferring version compatibility.
-- [ ] Give maintenance actors a non-decrypting capability for manifests,
+- [x] Give maintenance actors a non-decrypting capability for manifests,
       envelope headers, opaque key availability, encrypted copying, and generic
       readiness only.
-- [ ] Require explicit activation bound to the manifest digest; activation
+- [x] Require explicit activation bound to the manifest digest; activation
       itself must not decrypt user data and must record the rollback boundary.
 
 ## Resolve privacy mode and transitions
