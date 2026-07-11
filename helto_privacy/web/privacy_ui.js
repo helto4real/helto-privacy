@@ -25,6 +25,11 @@ import {
 } from "./privacy_client.js";
 
 export { redactPrivateRecordShell } from "./privacy_records.js";
+export {
+  PrivacyArtifactLeaseError,
+  normalizeArtifactLease,
+  resolveArtifactLeaseURL,
+} from "./privacy_artifacts.js";
 
 export {
   PrivacyBrowserRequestError,

@@ -72,6 +72,7 @@ def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path, monkeypatch):
     assert first_count >= 6
     assert ("GET", comfy_ui.UI_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.CLIENT_MODULE_ROUTE) in server.routes.paths
+    assert ("GET", comfy_ui.ARTIFACTS_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.SNAPSHOT_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.PROFILE_MODULE_ROUTE) in server.routes.paths
     assert ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}") in server.routes.paths
@@ -173,6 +174,12 @@ def test_ui_module_ships_in_package():
     )
     assert "isOpaquePrivateRecordId" in records_source
     assert "redactPrivateRecordShell" in records_source
+
+    artifacts_source = (comfy_ui._WEB_DIR / "privacy_artifacts.js").read_text(
+        encoding="utf-8"
+    )
+    assert "normalizeArtifactLease" in artifacts_source
+    assert "resolveArtifactLeaseURL" in artifacts_source
 
     profile_source = (comfy_ui._WEB_DIR / "privacy_profile.js").read_text(encoding="utf-8")
     assert "export async function connectPrivacyPack" in profile_source

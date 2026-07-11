@@ -55,6 +55,7 @@ _ARTIFACT_ID = re.compile(r"^hp-art-[A-Za-z0-9_-]{32}$")
 _OWNER_ID = re.compile(r"^hp-owner-[A-Za-z0-9_-]{32}$")
 _LEASE_ID = re.compile(r"^hp-lease-[A-Za-z0-9_-]{32}$")
 _STABLE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_MEDIA_TYPE = re.compile(r"^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+$")
 _ERROR_CODES = frozenset(
     {
         "PRIVACY_ARTIFACT_ADAPTER_INVALID",
@@ -69,13 +70,15 @@ _ERROR_CODES = frozenset(
         "PRIVACY_ARTIFACT_OPERATION_INVALID",
         "PRIVACY_ARTIFACT_REFERENCE_INVALID",
         "PRIVACY_ARTIFACT_RETENTION_INVALID",
+        "PRIVACY_ARTIFACT_SOURCE_REJECTED",
         "PRIVACY_ARTIFACT_STORAGE_FAILED",
         "PRIVACY_ARTIFACT_UNREADABLE",
     }
 )
 _PROCESS_EPOCH = secrets.token_urlsafe(18)
+_ROOT_BOUND_SOURCE_MARKER = object()
 _LOCK = RLock()
-_LEASES: dict[str, _LeaseRecord] = {}
+_LEASES: dict[str, _LeaseRecord | _SourceLeaseRecord] = {}
 _STREAM_END = object()
 
 
@@ -191,6 +194,33 @@ class _LeaseRecord:
     revoked: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class RootBoundSource:
+    """A validated existing file retained only in server process memory."""
+
+    _root: str = field(repr=False)
+    _relative_parts: tuple[str, ...] = field(repr=False)
+    _device: int = field(repr=False)
+    _inode: int = field(repr=False)
+    media_type: str
+    _marker: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self._marker is not _ROOT_BOUND_SOURCE_MARKER:
+            raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED")
+
+
+@dataclass(slots=True)
+class _SourceLeaseRecord:
+    pack_id: str
+    operation_id: str
+    source: RootBoundSource = field(repr=False)
+    expires_at: float
+    session_fingerprint: bytes = field(repr=False)
+    claimed: bool = False
+    revoked: bool = False
+
+
 class ArtifactLeaseStream:
     """Backpressure-aware authenticated plaintext stream held only in memory."""
 
@@ -244,6 +274,54 @@ class ArtifactLeaseStream:
                     ),
                     False,
                 )
+
+
+class RootBoundSourceLeaseStream:
+    """Backpressure-aware stream over one root-bound existing source file."""
+
+    __slots__ = (
+        "_lease_id",
+        "_reader",
+        "_record",
+        "correlation_id",
+        "headers",
+        "media_type",
+    )
+
+    def __init__(self, lease_id: str, record: _SourceLeaseRecord, reader) -> None:
+        self._lease_id = lease_id
+        self._record = record
+        self._reader = reader
+        self.media_type = record.source.media_type
+        self.correlation_id = "hp-artifact-" + secrets.token_urlsafe(12)
+        self.headers = private_artifact_response_headers(self.correlation_id)
+
+    def __repr__(self) -> str:
+        return "RootBoundSourceLeaseStream()"
+
+    async def iter_chunks(self):
+        try:
+            while True:
+                if not await _run_blocking(_lease_is_current, self._record):
+                    raise ArtifactError("PRIVACY_ARTIFACT_LEASE_INVALID")
+                chunk = await _run_blocking(
+                    self._reader.read,
+                    ARTIFACT_STREAM_CHUNK_BYTES,
+                )
+                if not chunk:
+                    break
+                if not await _run_blocking(_lease_is_current, self._record):
+                    raise ArtifactError("PRIVACY_ARTIFACT_LEASE_INVALID")
+                yield chunk
+        finally:
+            await self.close()
+
+    async def close(self) -> None:
+        revoke_artifact_lease(self._lease_id)
+        reader = self._reader
+        self._reader = None
+        if reader is not None:
+            await _run_blocking(reader.close)
 
 
 class ArtifactRun:
@@ -509,7 +587,99 @@ async def issue_artifact_lease(
     return ArtifactLease(lease_id, max(1, int(ARTIFACT_LEASE_TTL_SECONDS)))
 
 
-async def open_artifact_lease(request, lease_id: str) -> ArtifactLeaseStream:
+def root_bound_source(
+    path: str | os.PathLike[str],
+    allowed_roots: tuple[str | os.PathLike[str], ...] | list[str | os.PathLike[str]],
+    *,
+    media_type: str,
+) -> RootBoundSource:
+    """Validate one existing regular file against consumer-declared roots."""
+
+    normalized_media_type = str(media_type or "").strip().lower()
+    if _MEDIA_TYPE.fullmatch(normalized_media_type) is None:
+        raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED")
+    if (
+        os.open not in os.supports_dir_fd
+        or not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+    ):
+        raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED")
+    resolved_path = os.path.realpath(os.path.abspath(os.fspath(path)))
+    candidates: list[tuple[int, str, tuple[str, ...]]] = []
+    for root in allowed_roots:
+        root_path = os.path.realpath(os.path.abspath(os.fspath(root)))
+        try:
+            if os.path.commonpath((resolved_path, root_path)) != root_path:
+                continue
+        except ValueError:
+            continue
+        relative_parts = Path(os.path.relpath(resolved_path, root_path)).parts
+        if not relative_parts or any(part in {"", ".", ".."} for part in relative_parts):
+            continue
+        candidates.append((len(root_path), root_path, relative_parts))
+    if not candidates:
+        raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED")
+    _length, root_path, relative_parts = max(candidates, key=lambda item: item[0])
+    try:
+        source_stat = os.stat(resolved_path, follow_symlinks=False)
+    except OSError:
+        raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED") from None
+    if not stat.S_ISREG(source_stat.st_mode):
+        raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED")
+    return RootBoundSource(
+        root_path,
+        relative_parts,
+        source_stat.st_dev,
+        source_stat.st_ino,
+        normalized_media_type,
+        _ROOT_BOUND_SOURCE_MARKER,
+    )
+
+
+async def issue_root_bound_source_lease(
+    *,
+    pack_id: str,
+    operation_id: str,
+    source: RootBoundSource,
+    authorization: AuthorizedPrivacyRequest,
+) -> ArtifactLease:
+    """Issue one opaque lease over an authorized existing source file."""
+
+    require_active_process_suite()
+    safe_pack_id = str(pack_id or "")
+    safe_operation = str(operation_id or "")
+    if (
+        _STABLE_ID.fullmatch(safe_pack_id) is None
+        or _STABLE_ID.fullmatch(safe_operation) is None
+        or not isinstance(source, RootBoundSource)
+    ):
+        raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED")
+    require_current_authorization(
+        authorization,
+        safe_operation,
+        pack_id=safe_pack_id,
+    )
+    lease_id = _new_lease_id()
+    record = _SourceLeaseRecord(
+        safe_pack_id,
+        safe_operation,
+        source,
+        time.time() + ARTIFACT_LEASE_TTL_SECONDS,
+        await _run_blocking(_session_fingerprint),
+    )
+    with _LOCK:
+        _expire_leases_locked()
+        _LEASES[lease_id] = record
+    if not await _run_blocking(_lease_is_current, record):
+        revoke_artifact_lease(lease_id)
+        raise ArtifactError("PRIVACY_ARTIFACT_LEASE_INVALID")
+    return ArtifactLease(lease_id, max(1, int(ARTIFACT_LEASE_TTL_SECONDS)))
+
+
+async def open_artifact_lease(
+    request,
+    lease_id: str,
+) -> ArtifactLeaseStream | RootBoundSourceLeaseStream:
     safe_lease_id = _lease_id(lease_id)
     with _LOCK:
         _expire_leases_locked()
@@ -520,7 +690,10 @@ async def open_artifact_lease(request, lease_id: str) -> ArtifactLeaseStream:
     try:
         if not await _run_blocking(_lease_is_current, record):
             raise ArtifactError("PRIVACY_ARTIFACT_LEASE_INVALID")
-        await _run_blocking(_authorize_artifact_stream, request, record)
+        await _run_blocking(_authorize_lease_stream, request, record)
+        if isinstance(record, _SourceLeaseRecord):
+            reader = await _run_blocking(_open_root_bound_source, record.source)
+            return RootBoundSourceLeaseStream(safe_lease_id, record, reader)
         await _run_blocking(_require_artifact_file, record.locator)
         return ArtifactLeaseStream(safe_lease_id, record)
     except PrivacyAuthorizationError:
@@ -534,11 +707,20 @@ async def open_artifact_lease(request, lease_id: str) -> ArtifactLeaseStream:
         raise ArtifactError("PRIVACY_ARTIFACT_LEASE_INVALID") from None
 
 
-def _authorize_artifact_stream(request, record: _LeaseRecord) -> None:
+def _authorize_lease_stream(
+    request,
+    record: _LeaseRecord | _SourceLeaseRecord,
+) -> None:
+    if isinstance(record, _SourceLeaseRecord):
+        operation_id = record.operation_id
+        pack_id = record.pack_id
+    else:
+        operation_id = f"artifact.{record.operation}"
+        pack_id = record.installation.profile.id
     authorize_privacy_request(
         request,
-        f"artifact.{record.operation}",
-        pack_id=record.installation.profile.id,
+        operation_id,
+        pack_id=pack_id,
     )
 
 
@@ -565,7 +747,7 @@ def invalidate_artifact_profile(pack_id: str) -> None:
         revoked = [
             lease_id
             for lease_id, record in _LEASES.items()
-            if record.installation.profile.id == pack_id
+            if _lease_record_pack_id(record) == pack_id
         ]
         for lease_id in revoked:
             record = _LEASES.pop(lease_id, None)
@@ -852,7 +1034,13 @@ def _expire_leases_locked() -> None:
             record.revoked = True
 
 
-def _lease_is_current(record: _LeaseRecord) -> bool:
+def _lease_record_pack_id(record: _LeaseRecord | _SourceLeaseRecord) -> str:
+    if isinstance(record, _SourceLeaseRecord):
+        return record.pack_id
+    return record.installation.profile.id
+
+
+def _lease_is_current(record: _LeaseRecord | _SourceLeaseRecord) -> bool:
     with _LOCK:
         if record.revoked or record.expires_at <= time.time():
             record.revoked = True
@@ -870,6 +1058,42 @@ def _lease_is_current(record: _LeaseRecord) -> bool:
             record.revoked = True
             return False
         return True
+
+
+def _open_root_bound_source(source: RootBoundSource):
+    directory_flags = (
+        os.O_RDONLY
+        | os.O_DIRECTORY
+        | os.O_NOFOLLOW
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    file_flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_fds: list[int] = []
+    file_fd: int | None = None
+    try:
+        current_fd = os.open(source._root, directory_flags)
+        directory_fds.append(current_fd)
+        for part in source._relative_parts[:-1]:
+            current_fd = os.open(part, directory_flags, dir_fd=current_fd)
+            directory_fds.append(current_fd)
+        file_fd = os.open(source._relative_parts[-1], file_flags, dir_fd=current_fd)
+        source_stat = os.fstat(file_fd)
+        if (
+            not stat.S_ISREG(source_stat.st_mode)
+            or source_stat.st_dev != source._device
+            or source_stat.st_ino != source._inode
+        ):
+            raise OSError("Private media source changed after authorization.")
+        reader = os.fdopen(file_fd, "rb")
+        file_fd = None
+        return reader
+    except (OSError, ValueError):
+        raise ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED") from None
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for directory_fd in reversed(directory_fds):
+            os.close(directory_fd)
 
 
 def _artifact_root() -> Path:
@@ -1178,6 +1402,7 @@ def _retire_from_ledger(
         if not predicate(entry):
             remaining.append(entry)
             continue
+        _revoke_entry_leases_locked(entry)
         try:
             _entry_path(entry).unlink(missing_ok=True)
             retired += 1
@@ -1187,6 +1412,21 @@ def _retire_from_ledger(
             failed += 1
     ledger["entries"] = remaining
     return retired, failed
+
+
+def _revoke_entry_leases_locked(entry: dict) -> None:
+    for lease_id, record in tuple(_LEASES.items()):
+        if not isinstance(record, _LeaseRecord):
+            continue
+        locator = record.locator
+        if (
+            locator.pack_id == entry.get("packId")
+            and locator.resource_id == entry.get("resourceId")
+            and locator.declaration.id == entry.get("artifactKind")
+            and locator.artifact_id == entry.get("artifactId")
+        ):
+            record.revoked = True
+            _LEASES.pop(lease_id, None)
 
 
 def _entry_path(entry: dict) -> Path:

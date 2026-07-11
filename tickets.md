@@ -359,13 +359,13 @@ private serving.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare private previews, source-serving operations, allowed roots, and
+- [x] Declare private previews, source-serving operations, allowed roots, and
       all old generated preview/temp derivatives.
-- [ ] Bind consumer encoders/root validators to shared write, lease, stream,
+- [x] Bind consumer encoders/root validators to shared write, lease, stream,
       revoke, expiry, cleanup, and restart behavior.
-- [ ] Replace browser URL construction with opaque lease URLs that contain no
+- [x] Replace browser URL construction with opaque lease URLs that contain no
       path, filename, session credential, or self-contained token.
-- [ ] Prove lock/restart/expiry/replacement revocation, private no-store headers,
+- [x] Prove lock/restart/expiry/replacement revocation, private no-store headers,
       generic names, bounded streaming, sanitized failures, and startup sweep.
 
 ## Move media-node previews, caches and replay spills

@@ -2,6 +2,7 @@
 // Consumer packs receive compiled resource handles, never this transport.
 
 import { isOpaquePrivateRecordId } from "./privacy_records.js";
+import { normalizeArtifactLease } from "./privacy_artifacts.js";
 
 const ROUTE_PREFIX = "/helto_privacy";
 const PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token";
@@ -399,7 +400,13 @@ function createAttestedPrivacyArtifactClient({ packId, declarations, requestClie
       `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/artifacts/`
         + `${encodeURIComponent(item.resourceId)}/${encodeURIComponent(item.id)}/`
         + `${encodeURIComponent(artifactId)}/lease/${encodeURIComponent(safeOperation)}`,
-    ).then((result) => normalizeArtifactLease(result?.lease));
+    ).then((result) => {
+      try {
+        return normalizeArtifactLease(result?.lease);
+      } catch {
+        throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_LEASE_INVALID");
+      }
+    });
   };
   return Object.freeze({ lease });
 }
@@ -415,24 +422,6 @@ function normalizeArtifactReference(reference) {
     throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_REFERENCE_INVALID");
   }
   return String(reference.id);
-}
-
-function normalizeArtifactLease(lease) {
-  if (
-    !lease
-    || Object.keys(lease).sort().join(",") !== "expiresInSeconds,url"
-    || !/^\/helto_privacy\/artifacts\/hp-lease-[A-Za-z0-9_-]{32}$/.test(
-      String(lease.url || ""),
-    )
-    || !Number.isInteger(lease.expiresInSeconds)
-    || lease.expiresInSeconds < 1
-  ) {
-    throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_LEASE_INVALID");
-  }
-  return Object.freeze({
-    url: String(lease.url),
-    expiresInSeconds: lease.expiresInSeconds,
-  });
 }
 
 function createAttestedPrivacySnapshotClient({ packId, fields, requestClient }) {

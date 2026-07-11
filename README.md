@@ -656,6 +656,18 @@ async with media.run() as run:
     await render_from(spill_reference)
 ```
 
+For node-produced previews, compose one bound resource handle with
+`ArtifactPublicationService`. It coordinates all declared media kinds, replaces
+old references, and performs owner release and startup sweep once per resource.
+The node returns only the opaque artifact reference; the attested browser handle
+exchanges it for a lease.
+
+Existing allowed user files are not copied into artifacts. Bind the consumer's
+root and media-type validator through `RootBoundSourceLeasePublisher`, returning
+`root_bound_source(...)`. The shared route then opens that exact inode with
+no-follow directory-relative descriptors and streams bounded chunks directly;
+consumer root policy stays out of the shared package.
+
 The browser receives only an attested typed lease operation:
 
 ```js
@@ -664,7 +676,10 @@ const lease = await privacy.artifacts("media").lease(
   artifactReference,
   "preview",
 );
-preview.src = lease.url;
+const { resolveArtifactLeaseURL } = await import(
+  "/helto_privacy/ui/privacy_artifacts.js"
+);
+preview.src = resolveArtifactLeaseURL(lease, api.apiURL.bind(api));
 ```
 
 The URL contains only a random server-held `hp-lease-*` ID—not an artifact ID,

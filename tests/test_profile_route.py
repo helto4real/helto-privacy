@@ -822,6 +822,23 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         'inline; filename="private-artifact.bin"'
     )
 
+    async def reject_removed_source(_request, _supplied_lease_id):
+        raise artifacts.ArtifactError("PRIVACY_ARTIFACT_SOURCE_REJECTED")
+
+    monkeypatch.setattr(
+        artifacts,
+        "open_artifact_lease",
+        reject_removed_source,
+    )
+    rejected_source_response = asyncio.run(artifact_stream_handler(stream_request))
+    assert rejected_source_response.status == 409
+    assert rejected_source_response.data["error"] == "PRIVACY_ARTIFACT_SOURCE_REJECTED"
+    assert rejected_source_response.headers["Cache-Control"] == "private, no-store"
+    assert "source" not in str(rejected_source_response.data).lower().replace(
+        "privacy_artifact_source_rejected",
+        "",
+    )
+
     missing = asyncio.run(
         handler(types.SimpleNamespace(match_info={"pack_id": "helto.missing"}))
     )

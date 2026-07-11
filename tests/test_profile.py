@@ -425,3 +425,34 @@ def test_profile_rejects_browser_adapter_used_as_server_mode_source():
         )
 
     assert exc_info.value.code == "resource_adapter_mismatch"
+
+
+def test_operation_is_a_complete_product_fact_for_workflow_resource():
+    profile = PrivacyProfile(
+        id="helto.operation-only-test",
+        distribution="comfyui-operation-only-test",
+        resources=(
+            ProfileResource(
+                "operations",
+                ResourceKind.WORKFLOW,
+                ("operation-adapter",),
+            ),
+        ),
+        server_adapters=(
+            AdapterSlot(
+                "operation-adapter",
+                ResourceKind.WORKFLOW,
+                "operations",
+            ),
+        ),
+        protected_operations=(
+            ProtectedOperation(
+                "source.view",
+                "operations",
+                "operation-adapter",
+                "/operation-only/source/view",
+            ),
+        ),
+    )
+
+    assert profile.protected_operations[0].resource_id == "operations"

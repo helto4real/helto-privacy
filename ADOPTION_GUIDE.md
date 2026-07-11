@@ -531,6 +531,18 @@ Artifact adapters implement `encode(value) -> bytes`, `decode(bytes)`, and
 The purge must remove every consumer-owned plaintext derivative; failure aborts
 the public-to-private transition. Do not decrypt to a named temporary file.
 
+Use one `ArtifactPublicationService` for all preview kinds on an artifact
+resource. Node execution writes without needing a browser request capability;
+return the opaque reference and let the attested browser artifact handle obtain
+the `artifact.preview` lease. The shared service performs replacement,
+retirement, owner release, and startup sweep once for that resource.
+
+Existing allowed user files use `RootBoundSourceLeasePublisher` instead of an
+artifact copy. The consumer validates its alias, extension, roots, and media
+type, then returns `root_bound_source(...)`. The shared lease route securely
+reopens the exact authorized inode and streams bounded chunks without a
+path-bearing token or full plaintext materialization.
+
 ```python
 owner = generate_artifact_owner_id()
 media = privacy.artifacts("media")
@@ -550,7 +562,10 @@ const lease = await privacy.artifacts("media").lease(
   artifactReference,
   "preview",
 );
-image.src = lease.url;
+const { resolveArtifactLeaseURL } = await import(
+  "/helto_privacy/ui/privacy_artifacts.js"
+);
+image.src = resolveArtifactLeaseURL(lease, api.apiURL.bind(api));
 ```
 
 The returned URL is a short-lived random lease ID only. Never add a path,

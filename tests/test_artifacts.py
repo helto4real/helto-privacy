@@ -443,6 +443,16 @@ def test_opaque_operation_scoped_lease_streams_and_revokes_with_session(
             await artifacts.open_artifact_lease(request, expiring.id)
 
         clock[0] = 2000.0
+        restarted = await handle.lease(
+            "thumbnail",
+            reference,
+            "preview",
+            authorization,
+        )
+        artifacts.reset_artifact_runtime_for_tests()
+        with pytest.raises(ArtifactError) as after_restart:
+            await artifacts.open_artifact_lease(request, restarted.id)
+
         revoked = await handle.lease(
             "thumbnail",
             reference,
@@ -469,6 +479,7 @@ def test_opaque_operation_scoped_lease_streams_and_revokes_with_session(
             stream,
             chunks,
             expired.value,
+            after_restart.value,
             locked.value,
             first_active_chunk,
             active_locked.value,
@@ -480,6 +491,7 @@ def test_opaque_operation_scoped_lease_streams_and_revokes_with_session(
         stream,
         chunks,
         expired,
+        after_restart,
         locked,
         first_active_chunk,
         active_locked,
@@ -498,9 +510,163 @@ def test_opaque_operation_scoped_lease_streams_and_revokes_with_session(
         'inline; filename="private-artifact.bin"'
     )
     assert expired.code == "PRIVACY_ARTIFACT_LEASE_INVALID"
+    assert after_restart.code == "PRIVACY_ARTIFACT_LEASE_INVALID"
     assert locked.code == "PRIVACY_ARTIFACT_LEASE_INVALID"
     assert first_active_chunk == b"abcd"
     assert active_locked.code == "PRIVACY_ARTIFACT_LEASE_INVALID"
+
+
+def test_root_bound_source_lease_streams_without_materializing_or_copying_source(
+    artifact_pack,
+    monkeypatch,
+    tmp_path,
+):
+    pack, root, token = artifact_pack
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    source_path = source_root / "clip.webm"
+    source_path.write_bytes(b"abcdefghijkl")
+    request = Request(token)
+    monkeypatch.setattr(artifacts, "ARTIFACT_STREAM_CHUNK_BYTES", 4)
+
+    async def exercise():
+        source = artifacts.root_bound_source(
+            source_path,
+            (source_root,),
+            media_type="video/webm",
+        )
+        authorization = authorize_privacy_request(
+            request,
+            "serve-source-media",
+            pack_id=pack.profile.id,
+        )
+        lease = await artifacts.issue_root_bound_source_lease(
+            pack_id=pack.profile.id,
+            operation_id="serve-source-media",
+            source=source,
+            authorization=authorization,
+        )
+        stream = await artifacts.open_artifact_lease(request, lease.id)
+        chunks = [chunk async for chunk in stream.iter_chunks()]
+        return lease, stream, chunks
+
+    lease, stream, chunks = asyncio.run(exercise())
+
+    assert chunks == [b"abcd", b"efgh", b"ijkl"]
+    assert stream.media_type == "video/webm"
+    assert stream.headers["Cache-Control"] == "private, no-store"
+    assert stream.headers["Content-Disposition"] == (
+        'inline; filename="private-artifact.bin"'
+    )
+    serialized = json.dumps(lease.to_payload())
+    assert str(source_path) not in serialized
+    assert source_path.name not in serialized
+    assert token not in serialized
+    assert not list(root.rglob("*clip*"))
+
+
+def test_root_bound_source_rejects_escape_symlink_and_wrong_authorization(
+    artifact_pack,
+    tmp_path,
+):
+    pack, _root, token = artifact_pack
+    source_root = tmp_path / "sources"
+    source_root.mkdir()
+    outside = tmp_path / "outside.webm"
+    outside.write_bytes(b"outside")
+    linked = source_root / "linked.webm"
+    linked.symlink_to(outside)
+
+    with pytest.raises(ArtifactError) as escaped:
+        artifacts.root_bound_source(outside, (source_root,), media_type="video/webm")
+    with pytest.raises(ArtifactError) as symlinked:
+        artifacts.root_bound_source(linked, (source_root,), media_type="video/webm")
+    assert escaped.value.code == "PRIVACY_ARTIFACT_SOURCE_REJECTED"
+    assert symlinked.value.code == "PRIVACY_ARTIFACT_SOURCE_REJECTED"
+
+    request = Request(token)
+    allowed = source_root / "allowed.webm"
+    allowed.write_bytes(b"allowed")
+    source = artifacts.root_bound_source(
+        allowed,
+        (source_root,),
+        media_type="video/webm",
+    )
+    correct = authorize_privacy_request(
+        request,
+        "serve-source-media",
+        pack_id=pack.profile.id,
+    )
+    lease = asyncio.run(
+        artifacts.issue_root_bound_source_lease(
+            pack_id=pack.profile.id,
+            operation_id="serve-source-media",
+            source=source,
+            authorization=correct,
+        )
+    )
+    allowed.unlink()
+    with pytest.raises(ArtifactError) as removed_before_open:
+        asyncio.run(artifacts.open_artifact_lease(request, lease.id))
+    assert removed_before_open.value.code == "PRIVACY_ARTIFACT_SOURCE_REJECTED"
+
+    allowed.write_bytes(b"allowed")
+    source = artifacts.root_bound_source(
+        allowed,
+        (source_root,),
+        media_type="video/webm",
+    )
+    wrong = authorize_privacy_request(
+        request,
+        "artifact.view",
+        pack_id=pack.profile.id,
+    )
+    with pytest.raises(PrivacyAuthorizationError):
+        asyncio.run(
+            artifacts.issue_root_bound_source_lease(
+                pack_id=pack.profile.id,
+                operation_id="serve-source-media",
+                source=source,
+                authorization=wrong,
+            )
+        )
+
+
+def test_artifact_retirement_revokes_an_active_browser_lease(artifact_pack):
+    pack, _root, token = artifact_pack
+    handle = pack.artifacts("media")
+    request = Request(token)
+
+    async def exercise():
+        reference = await handle.write(
+            "thumbnail",
+            generate_artifact_owner_id(),
+            b"replacement-sensitive-preview",
+        )
+        authorization = authorize_privacy_request(
+            request,
+            "artifact.preview",
+            pack_id=pack.profile.id,
+        )
+        lease = await handle.lease(
+            "thumbnail",
+            reference,
+            "preview",
+            authorization,
+        )
+        stream = await artifacts.open_artifact_lease(request, lease.id)
+        chunks = stream.iter_chunks()
+        first = await anext(chunks)
+        await handle.retire("thumbnail", reference)
+        with pytest.raises(ArtifactError) as revoked:
+            await anext(chunks)
+        await chunks.aclose()
+        return first, revoked.value
+
+    first, revoked = asyncio.run(exercise())
+
+    assert first
+    assert revoked.code == "PRIVACY_ARTIFACT_LEASE_INVALID"
 
 
 def test_served_transients_retire_after_consumption_and_bad_caches_are_discarded(

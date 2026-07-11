@@ -893,6 +893,10 @@ class PrivacyProfile:
                 projection.execution_resource_id for projection in projections.values()
             },
         }
+        for operation in operations.values():
+            facts_by_kind[resources[operation.resource_id].kind].add(
+                operation.resource_id
+            )
         for resource in resources.values():
             if resource.id not in facts_by_kind[resource.kind]:
                 raise ProfileValidationError("missing_resource_product_facts")

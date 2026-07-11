@@ -2,11 +2,12 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+from privacy_js_test_support import write_privacy_client_dependencies
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
 PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
-PRIVACY_RECORDS = ROOT / "helto_privacy" / "web" / "privacy_records.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
@@ -15,9 +16,7 @@ def run_node_module_test(tmp_path, body: str) -> None:
     module_path.write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
     client_path = tmp_path / "privacy_client.js"
     client_path.write_text(PRIVACY_CLIENT.read_text(encoding="utf-8"), encoding="utf-8")
-    (tmp_path / "privacy_records.js").write_text(
-        PRIVACY_RECORDS.read_text(encoding="utf-8"), encoding="utf-8"
-    )
+    write_privacy_client_dependencies(tmp_path)
     script_path = tmp_path / "test.mjs"
     script_path.write_text(
         textwrap.dedent(
