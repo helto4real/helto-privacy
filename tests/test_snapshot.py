@@ -3,6 +3,7 @@ import json
 import pytest
 
 import helto_privacy.keystore as keystore
+import helto_privacy.migration as migration
 import helto_privacy.runtime as runtime
 from helto_privacy.envelope import PrivacyEnvelopeCodec
 from helto_privacy.guard import authorize_privacy_request
@@ -10,6 +11,8 @@ from helto_privacy.profile import (
     AdapterSlot,
     FieldLocation,
     FieldLocationKind,
+    LegacyLocationKind,
+    LegacyReaderBinding,
     PrivacyProfile,
     PrivacyScope,
     ProtectedField,
@@ -55,11 +58,6 @@ class StateAdapter:
     def clear_plaintext(self):
         return None
 
-    def read_legacy(self, value, reader_id, *_args):
-        if reader_id == "state-v0" and value == "LEGACY_SYNTHETIC":
-            return {"value": "legacy"}
-        raise ValueError("SYNTHETIC_LEGACY_DIAGNOSTIC")
-
     def prepare_mode_transition(self, *_args):
         return None
 
@@ -68,6 +66,14 @@ class StateAdapter:
 
     def rollback_mode_transition(self, *_args):
         return None
+
+
+class LegacyStateReader:
+    def probe(self, value, _context):
+        return value == "LEGACY_SYNTHETIC"
+
+    def read(self, _value, _context):
+        return {"value": "legacy"}
 
 
 def _profile():
@@ -100,6 +106,15 @@ def _profile():
                 legacy_reader_ids=("state-v0",),
             ),
         ),
+        legacy_bindings=(
+            LegacyReaderBinding(
+                "state-v0-binding",
+                "state-v0",
+                "state",
+                LegacyLocationKind.WORKFLOW_FIELD,
+                "private-state",
+            ),
+        ),
     )
 
 
@@ -107,6 +122,10 @@ def _profile():
 def snapshot_pack(monkeypatch):
     monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
     monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    migration.reset_migration_runtime_for_tests()
+    migration.register_legacy_reader_units(
+        (migration.LegacyReaderUnit("state-v0", "Legacy state", LegacyStateReader()),)
+    )
     profile = _profile()
     pack = runtime.install(
         profile,
@@ -201,6 +220,7 @@ def test_readable_legacy_is_rewritten_current_and_unsupported_never_substitutes(
         authorization,
     )
     assert legacy.disposition is EnvelopeDisposition.READABLE_LEGACY
+    assert legacy.migration_obligation_id.startswith("hp-obligation-")
     assert PrivacyEnvelopeCodec("helto.snapshot-test.v1").decrypt_state(
         legacy.replacement_envelope
     ) == {"normalized": "legacy"}

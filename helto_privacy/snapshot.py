@@ -14,7 +14,7 @@ from typing import Any
 from . import keystore
 from .envelope import PrivacyEnvelopeCodec, PrivacyError
 from .guard import AuthorizedPrivacyRequest, require_current_authorization
-from .profile import ProtectedField
+from .profile import LegacyLocationKind, PrivacyProfile, ProtectedField
 
 
 class EnvelopeDisposition(str, Enum):
@@ -39,6 +39,7 @@ class SnapshotError(RuntimeError):
 class DispositionResult:
     disposition: EnvelopeDisposition
     identity: str | None = None
+    migration_obligation_id: str | None = None
     replacement_envelope: dict[str, Any] | None = field(default=None, repr=False)
 
 
@@ -55,6 +56,7 @@ _FAILED_CURRENT: dict[tuple[str, str, str], str] = {}
 def inspect_field_disposition(
     *,
     pack_id: str,
+    profile: PrivacyProfile,
     field_declaration: ProtectedField,
     state_adapter: object,
     protected_value: object,
@@ -109,27 +111,40 @@ def inspect_field_disposition(
             "snapshot.disposition",
             pack_id,
         )
-        reader = getattr(state_adapter, "read_legacy", None)
-        if callable(reader):
-            for reader_id in field_declaration.legacy_reader_ids:
-                try:
-                    legacy_value = reader(
-                        protected_value,
-                        reader_id,
-                        field_declaration,
-                    )
-                    normalized = _normalize_state(
-                        state_adapter,
-                        legacy_value,
-                        field_declaration,
-                    )
-                    replacement = codec.encrypt_state(normalized)
-                except Exception:  # noqa: BLE001 - legacy diagnostics are never exposed.
-                    continue
-                return DispositionResult(
-                    EnvelopeDisposition.READABLE_LEGACY,
-                    replacement_envelope=replacement,
+        from .migration import MigrationError, discover_bound_legacy
+
+        bindings = (
+            binding
+            for binding in profile.legacy_bindings
+            if binding.location_kind is LegacyLocationKind.WORKFLOW_FIELD
+            and binding.location_id == field_declaration.id
+        )
+        for binding in bindings:
+            try:
+                discovered = discover_bound_legacy(
+                    profile,
+                    binding.id,
+                    protected_value,
+                    authorization,
+                    operation_id="snapshot.disposition",
                 )
+                if discovered is None:
+                    continue
+                normalized = _normalize_state(
+                    state_adapter,
+                    discovered.value,
+                    field_declaration,
+                )
+                replacement = codec.encrypt_state(normalized)
+            except MigrationError:
+                raise SnapshotError("PRIVACY_LEGACY_READ_FAILED") from None
+            except Exception:  # noqa: BLE001 - product diagnostics are never exposed.
+                raise SnapshotError("PRIVACY_LEGACY_MIGRATION_FAILED") from None
+            return DispositionResult(
+                EnvelopeDisposition.READABLE_LEGACY,
+                migration_obligation_id=discovered.obligation.id,
+                replacement_envelope=replacement,
+            )
 
     return DispositionResult(EnvelopeDisposition.UNSUPPORTED)
 

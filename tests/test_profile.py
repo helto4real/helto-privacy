@@ -7,6 +7,8 @@ from helto_privacy.profile import (
     ArtifactRetention,
     FieldLocation,
     FieldLocationKind,
+    LegacyLocationKind,
+    LegacyReaderBinding,
     PrivacyProfile,
     PrivacyScope,
     ProtectedField,
@@ -186,10 +188,19 @@ def test_profile_fingerprint_is_stable_and_order_independent():
                 execution=True,
             ),
         ),
+        legacy_bindings=(
+            LegacyReaderBinding(
+                "director-timeline-v1-binding",
+                "director-timeline-v1",
+                "timeline",
+                LegacyLocationKind.WORKFLOW_FIELD,
+                "timeline-state",
+            ),
+        ),
     )
 
     assert profile.fingerprint == (
-        "82bfaface2555793b30c64881b16c76fb56fb32d59417fe298f2f9a1e2db328d"
+        "09c983d557a9c783dd46328b9ac4049a86033a29a3032cb9f8155255fe83653b"
     )
 
     reordered = PrivacyProfile(
@@ -212,6 +223,7 @@ def test_profile_fingerprint_is_stable_and_order_independent():
         browser_adapters=profile.browser_adapters,
         scopes=profile.scopes,
         protected_fields=profile.protected_fields,
+        legacy_bindings=profile.legacy_bindings,
     )
 
     assert reordered.fingerprint == profile.fingerprint
@@ -231,7 +243,6 @@ def test_profile_fingerprint_is_stable_and_order_independent():
             "commit_mode_transition",
             "normalize",
             "prepare_mode_transition",
-            "read_legacy",
             "rollback_mode_transition",
         ),
     }

@@ -206,6 +206,7 @@ class WorkflowHandle(_ResourceHandle):
         field_declaration, state_adapter = self._snapshot_field(field_id)
         return inspect_field_disposition(
             pack_id=self.pack_id,
+            profile=self._installation.profile,
             field_declaration=field_declaration,
             state_adapter=state_adapter,
             protected_value=protected_value,
@@ -489,6 +490,14 @@ class BoundPrivacyPack:
     def authorization(self) -> AuthorizationHandle:
         return AuthorizationHandle(self._installation)
 
+    @property
+    def migration(self):
+        """Return the shared pack-bound legacy migration capability."""
+
+        from .migration import MigrationHandle
+
+        return MigrationHandle(self.profile)
+
     def mode(self, resource_id: str) -> ModeHandle:
         return self._resource(resource_id, ResourceKind.MODE, ModeHandle)
 
@@ -567,6 +576,9 @@ def install(
 ) -> BoundPrivacyPack:
     """Atomically validate, bind, and install one complete privacy profile."""
 
+    from .migration import require_registered_readers
+
+    require_registered_readers(profile)
     bound_adapters = _validate_adapter_bindings(profile, adapters)
     if profile.artifacts:
         from .artifacts import initialize_artifact_service
@@ -668,6 +680,27 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "execution": field.execution,
                 }
                 for field in profile.protected_fields
+            ],
+            "legacyBindings": [
+                {
+                    "id": binding.id,
+                    "readerId": binding.reader_id,
+                    "resourceId": binding.resource_id,
+                    "locationKind": binding.location_kind.value,
+                    "locationId": binding.location_id,
+                }
+                for binding in profile.legacy_bindings
+            ],
+            "legacyKeyImports": [
+                {
+                    "id": key_import.id,
+                    "importId": key_import.import_id,
+                    "resourceId": key_import.resource_id,
+                    "locationKind": key_import.location_kind.value,
+                    "locationId": key_import.location_id,
+                    "sourceFormat": key_import.source_format.value,
+                }
+                for key_import in profile.legacy_key_imports
             ],
             "executionProjections": [
                 {

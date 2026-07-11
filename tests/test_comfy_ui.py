@@ -90,7 +90,7 @@ def test_initialize_migrates_all_registered_legacy_keys(tmp_path):
 
     assert result["token"]
     assert not (pack_a / "privacy_key.json").exists()
-    assert (pack_a / "privacy_key.json.migrated").exists()
+    assert not (pack_a / "privacy_key.json.migrated").exists()
     assert not (pack_b / "privacy_key.json").exists()
     # Both packs' old envelopes decrypt through the keystore session.
     assert PrivacyEnvelopeCodec("helto.pack-a").decrypt_state(envelope_a) == {"secret": "legacy"}
@@ -110,7 +110,7 @@ def test_unlock_sweeps_legacy_keys_registered_after_init(tmp_path):
 
     assert result["token"]
     assert not (late_pack / "privacy_key.json").exists()
-    assert (late_pack / "privacy_key.json.migrated").exists()
+    assert not (late_pack / "privacy_key.json.migrated").exists()
     assert PrivacyEnvelopeCodec("helto.late-pack").decrypt_state(envelope) == {"secret": "legacy"}
 
 
@@ -124,7 +124,7 @@ def test_unlock_without_legacy_keys_is_plain_unlock():
     assert keystore.session_token() == result["token"]
 
 
-def test_collect_legacy_keys_skips_malformed_and_duplicate_files(tmp_path):
+def test_collect_legacy_keys_keeps_duplicate_sources_for_verified_unlink(tmp_path):
     good = tmp_path / "good"
     _legacy_key_file(good)
     duplicate = tmp_path / "duplicate"
@@ -132,16 +132,24 @@ def test_collect_legacy_keys_skips_malformed_and_duplicate_files(tmp_path):
     (duplicate / "privacy_key.json").write_text(
         (good / "privacy_key.json").read_text(encoding="utf-8"), encoding="utf-8"
     )
-    broken = tmp_path / "broken"
-    broken.mkdir(parents=True)
-    (broken / "privacy_key.json").write_text("{not json", encoding="utf-8")
-    for directory in (good, duplicate, broken):
+    for directory in (good, duplicate):
         register_legacy_key_dir(directory)
 
     collected = _collect_legacy_keys()
 
-    assert len(collected) == 1
-    assert collected[0][2] == good / "privacy_key.json"
+    assert len(collected) == 2
+    assert collected[0].path == good / "privacy_key.json"
+    assert collected[1].path == duplicate / "privacy_key.json"
+
+
+def test_collect_legacy_keys_fails_closed_for_malformed_source(tmp_path):
+    broken = tmp_path / "broken"
+    broken.mkdir(parents=True)
+    (broken / "privacy_key.json").write_text("{not json", encoding="utf-8")
+    register_legacy_key_dir(broken)
+
+    with pytest.raises(keystore.PrivacyKeystoreError, match="PRIVACY_LEGACY_KEY_INVALID"):
+        _collect_legacy_keys()
 
 
 def test_ui_module_ships_in_package():

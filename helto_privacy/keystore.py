@@ -19,14 +19,19 @@ mode cannot use this module as a bypass.
 from __future__ import annotations
 
 import base64
+import fcntl
 import json
 import os
 import secrets
 import tempfile
+import hmac
 from pathlib import Path
+from contextlib import contextmanager
+from threading import RLock, local
 from typing import Any
 
 from .suite_runtime import require_active_process_suite
+from ._atomic_file import atomic_write_private_bytes
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -54,6 +59,8 @@ SCRYPT_P = 1
 SCRYPT_SALT_BYTES = 16
 KEY_BYTES = 32
 MIN_PASSWORD_LENGTH = 8
+_KEYSTORE_MUTATION_LOCK = RLock()
+_KEYSTORE_MUTATION_LOCAL = local()
 
 ERROR_LOCKED = "PRIVACY_LOCKED"
 ERROR_UNINITIALIZED = "PRIVACY_KEYSTORE_UNINITIALIZED"
@@ -65,6 +72,49 @@ ERROR_KEYSTORE_INVALID = "PRIVACY_KEYSTORE_INVALID"
 
 class PrivacyKeystoreError(RuntimeError):
     """Raised when the privacy keystore cannot complete an operation."""
+
+
+@contextmanager
+def _exclusive_keystore_mutation():
+    """Serialize every keystore/session mutation across threads and processes."""
+
+    with _KEYSTORE_MUTATION_LOCK:
+        depth = int(getattr(_KEYSTORE_MUTATION_LOCAL, "depth", 0))
+        if depth:
+            _KEYSTORE_MUTATION_LOCAL.depth = depth + 1
+            try:
+                yield
+            finally:
+                _KEYSTORE_MUTATION_LOCAL.depth = depth
+            return
+
+        lock_path = keystore_path().with_suffix(keystore_path().suffix + ".lock")
+        descriptor: int | None = None
+        try:
+            lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(lock_path.parent, 0o700)
+            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.fchmod(descriptor, 0o600)
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+        except OSError:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise PrivacyKeystoreError(
+                f"{ERROR_KEYSTORE_INVALID}: Keystore mutation lock is unavailable."
+            ) from None
+        try:
+            _KEYSTORE_MUTATION_LOCAL.depth = 1
+            yield
+        finally:
+            _KEYSTORE_MUTATION_LOCAL.depth = 0
+            if descriptor is not None:
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_UN)
+                finally:
+                    os.close(descriptor)
 
 
 def keystore_path() -> Path:
@@ -114,6 +164,15 @@ def initialize_keystore(
     ``legacy_keys`` are (key_id, key) pairs imported as decrypt-only entries
     so envelopes written by the old plaintext key files stay readable.
     """
+    with _exclusive_keystore_mutation():
+        return _initialize_keystore(password, legacy_keys=legacy_keys)
+
+
+def _initialize_keystore(
+    password: str,
+    *,
+    legacy_keys: list[tuple[str, bytes]] | None = None,
+) -> dict[str, Any]:
     require_active_process_suite()
     _require_crypto()
     password = _valid_password(password)
@@ -156,6 +215,11 @@ def initialize_keystore(
 
 
 def unlock_keystore(password: str) -> dict[str, Any]:
+    with _exclusive_keystore_mutation():
+        return _unlock_keystore(password)
+
+
+def _unlock_keystore(password: str) -> dict[str, Any]:
     require_active_process_suite()
     _require_crypto()
     payload = _load_keystore()
@@ -201,16 +265,22 @@ def unlock_keystore(password: str) -> dict[str, Any]:
 
 
 def lock_keystore() -> dict[str, Any]:
-    path = session_path()
-    try:
-        path.unlink(missing_ok=True)
-    except OSError:
-        pass
-    _invalidate_private_runtimes("lock")
-    return keystore_status()
+    with _exclusive_keystore_mutation():
+        path = session_path()
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        _invalidate_private_runtimes("lock")
+        return keystore_status()
 
 
 def change_keystore_password(current_password: str, new_password: str) -> dict[str, Any]:
+    with _exclusive_keystore_mutation():
+        return _change_keystore_password(current_password, new_password)
+
+
+def _change_keystore_password(current_password: str, new_password: str) -> dict[str, Any]:
     require_active_process_suite()
     _require_crypto()
     new_password = _valid_password(new_password)
@@ -250,6 +320,11 @@ def add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[s
     The password is verified against the on-disk keystore, duplicate key IDs
     are ignored, and the refreshed session contains every decryptable key.
     """
+    with _exclusive_keystore_mutation():
+        return _add_keys_to_keystore(password, keys)
+
+
+def _add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[str, Any]:
     require_active_process_suite()
     _require_crypto()
     unlock_keystore(password)
@@ -284,8 +359,81 @@ def add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[s
     return {"token": token, **keystore_status()}
 
 
+def import_decrypt_only_key_verified(
+    password: str,
+    key_id: str,
+    key: bytes,
+) -> dict[str, Any]:
+    """Wrap, persist, reopen, and verify one decrypt-only historical key."""
+
+    with _exclusive_keystore_mutation():
+        return _import_decrypt_only_key_verified(password, key_id, key)
+
+
+def _import_decrypt_only_key_verified(
+    password: str,
+    key_id: str,
+    key: bytes,
+) -> dict[str, Any]:
+    """Locked implementation for one verified decrypt-only import."""
+
+    require_active_process_suite()
+    _require_crypto()
+    key_id = str(key_id or "").strip()
+    if not key_id or not isinstance(key, bytes) or len(key) != KEY_BYTES:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Historical key is invalid.")
+    unlock_keystore(password)
+    original_payload = _load_keystore()
+    session = _read_session()
+    if session is None:
+        raise PrivacyKeystoreError(f"{ERROR_LOCKED}: Privacy keystore is locked.")
+    kek = _kek_from_payload(password, original_payload)
+    entries = list(original_payload.get("keys") or [])
+    matching = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict) and str(entry.get("keyId") or "").strip() == key_id
+    ]
+    if not matching:
+        entries.append(_wrap_entry(kek, key_id, key, primary=False))
+    candidate = dict(original_payload)
+    candidate["keys"] = entries
+    _write_private_json(keystore_path(), candidate)
+    try:
+        reopened = _load_keystore()
+        reopened_kek = _kek_from_payload(password, reopened)
+        reopened_entry = next(
+            entry
+            for entry in reopened.get("keys") or []
+            if isinstance(entry, dict) and str(entry.get("keyId") or "").strip() == key_id
+        )
+        verified = AESGCM(reopened_kek).decrypt(  # type: ignore[operator]
+            _b64url_decode(str(reopened_entry.get("nonce") or "")),
+            _b64url_decode(str(reopened_entry.get("wrapped_key") or "")),
+            _wrap_aad(key_id),
+        )
+        if not hmac.compare_digest(verified, key):
+            raise ValueError
+    except Exception:
+        _write_private_json(keystore_path(), original_payload)
+        unlock_keystore(password)
+        raise PrivacyKeystoreError(
+            f"{ERROR_KEYSTORE_INVALID}: Historical key verification failed."
+        ) from None
+
+    unlocked = dict(session["keys"])
+    unlocked[key_id] = key
+    token = _write_session(session["primary_key_id"], unlocked)
+    return {"token": token, **keystore_status()}
+
+
 def rotate_primary_key(password: str) -> dict[str, Any]:
     """Generate a fresh primary key and keep older keys for decryption."""
+    with _exclusive_keystore_mutation():
+        return _rotate_primary_key(password)
+
+
+def _rotate_primary_key(password: str) -> dict[str, Any]:
     require_active_process_suite()
     _require_crypto()
     unlock_keystore(password)
@@ -470,22 +618,12 @@ def _invalidate_private_runtimes(reason: str) -> None:
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    try:
-        os.chmod(tmp_path, 0o600)
-    except OSError:
-        pass
-    tmp_path.replace(path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+    atomic_write_private_bytes(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode(
+            "utf-8"
+        ),
+    )
 
 
 def _b64url_encode(data: bytes) -> str:

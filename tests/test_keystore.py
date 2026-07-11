@@ -1,4 +1,5 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -68,6 +69,11 @@ def test_direct_keystore_writers_and_secret_reads_require_active_suite(
         lambda: keystore.unlock_keystore(PASSWORD),
         lambda: keystore.change_keystore_password(PASSWORD, "new password"),
         lambda: keystore.add_keys_to_keystore(PASSWORD, []),
+        lambda: keystore.import_decrypt_only_key_verified(
+            PASSWORD,
+            "synthetic-key",
+            bytes(range(32)),
+        ),
         lambda: keystore.rotate_primary_key(PASSWORD),
         keystore.primary_session_key,
         lambda: keystore.session_key_for("opaque-key"),
@@ -136,7 +142,7 @@ def test_legacy_key_is_imported_and_retired():
     initialize_keystore_with_legacy_migration(PASSWORD, envelope_module.config_dir())
 
     assert not legacy_path.exists()
-    assert legacy_path.with_name(legacy_path.name + ".migrated").exists()
+    assert not legacy_path.with_name(legacy_path.name + ".migrated").exists()
     assert codec.decrypt_state(legacy_envelope) == {"old": "workflow"}
     new_envelope = codec.encrypt_state({"new": "workflow"})
     assert new_envelope["keyId"] != legacy_envelope["keyId"]
@@ -162,6 +168,30 @@ def test_add_keys_to_existing_keystore_imports_decrypt_only_key(tmp_path):
     raw = json.loads(keystore.keystore_path().read_text(encoding="utf-8"))
     assert [entry["keyId"] for entry in raw["keys"]].count(legacy_key_id) == 1
     assert codec.decrypt_state(legacy_envelope) == {"old": "other pack"}
+
+
+def test_concurrent_verified_imports_preserve_every_wrapped_key():
+    keystore.initialize_keystore(PASSWORD)
+    keys = (
+        ("synthetic-key-a", bytes(range(32))),
+        ("synthetic-key-b", bytes(reversed(range(32)))),
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = tuple(
+            executor.map(
+                lambda item: keystore.import_decrypt_only_key_verified(
+                    PASSWORD,
+                    item[0],
+                    item[1],
+                ),
+                keys,
+            )
+        )
+
+    assert all(result["token"] for result in results)
+    assert keystore.session_key_for("synthetic-key-a") == keys[0][1]
+    assert keystore.session_key_for("synthetic-key-b") == keys[1][1]
 
 
 def test_rotate_primary_key_keeps_old_envelopes_decryptable():

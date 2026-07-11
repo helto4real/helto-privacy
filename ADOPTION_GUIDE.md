@@ -58,7 +58,7 @@ Then pick your case:
   (you would corrupt compatibility with the pack's existing data). Keep the
   pack's own envelope code and only replace its *key source* with the
   keystore primitives (`primary_session_key()`, `session_key_for(key_id)`,
-  plus `initialize_keystore_with_legacy_migration` for its key file). The
+  plus a declared verified legacy-key import for its key file). The
   route/frontend/test steps below still apply.
 
 ## Step 1 — Dependency
@@ -85,7 +85,6 @@ codec, preserving whatever function names the rest of the pack already calls
 from pathlib import Path
 from helto_privacy import PrivacyEnvelopeCodec, PrivacyError  # noqa: F401
 from helto_privacy import envelope as _envelope
-from helto_privacy import initialize_keystore_with_legacy_migration
 
 _SCHEMA = "helto.<this-pack's-existing-schema>"   # from Step 0 — DO NOT invent a new one
 _codec = PrivacyEnvelopeCodec(_SCHEMA)
@@ -103,55 +102,48 @@ def decrypt_state(payload, base_dir=None):
     return _codec.decrypt_state(payload, base_dir=base_dir)
 
 # ...same one-liners for encrypt_bytes/decrypt_bytes/is_encrypted_payload/crypto_status...
-
-def initialize_privacy_keystore(password: str):
-    return initialize_keystore_with_legacy_migration(password, config_dir())
 ```
 
 > **Warning — CWD footgun.** The package's own legacy fallback
 > (`helto_privacy.envelope.key_path(None)`) resolves to
 > `Path.cwd()/config`, which under ComfyUI is the *ComfyUI* directory, not
 > the pack. Never rely on it. Always route legacy-file access through the
-> pack-anchored `config_dir()` above: pass it to
-> `initialize_keystore_with_legacy_migration`, and if the pack needs a
-> legacy fallback for envelopes while no keystore exists, pass
-> `base_dir=config_dir()` explicitly at those call sites. Once the user has
-> a keystore (this user does), `base_dir=None` resolves to the keystore and
-> the fallback never triggers.
+> pack-anchored `config_dir()` above. Exact legacy readers and key imports must
+> declare that location through the migration contract; do not make a current
+> writer fall back to it. Once the user has a keystore, `base_dir=None`
+> resolves to the keystore.
 
 If the pack loads under two module namespaces (ComfyUI loader packages under
 a runtime name, like the Director's `comfyui_helto_director_runtime.*`),
 both copies share state automatically because all state lives in files —
 but keep that in mind when tests monkeypatch module attributes (see Step 5).
 
-## Step 3 — Register the shared UI (this also handles migration)
+## Step 3 — Register the shared UI and migration declarations
 
 In the pack's `__init__.py`, right where routes are registered today:
 
 ```python
 from helto_privacy import register_helto_privacy_ui
 
-register_helto_privacy_ui(legacy_key_dir=_PACKAGE_ROOT / "config")
+register_helto_privacy_ui()
 ```
 
 This one call (idempotent across packs — the first pack in the ComfyUI
-process wins, later calls only contribute their legacy dir) registers the
+process wins) registers the
 canonical endpoints `/helto_privacy/status`, `/unlock`, `/lock`,
 `/keystore/init`, `/keystore/change_password`, profile mode status/transition
 routes, and serves the shared browser client and UI at
 `/helto_privacy/ui/privacy.js`.
 
-**Migration is automatic.** Because the pack registered its legacy key
-directory, its `privacy_key.json` is imported as a decrypt-only key at the
-next keystore init *or unlock* — the only moments the password is in hand —
-and renamed to `privacy_key.json.migrated` (a recoverable backup: never
-delete it programmatically, never commit it; gitignore `config/*.json` and
-`config/*.json.migrated`). The pack does NOT need its own "Set password"
-action, unlock endpoints, or migration branching. The shared UI maps typed
-failures such as `PRIVACY_PASSWORD_INVALID` to fixed, product-data-free text.
-
-(`initialize_keystore_with_legacy_migration(password, legacy_dir)` still
-exists for non-ComfyUI callers and scripted migration.)
+Legacy migration is profile-declared rather than inferred from an inactive
+directory. Register exact shared readers and import historical keys through the
+pack-bound migration capability described in
+[`docs/legacy-migration.md`](docs/legacy-migration.md). A verified import wraps
+the key as decrypt-only, reopens and verifies it, then unlinks and syncs the
+plaintext source. It never creates a `.migrated` plaintext backup. The old
+directory registration and `initialize_keystore_with_legacy_migration` seams
+remain temporarily for coordinated consumer cutover and should not be used by
+new integrations.
 
 ## Step 4 — Gate routes, import the shared frontend
 
@@ -568,7 +560,7 @@ Rules:
   safe).
 - Port the behavior tests from
   `~/git/comfyui-helto-director/tests/timeline/test_privacy_keystore.py`:
-  lifecycle, wrong password, legacy import + `.migrated` rename, old-envelope
+  lifecycle, wrong password, verified legacy import + source unlink, old-envelope
   decrypt after migration, locked errors, token gating.
 - Add one compat test: a hardcoded envelope produced by the pack's OLD code
   (generate it once with a throwaway key embedded in the test) must decrypt
@@ -623,14 +615,16 @@ and transition-time plaintext derivative purge.
 - [ ] Artifact references and lease payloads contain no path, original filename,
       token, plaintext, or consumer value; lock and restart invalidate every
       lease, and generated plaintext never appears as a named file.
-- [ ] `privacy_key.json` is gone (renamed `.migrated`) and gitignored.
+- [ ] A verified import removed `privacy_key.json` without creating another
+      plaintext copy, and a failed import left the source untouched.
 - [ ] Commit style: single-line imperative subject, matching the pack's
       history.
 
 ## Do NOT
 
 - Change the pack's envelope schema string or any AAD format.
-- Delete key files (`.migrated` backups stay until the user removes them).
+- Delete legacy key sources before the verified importer has persisted,
+  reopened, and matched the wrapped entry.
 - Copy the keystore implementation into the pack — depend on the package;
   version bumps happen here, once.
 - Log passwords, tokens, or key material anywhere, including test output.

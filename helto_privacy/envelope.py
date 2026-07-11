@@ -23,6 +23,12 @@ except Exception as exc:  # noqa: BLE001 - dependency may be absent in ComfyUI i
 
 from . import keystore as default_keystore
 from .keystore import PrivacyKeystoreError
+from ._legacy_key_source import (
+    JSON_FORMAT,
+    LegacyKeySourceError,
+    read_legacy_key_source,
+    unlink_unchanged_legacy_key_source,
+)
 from .suite_runtime import require_active_process_suite
 
 
@@ -50,35 +56,33 @@ def initialize_keystore_with_legacy_migration(
 ) -> dict[str, Any]:
     """Initialize or extend the shared keystore with a legacy plaintext key."""
     require_active_process_suite()
-    codec = PrivacyEnvelopeCodec("helto.legacy-migration")
     path = key_path(legacy_dir)
-    legacy_keys: list[tuple[str, bytes]] = []
+    source = None
     if path.exists():
         try:
-            legacy_key, legacy_key_id = codec._load_or_create_key(legacy_dir, create=False)
-            legacy_keys.append((legacy_key_id, legacy_key))
-        except PrivacyError as exc:
+            source = read_legacy_key_source(path, JSON_FORMAT)
+        except LegacyKeySourceError as exc:
             raise PrivacyError(f"Cannot migrate existing privacy key file '{path}': {exc}") from exc
 
     try:
         if default_keystore.keystore_exists():
-            result = (
-                default_keystore.add_keys_to_keystore(password, legacy_keys)
-                if legacy_keys
-                else default_keystore.unlock_keystore(password)
-            )
+            result = default_keystore.unlock_keystore(password)
         else:
-            result = default_keystore.initialize_keystore(password, legacy_keys=legacy_keys)
+            result = default_keystore.initialize_keystore(password)
+        if source is not None:
+            result = default_keystore.import_decrypt_only_key_verified(
+                password,
+                source.key_id,
+                source.key,
+            )
     except PrivacyKeystoreError as exc:
         raise PrivacyError(str(exc)) from exc
 
-    if legacy_keys:
-        migrated = path.with_name(path.name + ".migrated")
+    if source is not None:
         try:
-            path.replace(migrated)
-            os.chmod(migrated, 0o600)
-        except OSError:
-            pass
+            unlink_unchanged_legacy_key_source(source)
+        except LegacyKeySourceError as exc:
+            raise PrivacyError("Cannot unlink imported historical privacy key source.") from exc
     return result
 
 

@@ -55,6 +55,23 @@ class FieldLocationKind(str, Enum):
     BLOB = "blob"
 
 
+class LegacyLocationKind(str, Enum):
+    """Closed locations where an exact legacy reader may be bound."""
+
+    WORKFLOW_FIELD = "workflow-field"
+    RECORD = "record"
+    ARTIFACT = "artifact"
+    PACK_STATE = "pack-state"
+    EXPORT = "export"
+
+
+class LegacyKeyFormat(str, Enum):
+    """Exact plaintext source formats accepted by historical-key imports."""
+
+    JSON = "json"
+    BINARY = "binary"
+
+
 class ArtifactRetention(str, Enum):
     """Shared artifact lifecycle selected by product meaning."""
 
@@ -141,6 +158,43 @@ class ProtectedField:
         )
         if not isinstance(self.execution, bool):
             raise ProfileValidationError("invalid_execution_declaration")
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyReaderBinding:
+    """Bind one shared read-only legacy reader to one declared product location."""
+
+    id: str
+    reader_id: str
+    resource_id: str
+    location_kind: LegacyLocationKind
+    location_id: str
+
+    def __post_init__(self) -> None:
+        for value in (self.id, self.reader_id, self.resource_id, self.location_id):
+            _validate_stable_id(value)
+        if not isinstance(self.location_kind, LegacyLocationKind):
+            raise ProfileValidationError("unknown_legacy_location")
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyKeyImportBinding:
+    """Declare one historical-key import independently of schema readers."""
+
+    id: str
+    import_id: str
+    resource_id: str
+    location_kind: LegacyLocationKind
+    location_id: str
+    source_format: LegacyKeyFormat
+
+    def __post_init__(self) -> None:
+        for value in (self.id, self.import_id, self.resource_id, self.location_id):
+            _validate_stable_id(value)
+        if not isinstance(self.location_kind, LegacyLocationKind):
+            raise ProfileValidationError("unknown_legacy_location")
+        if not isinstance(self.source_format, LegacyKeyFormat):
+            raise ProfileValidationError("unknown_legacy_key_format")
 
 
 @dataclass(frozen=True, slots=True)
@@ -360,6 +414,8 @@ class PrivacyProfile:
     artifacts: tuple[ArtifactDeclaration, ...] = ()
     protected_operations: tuple[ProtectedOperation, ...] = ()
     execution_projections: tuple[SemanticExecutionProjection, ...] = ()
+    legacy_bindings: tuple[LegacyReaderBinding, ...] = ()
+    legacy_key_imports: tuple[LegacyKeyImportBinding, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
@@ -374,6 +430,8 @@ class PrivacyProfile:
             artifacts = tuple(self.artifacts)
             protected_operations = tuple(self.protected_operations)
             execution_projections = tuple(self.execution_projections)
+            legacy_bindings = tuple(self.legacy_bindings)
+            legacy_key_imports = tuple(self.legacy_key_imports)
         except TypeError:
             raise ProfileValidationError("invalid_profile_declaration") from None
         if any(not isinstance(item, ProfileResource) for item in resources):
@@ -390,6 +448,12 @@ class PrivacyProfile:
                 execution_projections,
                 SemanticExecutionProjection,
                 "unknown_execution_projection",
+            ),
+            (legacy_bindings, LegacyReaderBinding, "unknown_legacy_binding"),
+            (
+                legacy_key_imports,
+                LegacyKeyImportBinding,
+                "unknown_legacy_key_import",
             ),
         )
         for declarations, expected_type, error_code in typed_declarations:
@@ -417,6 +481,8 @@ class PrivacyProfile:
             ("artifacts", artifacts),
             ("protected_operations", protected_operations),
             ("execution_projections", execution_projections),
+            ("legacy_bindings", legacy_bindings),
+            ("legacy_key_imports", legacy_key_imports),
         ):
             object.__setattr__(
                 self,
@@ -472,6 +538,14 @@ class PrivacyProfile:
             self.execution_projections,
             "duplicate_execution_projection",
         )
+        legacy_bindings = _unique_by_id(
+            self.legacy_bindings,
+            "duplicate_legacy_binding",
+        )
+        legacy_key_imports = _unique_by_id(
+            self.legacy_key_imports,
+            "duplicate_legacy_key_import_binding",
+        )
         server_adapter_ids = {adapter.id for adapter in self.server_adapters}
         browser_adapter_ids = {adapter.id for adapter in self.browser_adapters}
         used_server_adapters: set[str] = set()
@@ -524,6 +598,79 @@ class PrivacyProfile:
             browser_node_types = set(adapters[protected_field.browser_adapter].node_types)
             if not set(protected_field.node_types).issubset(browser_node_types):
                 raise ProfileValidationError("field_browser_binding_mismatch")
+
+        for binding in legacy_bindings.values():
+            resource = resources.get(binding.resource_id)
+            if resource is None:
+                raise ProfileValidationError("unknown_legacy_resource")
+            if binding.location_kind is LegacyLocationKind.WORKFLOW_FIELD:
+                field = fields.get(binding.location_id)
+                if field is None or field.workflow_resource_id != binding.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+                if binding.reader_id not in field.legacy_reader_ids:
+                    raise ProfileValidationError("undeclared_legacy_reader")
+            elif binding.location_kind is LegacyLocationKind.RECORD:
+                record = records.get(binding.location_id)
+                if record is None or record.resource_id != binding.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+            elif binding.location_kind is LegacyLocationKind.ARTIFACT:
+                artifact = artifacts.get(binding.location_id)
+                if artifact is None or artifact.resource_id != binding.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+            else:
+                operation = operations.get(binding.location_id)
+                if operation is None or operation.resource_id != binding.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+
+        for key_import in legacy_key_imports.values():
+            resource = resources.get(key_import.resource_id)
+            if resource is None:
+                raise ProfileValidationError("unknown_legacy_resource")
+            if key_import.location_kind is LegacyLocationKind.WORKFLOW_FIELD:
+                field = fields.get(key_import.location_id)
+                if field is None or field.workflow_resource_id != key_import.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+            elif key_import.location_kind is LegacyLocationKind.RECORD:
+                record = records.get(key_import.location_id)
+                if record is None or record.resource_id != key_import.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+            elif key_import.location_kind is LegacyLocationKind.ARTIFACT:
+                artifact = artifacts.get(key_import.location_id)
+                if artifact is None or artifact.resource_id != key_import.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+            else:
+                operation = operations.get(key_import.location_id)
+                if operation is None or operation.resource_id != key_import.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+
+        formats_by_import: dict[str, LegacyKeyFormat] = {}
+        for key_import in legacy_key_imports.values():
+            existing_format = formats_by_import.setdefault(
+                key_import.import_id,
+                key_import.source_format,
+            )
+            if existing_format is not key_import.source_format:
+                raise ProfileValidationError("legacy_key_import_format_conflict")
+
+        declared_field_readers = {
+            (field.id, reader_id)
+            for field in fields.values()
+            for reader_id in field.legacy_reader_ids
+        }
+        bound_field_readers = {
+            (binding.location_id, binding.reader_id)
+            for binding in legacy_bindings.values()
+            if binding.location_kind is LegacyLocationKind.WORKFLOW_FIELD
+        }
+        workflow_bindings = tuple(
+            binding
+            for binding in legacy_bindings.values()
+            if binding.location_kind is LegacyLocationKind.WORKFLOW_FIELD
+        )
+        if len(bound_field_readers) != len(workflow_bindings):
+            raise ProfileValidationError("duplicate_legacy_location_binding")
+        if declared_field_readers != bound_field_readers:
+            raise ProfileValidationError("legacy_reader_binding_mismatch")
 
         for record in records.values():
             resource = _require_resource_kind(resources, record.resource_id, ResourceKind.RECORD)
@@ -622,8 +769,6 @@ class PrivacyProfile:
                 "clear_plaintext",
                 *_MODE_TRANSITION_METHODS,
             )
-            if field.legacy_reader_ids:
-                _add_contract(contracts, field.state_adapter, "read_legacy")
         for record in self.records:
             _add_contract(
                 contracts,
@@ -736,6 +881,27 @@ class PrivacyProfile:
                     "execution": field.execution,
                 }
                 for field in self.protected_fields
+            ],
+            "legacyBindings": [
+                {
+                    "id": binding.id,
+                    "readerId": binding.reader_id,
+                    "resourceId": binding.resource_id,
+                    "locationKind": binding.location_kind.value,
+                    "locationId": binding.location_id,
+                }
+                for binding in self.legacy_bindings
+            ],
+            "legacyKeyImports": [
+                {
+                    "id": key_import.id,
+                    "importId": key_import.import_id,
+                    "resourceId": key_import.resource_id,
+                    "locationKind": key_import.location_kind.value,
+                    "locationId": key_import.location_id,
+                    "sourceFormat": key_import.source_format.value,
+                }
+                for key_import in self.legacy_key_imports
             ],
             "records": [
                 {

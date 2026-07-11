@@ -192,14 +192,14 @@ user audits.
 **Blocked by:** Compile atomic privacy profiles; Coordinate snapshots and
 serialization; Manage encrypted artifacts and leases.
 
-- [ ] Define physically separate reader units with exact probe/read operations,
+- [x] Define physically separate reader units with exact probe/read operations,
       dependency validation, declared profile locations, and no writer surface.
-- [ ] Create protected migration obligations before reveal and issue receipts
+- [x] Create protected migration obligations before reveal and issue receipts
       only after transactional current rewrite plus read-back verification of
       state and durable adjuncts.
-- [ ] Provide user-declared audit scopes and per-reader retirement seals that
+- [x] Provide user-declared audit scopes and per-reader retirement seals that
       require zero unresolved obligations and invalidate on later discovery.
-- [ ] Import JSON and binary legacy keys by validate, wrap decrypt-only,
+- [x] Import JSON and binary legacy keys by validate, wrap decrypt-only,
       persist, reopen, verify, unlink the plaintext source, and sync; keep key
       pruning separate and explicitly irreversible.
 

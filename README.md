@@ -316,20 +316,11 @@ unlock_keystore("correct horse battery")
 lock_keystore()
 ```
 
-Existing node packs with a legacy `privacy_key.json` can migrate it:
-
-```python
-from helto_privacy import initialize_keystore_with_legacy_migration
-
-initialize_keystore_with_legacy_migration(
-    "correct horse battery",
-    "/path/to/nodepack/config",
-)
-```
-
-If the shared keystore already exists, that call verifies the password, imports
-the legacy key as decrypt-only via `add_keys_to_keystore`, and renames the
-legacy file to `privacy_key.json.migrated`.
+Historical formats and keys migrate through exact shared reader units,
+protected obligations, verified rewrite receipts, and explicit retirement
+audits. See [Legacy migration and retirement](docs/legacy-migration.md). The
+temporary `initialize_keystore_with_legacy_migration` compatibility seam now
+verifies and unlinks its plaintext source; it never retains a `.migrated` copy.
 
 ## Privacy Snapshots and Serialization Barriers
 
@@ -637,8 +628,8 @@ from helto_privacy import register_helto_privacy_ui
 register_helto_privacy_ui(legacy_key_dir=Path(__file__).parent / "config")
 ```
 
-Registration is idempotent across packs (first pack wins); every call also
-records the pack's legacy `privacy_key.json` directory. It registers:
+Registration is idempotent across packs (first pack wins). The temporary
+legacy-directory argument exists only for coordinated cutover. It registers:
 
 - `GET  /helto_privacy/status`
 - `GET  /helto_privacy/profiles/{pack_id}`
@@ -661,10 +652,9 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 - `GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js` — the exact
   browser profile compiler
 
-Legacy migration is automatic: when the keystore is created or unlocked, every
-registered legacy key is imported as a decrypt-only entry and its file renamed
-to `.migrated` — packs adopted after the keystore exists are picked up on the
-next unlock.
+New integrations declare exact reader units, locations, and historical-key
+imports through the shared migration contract. This keeps retirement evidence
+per reader and never retains a plaintext backup.
 
 The attested profile runtime imports the shared module and mounts its UI. Packs
 may also import it to register recovery descriptors or use the canonical
@@ -692,8 +682,8 @@ For each Helto node pack:
    ```
 
 2. Replace local key loading with `PrivacyEnvelopeCodec("<pack schema>")`.
-3. On first password-protect action, call
-   `initialize_keystore_with_legacy_migration(password, legacy_config_dir)`.
+3. Register exact shared legacy readers and profile bindings, then import any
+   historical key through the pack-bound verified migration capability.
 4. Dispatch protected routes through the installed pack's bound
    `privacy.authorization.dispatch(...)` handle.
 5. Connect the exact browser profile, implement `onPrivacySessionChange`, and

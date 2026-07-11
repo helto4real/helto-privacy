@@ -31,16 +31,14 @@ Registered surface (pack-neutral, stable):
 - ``GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js`` — exact-suite
   browser profile runtime.
 
-Legacy migration is automatic: packs register the directory holding their old
-plaintext ``privacy_key.json``; whenever the keystore is created or unlocked
-(the only moments the password is available), every registered legacy key is
-imported as a decrypt-only entry and its file renamed to ``.migrated``.
+The legacy directory registration seam remains temporarily for coordinated
+consumer cutover. Imported plaintext sources are unlinked only after their
+wrapped entries have been verified; no ``.migrated`` plaintext copy is kept.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
@@ -48,7 +46,14 @@ from pathlib import Path
 from typing import Any
 
 from . import keystore
-from .keystore import KEY_BYTES, PrivacyKeystoreError
+from .keystore import PrivacyKeystoreError
+from ._legacy_key_source import (
+    JSON_FORMAT,
+    LegacyKeySource,
+    LegacyKeySourceError,
+    read_legacy_key_source,
+    unlink_unchanged_legacy_key_source,
+)
 from .suite_runtime import SuiteBlockedError, require_active_process_suite
 
 ROUTE_PREFIX = "/helto_privacy"
@@ -244,6 +249,13 @@ def register_helto_privacy_ui(
             }
             if result.replacement_envelope is not None:
                 response["replacementEnvelope"] = result.replacement_envelope
+            migration_obligation_id = getattr(
+                result,
+                "migration_obligation_id",
+                None,
+            )
+            if migration_obligation_id is not None:
+                response["migrationObligationId"] = migration_obligation_id
             return web.json_response(
                 response,
                 headers={"Cache-Control": "no-store"},
@@ -868,10 +880,14 @@ def register_helto_privacy_ui(
 def _initialize_and_migrate(password: str) -> dict[str, Any]:
     require_active_process_suite()
     legacy = _collect_legacy_keys()
-    result = keystore.initialize_keystore(
-        password, legacy_keys=[(key_id, key) for key_id, key, _path in legacy]
-    )
-    _retire_legacy_files([path for _key_id, _key, path in legacy])
+    result = keystore.initialize_keystore(password)
+    for source in legacy:
+        result = keystore.import_decrypt_only_key_verified(
+            password,
+            source.key_id,
+            source.key,
+        )
+    _retire_legacy_files(legacy)
     return result
 
 
@@ -882,10 +898,13 @@ def _unlock_and_migrate(password: str) -> dict[str, Any]:
     if legacy:
         # Packs adopted after keystore creation get their old keys imported
         # the first time the user unlocks with the password in hand.
-        result = keystore.add_keys_to_keystore(
-            password, [(key_id, key) for key_id, key, _path in legacy]
-        )
-        _retire_legacy_files([path for _key_id, _key, path in legacy])
+        for source in legacy:
+            result = keystore.import_decrypt_only_key_verified(
+                password,
+                source.key_id,
+                source.key,
+            )
+        _retire_legacy_files(legacy)
     return result
 
 
@@ -1090,37 +1109,27 @@ def _mode_resolution_payload(
     }
 
 
-def _collect_legacy_keys() -> list[tuple[str, bytes, Path]]:
-    collected: list[tuple[str, bytes, Path]] = []
-    seen_ids: set[str] = set()
+def _collect_legacy_keys() -> list[LegacyKeySource]:
+    collected: list[LegacyKeySource] = []
     for directory in _LEGACY_KEY_DIRS:
         path = directory / "privacy_key.json"
         if not path.is_file():
             continue
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-            key = _b64url_decode(str(payload.get("key", "")))
-            key_id = str(payload.get("keyId", "")).strip()
-        except Exception:  # noqa: BLE001 - unreadable legacy keys are skipped, not fatal.
-            logging.warning("helto-privacy: could not read a registered legacy key file")
-            continue
-        if len(key) != KEY_BYTES or not key_id or key_id in seen_ids:
-            continue
-        collected.append((key_id, key, path))
-        seen_ids.add(key_id)
+            source = read_legacy_key_source(path, JSON_FORMAT)
+        except LegacyKeySourceError as exc:
+            raise PrivacyKeystoreError(
+                "PRIVACY_LEGACY_KEY_INVALID: Registered legacy key source is invalid."
+            ) from exc
+        collected.append(source)
     return collected
 
 
-def _retire_legacy_files(paths: list[Path]) -> None:
-    for path in paths:
-        migrated = path.with_name(path.name + ".migrated")
+def _retire_legacy_files(sources: list[LegacyKeySource]) -> None:
+    for source in sources:
         try:
-            path.replace(migrated)
-            os.chmod(migrated, 0o600)
-        except OSError:
-            logging.warning("helto-privacy: could not retire a registered legacy key file")
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+            unlink_unchanged_legacy_key_source(source)
+        except LegacyKeySourceError as exc:
+            raise PrivacyKeystoreError(
+                "PRIVACY_LEGACY_KEY_UNLINK_FAILED: Imported legacy key source remains."
+            ) from exc
