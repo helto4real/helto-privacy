@@ -1,0 +1,9 @@
+{
+  "schema": "helto.privacy.fixture-generator-environment.v1",
+  "generator": "helto_privacy.acceptance.generate_fixtures",
+  "generatorSha256": "05d6cc69a3daf9659c0cf8a19997f6ba67a0c2a3a02dd0ec273897582976b92d",
+  "python": ">=3.10",
+  "dependencies": ["cryptography>=42"],
+  "primitives": ["AES-256-GCM", "HMAC-SHA-256", "SHA-256"],
+  "serialization": "utf8-canonical-json-newline"
+}

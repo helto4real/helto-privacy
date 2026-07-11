@@ -269,15 +269,15 @@ and redaction; Manage encrypted artifacts and leases; Track legacy migration
 and key import; Restore AIO, Smart Prompt and Director historical reads;
 Restore Utils historical formats; Protect singleton pack state and secrets.
 
-- [ ] Implement the versioned acceptance catalog, stable evidence IDs, signed
+- [x] Implement the versioned acceptance catalog, stable evidence IDs, signed
       evidence manifest, supported environment tuples, and exact suite binding.
-- [ ] Maintain the genuine historical fixture catalog and reproducible
+- [x] Maintain the genuine historical fixture catalog and reproducible
       generators with source provenance, ciphertext hashes, expected normalized
       state, and clearly labelled derived mutations.
-- [ ] Provide contract adapters, synthetic canary leak oracle, deterministic
+- [x] Provide contract adapters, synthetic canary leak oracle, deterministic
       fault controls, registration-order runner, and consumer duplication/static
       checks.
-- [ ] Treat skips, xfails, unexpected warnings/errors, unrelated failures,
+- [x] Treat skips, xfails, unexpected warnings/errors, unrelated failures,
       flaky retries, and support-matrix exclusions as release failures.
 
 ## Move selector masks and thumbnails to managed artifacts

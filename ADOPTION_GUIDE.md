@@ -618,6 +618,13 @@ and transition-time plaintext derivative purge.
 
 ## Step 12 — Validation checklist
 
+Bind the pack's real adapters to the shared acceptance catalog using
+`ContractAdapterCase`; every case must prove that it reached the compiled
+shared handle. Do not satisfy the contract with a consumer-local mock privacy
+engine. The coordinated suite runner supplies synthetic canaries, deterministic
+faults, all 24 registration orders, and signed zero-waiver evidence as described
+in [docs/acceptance-harness.md](docs/acceptance-harness.md).
+
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real
       runtime dir.

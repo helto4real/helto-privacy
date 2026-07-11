@@ -1,5 +1,8 @@
 """Shared privacy helpers for Helto node packs."""
 
+from .acceptance import *  # noqa: F403 - deliberate public package aggregation.
+from .acceptance import __all__ as _acceptance_exports
+
 from .artifacts import (
     ARTIFACT_REFERENCE_SCHEMA,
     ARTIFACT_REFERENCE_VERSION,
@@ -240,6 +243,7 @@ from .suite_runtime import (
 )
 
 __all__ = [
+    *_acceptance_exports,
     "ALGORITHM",
     "ARTIFACT_REFERENCE_SCHEMA",
     "ARTIFACT_REFERENCE_VERSION",

@@ -726,6 +726,24 @@ await privacy.showPrivacyKeystoreDialog("auto");   // setup or unlock as needed
 privacy.registerPrivacyRecoveryDescriptors("helto.example", descriptors);
 ```
 
+## Cross-Repository Acceptance
+
+The package ships a versioned, zero-waiver acceptance catalog, signed evidence
+manifest verifier, real-adapter cases, synthetic canary leak oracle,
+deterministic fault controls, all-24-order registration runner, consumer
+duplication checks, and a content-addressed historical fixture catalog. See
+[docs/acceptance-harness.md](docs/acceptance-harness.md) for the evidence and
+fixture contracts.
+
+The harness is synthetic-only. It does not inspect live workflows, keys,
+browser profiles, queue/history, media, or the user's ComfyUI service. Key
+canaries are forbidden from every observation sink. Verify the committed
+historical writer output with:
+
+```bash
+python -m helto_privacy.acceptance.generate_fixtures --check
+```
+
 ## Adoption Recipe
 
 **Migrating a node pack? Follow [ADOPTION_GUIDE.md](ADOPTION_GUIDE.md)** —

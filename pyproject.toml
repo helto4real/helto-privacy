@@ -20,7 +20,7 @@ dependencies = [
 include = ["helto_privacy*"]
 
 [tool.setuptools.package-data]
-helto_privacy = ["web/*.js"]
+helto_privacy = ["web/*.js", "acceptance/data/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

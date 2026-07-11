@@ -1,0 +1,43 @@
+{
+  "id": "helto-cross-repository-acceptance",
+  "schema": "helto.privacy.acceptance-catalog.v1",
+  "version": 1,
+  "fixtureCatalogSha256": "14b283a86721b563e0854e68af70796af98ef6d4c778e9325c3104071a1bcde8",
+  "environments": [
+    {
+      "python": "3.13.14",
+      "comfyuiBackend": "0.27.0+e2a6e30d892402ffcf01d6280c8e2744a4448b9d",
+      "comfyuiFrontend": "1.45.20",
+      "renderer": "legacy"
+    },
+    {
+      "python": "3.13.14",
+      "comfyuiBackend": "0.27.0+e2a6e30d892402ffcf01d6280c8e2744a4448b9d",
+      "comfyuiFrontend": "1.45.20",
+      "renderer": "vue"
+    }
+  ],
+  "requirements": [
+    {"id": "shared.profile-contract", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "shared.browser-attestation", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "shared.mode-transitions", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "shared.snapshot-barriers", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "shared.private-execution", "owner": "shared", "fixtureIds": [], "allowedSinks": ["execution"]},
+    {"id": "shared.records-redaction", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "shared.artifacts-leases", "owner": "shared", "fixtureIds": [], "allowedSinks": ["artifact"]},
+    {"id": "shared.legacy-migration", "owner": "shared", "fixtureIds": ["aio-v1-state", "aio-v1-builder-state", "director-v1-state", "smart-prompt-v1-state", "smart-prompt-v1-export", "utils-legacy-formats", "utils-priv1-tag-tamper", "utils-priv2-tag-tamper", "utils-priv3-truncation", "utils-raw-xor-ungated"], "allowedSinks": []},
+    {"id": "shared.singletons", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "fixtures.historical-readers", "owner": "shared", "fixtureIds": ["aio-v1-state", "aio-v1-builder-state", "director-v1-state", "smart-prompt-v1-state", "smart-prompt-v1-export", "utils-legacy-formats", "utils-priv1-tag-tamper", "utils-priv2-tag-tamper", "utils-priv3-truncation", "utils-raw-xor-ungated"], "allowedSinks": []},
+    {"id": "consumer.real-adapters", "owner": "consumer", "fixtureIds": [], "allowedSinks": ["execution", "record-shell", "ui-payload"]},
+    {"id": "consumer.no-duplicated-privacy", "owner": "consumer", "fixtureIds": [], "allowedSinks": []},
+    {"id": "installation.clean-five-artifacts", "owner": "installation", "fixtureIds": [], "allowedSinks": []},
+    {"id": "installation.blocked-negative-cells", "owner": "installation", "fixtureIds": [], "allowedSinks": []},
+    {"id": "registration.all-orders", "owner": "installation", "fixtureIds": [], "allowedSinks": []},
+    {"id": "oracle.synthetic-canaries", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "faults.deterministic-campaigns", "owner": "shared", "fixtureIds": [], "allowedSinks": []},
+    {"id": "browser.disposable-rendered", "owner": "consumer", "fixtureIds": [], "allowedSinks": ["ui-payload", "dom", "accessibility"]},
+    {"id": "lifecycle.private-default", "owner": "consumer", "fixtureIds": [], "allowedSinks": []},
+    {"id": "release.repository-checks", "owner": "release", "fixtureIds": [], "allowedSinks": []},
+    {"id": "release.rehearsal", "owner": "release", "fixtureIds": [], "allowedSinks": []}
+  ]
+}
