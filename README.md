@@ -95,6 +95,39 @@ wrong-side, unused, missing, or method-incomplete adapters block atomically.
 `profile.server_adapter_contracts` and `profile.browser_adapter_contracts`
 provide the exact fixed method sets an adoption must implement.
 
+Every browser adapter implements `onPrivacySessionChange(snapshot)`. The
+snapshot contains only `state` and a monotonic `revision`; it never contains a
+token. The shared surface mounts once regardless of pack load order and owns
+setup, unlock, password change, lock, readiness, recovery, and mode controls.
+Consumers invoke only operations declared for a typed resource handle instead
+of using a generic command port or reading and attaching the token themselves:
+
+```javascript
+await privacy.records("library").invoke(
+  "record.use",
+  { recordId: opaqueRecordId },
+);
+
+privacy.session.subscribe(({ state, revision }) => {
+  // Clear consumer runtime state on lock/revision change. No token is exposed.
+});
+
+const mode = await privacy.mode("privacy-mode").resolve("example");
+```
+
+The profile declaration fixes each operation's same-origin route and HTTP
+method; consumers provide only its product payload. The private request
+transport restores header/cookie authentication, retries one
+setup/unlock flow at most once, rejects absolute or query-bearing targets, and
+returns sanitized typed failures. A missing route is retried on the next call;
+it is never memoized as permanently unavailable.
+
+`concealPrivacyContent(element, { mode })` destructively removes locked values,
+labels, media URLs, and subtree text from both DOM and accessibility exposure.
+`preparePrivacyReveal(element)` only removes the concealment shell; callers
+must populate content again from an authorized result. Hover and focus never
+restore retained plaintext because the shared UI does not retain any.
+
 ## Server-authoritative Mode and Route Dispatch
 
 Every scope has a three-state declaration (`inherit`, `private`, or `public`),
@@ -310,10 +343,12 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 
 - `GET  /helto_privacy/status`
 - `GET  /helto_privacy/profiles/{pack_id}`
+- `GET  /helto_privacy/profiles/{pack_id}/modes`
+- `POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition`
 - `POST /helto_privacy/suite/browser-attestation`
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`
-- `GET  /helto_privacy/ui/privacy.js` — the shared unlock dialog (ES module)
+- `GET  /helto_privacy/ui/privacy.js` — the shared browser client and UI
 - `GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js` — the exact
   browser profile compiler
 
@@ -322,12 +357,14 @@ registered legacy key is imported as a decrypt-only entry and its file renamed
 to `.migrated` — packs adopted after the keystore exists are picked up on the
 next unlock.
 
-Frontends import the served module instead of shipping their own dialog:
+The attested profile runtime imports the shared module and mounts its UI. Packs
+may also import it to register recovery descriptors or use the canonical
+concealment helpers; they do not ship another dialog or attach tokens:
 
 ```js
 const privacy = await import("/helto_privacy/ui/privacy.js");
 await privacy.showPrivacyKeystoreDialog("auto");   // setup or unlock as needed
-privacy.ensureStoredPrivacyTokenCookie();          // before rendering privacy-mode <img>
+privacy.registerPrivacyRecoveryDescriptors("helto.example", descriptors);
 ```
 
 ## Adoption Recipe
@@ -341,7 +378,7 @@ For each Helto node pack:
 1. Add:
 
    ```text
-   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.3.0
+   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@<coordinated-suite-tag>
    cryptography>=42.0
    ```
 
@@ -350,9 +387,10 @@ For each Helto node pack:
    `initialize_keystore_with_legacy_migration(password, legacy_config_dir)`.
 4. Dispatch protected routes through the installed pack's bound
    `privacy.authorization.dispatch(...)` handle.
-5. Reuse the browser token already stored per origin by the Timeline Director
-   UI. On `PRIVACY_LOCKED`, prompt the user to unlock via Timeline Director
-   Global Settings or vendor the same unlock dialog.
+5. Connect the exact browser profile, implement `onPrivacySessionChange`, and
+   invoke only the compiled typed resource handles such as
+   `privacy.records("library").invoke("record.use", payload)`; never read the
+   browser token or vendor a second privacy UI.
 
 ## Threat Model
 

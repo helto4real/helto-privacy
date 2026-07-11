@@ -353,10 +353,40 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                 {"id": resource.id, "kind": resource.kind.value}
                 for resource in profile.resources
             ],
+            "modeScopes": [
+                {
+                    "id": scope.id,
+                    "modeResourceId": scope.mode_resource_id,
+                }
+                for scope in profile.scopes
+            ],
+            "protectedOperations": [
+                {
+                    "id": operation.id,
+                    "resourceId": operation.resource_id,
+                    "route": operation.route,
+                    "method": operation.method,
+                }
+                for operation in profile.protected_operations
+            ],
         }
     from .suite_runtime import process_suite_status_payload
 
     return {**result, **process_suite_status_payload()}
+
+
+def bound_privacy_pack(pack_id: str) -> BoundPrivacyPack:
+    """Return an installed pack without exposing the mutable registry entry."""
+
+    with _LOCK:
+        installation = _INSTALLATIONS.get(pack_id)
+        if (
+            installation is None
+            or installation.pack is None
+            or installation.status is InstallationStatus.CONFLICT
+        ):
+            raise PackBlockedError("privacy_pack_missing")
+        return installation.pack
 
 
 def installed_profile_identities() -> tuple[ProfileIdentity, ...]:

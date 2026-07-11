@@ -8,10 +8,42 @@ from helto_privacy.profile import (
     PrivacyProfile,
     PrivacyScope,
     ProtectedField,
+    ProtectedOperation,
     ProfileValidationError,
     ProfileResource,
     ResourceKind,
 )
+
+
+def test_protected_operation_compiles_a_fixed_same_origin_route_contract():
+    operation = ProtectedOperation(
+        "record.use",
+        "library",
+        "library-adapter",
+        "/helto-example/records/use",
+        "post",
+    )
+
+    assert operation.route == "/helto-example/records/use"
+    assert operation.method == "POST"
+
+    with pytest.raises(ProfileValidationError) as external:
+        ProtectedOperation(
+            "record.use",
+            "library",
+            "library-adapter",
+            "https://example.com/records/use",
+        )
+    assert external.value.code == "invalid_protected_operation_route"
+
+    with pytest.raises(ProfileValidationError) as templated:
+        ProtectedOperation(
+            "record.use",
+            "library",
+            "library-adapter",
+            "/records/{record_id}",
+        )
+    assert templated.value.code == "invalid_protected_operation_route"
 
 
 def test_profile_fingerprint_is_stable_and_order_independent():

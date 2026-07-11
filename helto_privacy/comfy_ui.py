@@ -9,6 +9,8 @@ Registered surface (pack-neutral, stable):
 
 - ``GET  /helto_privacy/status``
 - ``GET  /helto_privacy/profiles/{pack_id}`` — safe profile attestation
+- ``GET  /helto_privacy/profiles/{pack_id}/modes`` — safe mode status
+- ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition``
 - ``POST /helto_privacy/unlock`` / ``/lock``
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
@@ -38,6 +40,7 @@ from .suite_runtime import SuiteBlockedError, require_active_process_suite
 
 ROUTE_PREFIX = "/helto_privacy"
 UI_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy.js"
+CLIENT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_client.js"
 PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile/{{manifest_digest}}.js"
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -96,9 +99,10 @@ def register_helto_privacy_ui(
         return web.json_response(
             {
                 "ok": True,
-                **keystore.keystore_status(),
+                **_safe_keystore_status(),
                 **process_suite_status_payload(),
-            }
+            },
+            headers={"Cache-Control": "no-store"},
         )
 
     @routes.get(f"{ROUTE_PREFIX}/profiles/{{pack_id}}")
@@ -140,6 +144,122 @@ def register_helto_privacy_ui(
                 headers={"Cache-Control": "no-store"},
             )
 
+    @routes.get(f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes")
+    async def get_helto_privacy_modes(request):
+        from .mode import ModePolicyError, ModeTransitionError
+        from .runtime import PackBlockedError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(
+                str(request.match_info.get("pack_id") or "")
+            )
+            scopes = []
+            for scope in pack.profile.scopes:
+                resolution = pack.mode(scope.mode_resource_id).resolve(scope.id)
+                scopes.append(
+                    _mode_resolution_payload(
+                        scope.id,
+                        scope.mode_resource_id,
+                        resolution,
+                    )
+                )
+            return web.json_response(
+                {"ok": True, "packId": pack.profile.id, "scopes": scopes},
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_PROFILE_UNAVAILABLE",
+                404,
+            )
+        except (ModePolicyError, ModeTransitionError):
+            return _privacy_error_response(
+                web,
+                "PRIVACY_MODE_STATE_UNAVAILABLE",
+                409,
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_MODE_STATUS_FAILED",
+                500,
+            )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition"
+    )
+    async def post_helto_privacy_mode_transition(request):
+        from .guard import PrivacyRouteError
+        from .mode import ModePolicyError, ModeTransitionError
+        from .runtime import PackBlockedError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(
+                str(request.match_info.get("pack_id") or "")
+            )
+            scope_id = str(request.match_info.get("scope_id") or "")
+            scope = next(
+                (item for item in pack.profile.scopes if item.id == scope_id),
+                None,
+            )
+            if scope is None:
+                return _privacy_error_response(web, "PRIVACY_SCOPE_INVALID", 400)
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                return _privacy_error_response(web, "PRIVACY_MODE_INVALID", 400)
+            target = str(payload.get("target") or "")
+            if target not in {"inherit", "private", "public"}:
+                return _privacy_error_response(web, "PRIVACY_MODE_INVALID", 400)
+            if target == "public":
+                authorization = pack.authorization.authorize_declassification(
+                    request,
+                    scope_id,
+                    target,
+                )
+            else:
+                authorization = pack.authorization.authorize_request(
+                    request,
+                    "mode.transition",
+                )
+            result = pack.mode(scope.mode_resource_id).transition(
+                scope_id,
+                target,
+                authorization,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "scopeId": result.scope_id,
+                    "declared": result.declared.value,
+                    "effective": result.effective.value,
+                    "transitionStatus": result.status.value,
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_PROFILE_UNAVAILABLE",
+                404,
+            )
+        except PrivacyRouteError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except ModeTransitionError as exc:
+            return _privacy_error_response(web, exc.code, 409)
+        except ModePolicyError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_MODE_STATE_UNAVAILABLE",
+                409,
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_MODE_TRANSITION_FAILED",
+                500,
+            )
+
     @routes.post(f"{ROUTE_PREFIX}/unlock")
     async def post_helto_privacy_unlock(request):
         try:
@@ -150,18 +270,26 @@ def register_helto_privacy_ui(
             result = await asyncio.to_thread(_unlock_and_migrate, password)
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+            return _privacy_error_response(web, _keystore_error_code(exc), 400)
         except SuiteBlockedError:
             return _suite_blocked_response(web)
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_KEYSTORE_OPERATION_FAILED",
+                500,
+            )
 
     @routes.post(f"{ROUTE_PREFIX}/lock")
     async def post_helto_privacy_lock(_request):
         try:
             return web.json_response({"ok": True, **keystore.lock_keystore()})
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_KEYSTORE_OPERATION_FAILED",
+                500,
+            )
 
     @routes.post(f"{ROUTE_PREFIX}/keystore/init")
     async def post_helto_privacy_init(request):
@@ -172,11 +300,15 @@ def register_helto_privacy_ui(
             result = await asyncio.to_thread(_initialize_and_migrate, password)
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+            return _privacy_error_response(web, _keystore_error_code(exc), 400)
         except SuiteBlockedError:
             return _suite_blocked_response(web)
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_KEYSTORE_OPERATION_FAILED",
+                500,
+            )
 
     @routes.post(f"{ROUTE_PREFIX}/keystore/change_password")
     async def post_helto_privacy_change_password(request):
@@ -190,18 +322,43 @@ def register_helto_privacy_ui(
             )
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=400)
+            return _privacy_error_response(web, _keystore_error_code(exc), 400)
         except SuiteBlockedError:
             return _suite_blocked_response(web)
-        except Exception as exc:  # noqa: BLE001
-            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_KEYSTORE_OPERATION_FAILED",
+                500,
+            )
 
     @routes.get(UI_MODULE_ROUTE)
     async def get_helto_privacy_ui_module(_request):
         try:
             source = (_WEB_DIR / "privacy_ui.js").read_text(encoding="utf-8")
-        except OSError as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        except OSError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
+                500,
+            )
+        return web.Response(
+            text=source,
+            content_type="application/javascript",
+            charset="utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @routes.get(CLIENT_MODULE_ROUTE)
+    async def get_helto_privacy_client_module(_request):
+        try:
+            source = (_WEB_DIR / "privacy_client.js").read_text(encoding="utf-8")
+        except OSError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
+                500,
+            )
         return web.Response(
             text=source,
             content_type="application/javascript",
@@ -273,6 +430,56 @@ def _suite_blocked_response(web):
     )
 
 
+def _safe_keystore_status() -> dict[str, bool]:
+    status = keystore.keystore_status()
+    return {
+        "keystoreAvailable": bool(status.get("keystoreAvailable", False)),
+        "keystoreInitialized": bool(status.get("keystoreInitialized", False)),
+        "keystoreLocked": bool(status.get("keystoreLocked", False)),
+    }
+
+
+def _keystore_error_code(error: Exception) -> str:
+    candidate = str(error).partition(":")[0]
+    if candidate in {
+        keystore.ERROR_LOCKED,
+        keystore.ERROR_UNINITIALIZED,
+        keystore.ERROR_ALREADY_INITIALIZED,
+        keystore.ERROR_PASSWORD_INVALID,
+        keystore.ERROR_PASSWORD_TOO_SHORT,
+        keystore.ERROR_KEYSTORE_INVALID,
+    }:
+        return candidate
+    return "PRIVACY_KEYSTORE_OPERATION_FAILED"
+
+
+def _privacy_error_response(web, code: str, status: int):
+    return web.json_response(
+        {"ok": False, "error": code},
+        status=status,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _mode_resolution_payload(
+    scope_id: str,
+    mode_resource_id: str,
+    resolution,
+) -> dict[str, object]:
+    return {
+        "id": scope_id,
+        "modeResourceId": mode_resource_id,
+        "declared": resolution.declared.value,
+        "effective": resolution.effective.value,
+        "inheritedFrom": resolution.inherited_from,
+        "floors": [
+            {"kind": floor.kind.value, "sourceId": floor.source_id}
+            for floor in resolution.floors
+        ],
+        "transitionStatus": resolution.transition_status.value,
+    }
+
+
 def _collect_legacy_keys() -> list[tuple[str, bytes, Path]]:
     collected: list[tuple[str, bytes, Path]] = []
     seen_ids: set[str] = set()
@@ -285,7 +492,7 @@ def _collect_legacy_keys() -> list[tuple[str, bytes, Path]]:
             key = _b64url_decode(str(payload.get("key", "")))
             key_id = str(payload.get("keyId", "")).strip()
         except Exception:  # noqa: BLE001 - unreadable legacy keys are skipped, not fatal.
-            logging.warning("helto-privacy: could not read legacy key file %s", path)
+            logging.warning("helto-privacy: could not read a registered legacy key file")
             continue
         if len(key) != KEY_BYTES or not key_id or key_id in seen_ids:
             continue
@@ -301,7 +508,7 @@ def _retire_legacy_files(paths: list[Path]) -> None:
             path.replace(migrated)
             os.chmod(migrated, 0o600)
         except OSError:
-            logging.warning("helto-privacy: could not retire legacy key file %s", path)
+            logging.warning("helto-privacy: could not retire a registered legacy key file")
 
 
 def _b64url_decode(value: str) -> bytes:

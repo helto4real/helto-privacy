@@ -66,7 +66,7 @@ Then pick your case:
 Add to the pack's `requirements.txt` (create it if missing):
 
 ```
-helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.3.0
+helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@<coordinated-suite-tag>
 cryptography>=42.0
 ```
 
@@ -137,8 +137,9 @@ register_helto_privacy_ui(legacy_key_dir=_PACKAGE_ROOT / "config")
 This one call (idempotent across packs — the first pack in the ComfyUI
 process wins, later calls only contribute their legacy dir) registers the
 canonical endpoints `/helto_privacy/status`, `/unlock`, `/lock`,
-`/keystore/init`, `/keystore/change_password`, and serves the shared unlock
-dialog at `/helto_privacy/ui/privacy.js`.
+`/keystore/init`, `/keystore/change_password`, profile mode status/transition
+routes, and serves the shared browser client and UI at
+`/helto_privacy/ui/privacy.js`.
 
 **Migration is automatic.** Because the pack registered its legacy key
 directory, its `privacy_key.json` is imported as a decrypt-only key at the
@@ -146,8 +147,8 @@ next keystore init *or unlock* — the only moments the password is in hand —
 and renamed to `privacy_key.json.migrated` (a recoverable backup: never
 delete it programmatically, never commit it; gitignore `config/*.json` and
 `config/*.json.migrated`). The pack does NOT need its own "Set password"
-action, unlock endpoints, or migration branching. Wrong passwords surface as
-`PRIVACY_PASSWORD_INVALID` — show the message as-is.
+action, unlock endpoints, or migration branching. The shared UI maps typed
+failures such as `PRIVACY_PASSWORD_INVALID` to fixed, product-data-free text.
 
 (`initialize_keystore_with_legacy_migration(password, legacy_dir)` still
 exists for non-ComfyUI callers and scripted migration.)
@@ -188,35 +189,53 @@ code only an opaque authorization capability. The cookie exists because
 thumbnail/preview routes too, not just JSON endpoints. The old token guards are
 compatibility wrappers and now fail closed when no keystore exists.
 
-**Frontend: import the served module — do not copy dialog code into the
-pack.**
+**Frontend: connect the exact attested profile — do not copy request, session,
+mode, or dialog code into the pack.**
 
 ```js
-let privacy = null;
-try {
-  privacy = await import("/helto_privacy/ui/privacy.js");
-} catch {
-  /* package not installed server-side: show
-     "Unlock via Timeline Director → Global Settings" instead. */
+const suite = await fetch("/helto_privacy/status", { cache: "no-store" })
+  .then((response) => response.json());
+if (suite.suiteStatus !== "active" || !suite.suiteManifestDigest) {
+  throw new Error("Helto privacy installation is blocked");
 }
+const { connectPrivacyPack } = await import(
+  `/helto_privacy/ui/privacy_profile/${suite.suiteManifestDigest}.js`
+);
+const privacy = await connectPrivacyPack({
+  app,
+  packId: PROFILE_ID,
+  profileFingerprint: PROFILE_FINGERPRINT,
+  suiteManifestDigest: suite.suiteManifestDigest,
+  adapters: browserAdapters,
+});
 
-// When an operation fails with a locked error:
-if (privacy?.isPrivacyLockedError(error)) {
-  const unlocked = await privacy.showPrivacyKeystoreDialog("auto");
-  if (unlocked) retryTheOperation();
-}
-
-// Before rendering privacy-mode <img>/media elements:
-privacy?.ensureStoredPrivacyTokenCookie();
+await privacy.records(RECORD_RESOURCE_ID).invoke(
+  "record.use",
+  { recordId: opaqueRecordId },
+);
 ```
 
-`showPrivacyKeystoreDialog("auto")` picks setup vs unlock from keystore
-status and resolves immediately if already unlocked; explicit modes
-`"unlock"`, `"setup"`, `"change"` exist for settings-menu buttons. The module
-also exports `fetchPrivacyStatus`, `lockPrivacyKeystore`,
-`getStoredPrivacyToken` (attach as `X-Helto-Privacy-Token` on the pack's own
-fetch/XHR calls), and `isPrivacyLockedError`. Token storage is per origin, so
-an unlock through any pack — or the Timeline Director — covers this pack too.
+Every declared browser adapter must implement
+`onPrivacySessionChange({ state, revision })` and clear stale runtime state on
+lock/revision changes. The snapshot contains no token. The request client owns
+header/cookie restoration and one bounded unlock retry. Consumers call only
+operations declared for the selected typed resource handle; there is no generic
+authorization request port, arbitrary URL, or caller-selected HTTP method.
+Consumers have no token
+getter and must not inspect token storage or construct token-bearing requests. The shared
+surface mounts once across all connected packs and owns setup, unlock, password
+change, lock, readiness, recovery, mode status, confirmation, and transitions.
+Missing/stale shared code is a blocked installation, not a local fallback.
+
+For concealed product UI, reuse the shared Helto classes
+`.helto-hidden-collapsed`, `.helto-text-masked`, `.is-private`,
+`.helto-private-text`, and `.helto-private-label`. Do not weaken their opaque
+background, transparent glyph/caret/placeholder, or pointer-blocking rules.
+Call `concealPrivacyContent(element, { mode })` before locked content can be
+observed; it destructively removes values, labels, media URLs, and subtree text
+from the DOM and accessibility tree. After authorization, call
+`preparePrivacyReveal(element)` and re-render from the authorized result. No
+hover or focus state restores content, and the helper retains no plaintext.
 
 ## Step 5 — Privacy Recovery
 

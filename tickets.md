@@ -91,15 +91,15 @@ privacy surface for setup, unlock, lock, status, recovery, and mode state.
 **Blocked by:** Verify and activate exact suites; Resolve privacy mode and
 transitions.
 
-- [ ] Provide one fingerprint-attested browser connection and request client
+- [x] Provide one fingerprint-attested browser connection and request client
       with bounded unlock retry, header/cookie restoration, and no token in a
       URL or public status payload.
-- [ ] Mount setup, unlock, password change, lock, readiness, recovery, mode,
+- [x] Mount setup, unlock, password change, lock, readiness, recovery, mode,
       transition, and blocked-installation UI exactly once regardless of pack
       load order.
-- [ ] Broadcast lock/session changes to every bound consumer and invalidate
+- [x] Broadcast lock/session changes to every bound consumer and invalidate
       stale browser state without memoizing a temporary missing route forever.
-- [ ] Apply the Helto design system and prove hide/mask/peek content remains
+- [x] Apply the Helto design system and prove hide/mask/peek content remains
       visually unreadable, keyboard accessible, and free of sensitive labels or
       diagnostics.
 

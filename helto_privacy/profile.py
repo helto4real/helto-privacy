@@ -213,11 +213,24 @@ class ProtectedOperation:
     id: str
     resource_id: str
     adapter_slot: str
+    route: str
+    method: str = "POST"
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
         _validate_stable_id(self.resource_id)
         _validate_stable_id(self.adapter_slot)
+        if (
+            not isinstance(self.route, str)
+            or not self.route.startswith("/")
+            or self.route.startswith("//")
+            or any(character in self.route for character in ("?", "#", "\\", "{", "}"))
+        ):
+            raise ProfileValidationError("invalid_protected_operation_route")
+        normalized_method = str(self.method or "").strip().upper()
+        if normalized_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
+            raise ProfileValidationError("invalid_protected_operation_method")
+        object.__setattr__(self, "method", normalized_method)
 
 
 @dataclass(frozen=True, slots=True)
@@ -609,6 +622,8 @@ class PrivacyProfile:
                 "reconcileNode",
                 "reconcileNodeDefinition",
             )
+        for adapter_id in tuple(contracts):
+            _add_contract(contracts, adapter_id, "onPrivacySessionChange")
         return {adapter_id: tuple(sorted(methods)) for adapter_id, methods in contracts.items()}
 
     @property
@@ -694,6 +709,8 @@ class PrivacyProfile:
                     "id": operation.id,
                     "resourceId": operation.resource_id,
                     "adapterSlot": operation.adapter_slot,
+                    "route": operation.route,
+                    "method": operation.method,
                 }
                 for operation in self.protected_operations
             ],

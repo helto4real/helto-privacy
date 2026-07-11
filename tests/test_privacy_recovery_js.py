@@ -5,11 +5,16 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
+PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
-    module_path = tmp_path / "privacy_ui.mjs"
+    (tmp_path / "package.json").write_text('{"type":"module"}', encoding="utf-8")
+    module_path = tmp_path / "privacy_ui.js"
     module_path.write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "privacy_client.js").write_text(
+        PRIVACY_CLIENT.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     script_path = tmp_path / "test.mjs"
     script_path.write_text(
         textwrap.dedent(
@@ -99,9 +104,12 @@ def test_scan_detects_recovery_categories_without_leaking_values(tmp_path):
         tmp_path,
         """
         privacy.registerPrivacyRecoveryDescriptors("utils", [descriptor()]);
+        const titledNode = node("VERY_SECRET_PATH");
+        titledNode.title = "SYNTHETIC_PRIVATE_TITLE_CANARY";
+        titledNode.label = "SYNTHETIC_PRIVATE_LABEL_CANARY";
         const graph = { nodes: [
           node("__HELTO_ENC__:private-path"),
-          node("VERY_SECRET_PATH"),
+          titledNode,
           node(JSON.stringify(envelope("wrong.schema"))),
           node("[]", {}),
         ] };
@@ -122,6 +130,8 @@ def test_scan_detects_recovery_categories_without_leaking_values(tmp_path):
         assert(!publicIssues.includes("private-path"));
         assert(!dialogModel.includes("VERY_SECRET_PATH"));
         assert(!dialogModel.includes("private-path"));
+        assert(!dialogModel.includes("SYNTHETIC_PRIVATE_TITLE_CANARY"));
+        assert(!dialogModel.includes("SYNTHETIC_PRIVATE_LABEL_CANARY"));
         """,
     )
 
@@ -177,8 +187,9 @@ def test_reencrypt_writes_registered_json_envelope(tmp_path):
             defaultValue: "[]",
             sensitive: true,
             schema: "helto.test",
-            reencrypt: (plaintext) => {
+            reencrypt: (plaintext, context) => {
               captured = plaintext;
+              assert.equal("token" in context, false);
               return { encrypted: envelope("helto.test") };
             },
           }],

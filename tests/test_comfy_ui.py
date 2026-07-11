@@ -67,6 +67,7 @@ def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path, monkeypatch):
     first_count = len(server.routes.paths)
     assert first_count >= 6
     assert ("GET", comfy_ui.UI_MODULE_ROUTE) in server.routes.paths
+    assert ("GET", comfy_ui.CLIENT_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.PROFILE_MODULE_ROUTE) in server.routes.paths
     assert ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}") in server.routes.paths
 
@@ -146,8 +147,13 @@ def test_ui_module_ships_in_package():
     source = (comfy_ui._WEB_DIR / "privacy_ui.js").read_text(encoding="utf-8")
     assert "export async function showPrivacyKeystoreDialog" in source
     assert "/helto_privacy" in source
-    assert "helto_privacy_token" in source
-    assert "X-Helto-Privacy-Token" in source
+    assert "privacy_client.js" in source
+
+    client_source = (comfy_ui._WEB_DIR / "privacy_client.js").read_text(
+        encoding="utf-8"
+    )
+    assert "helto_privacy_token" in client_source
+    assert "X-Helto-Privacy-Token" in client_source
 
     profile_source = (comfy_ui._WEB_DIR / "privacy_profile.js").read_text(encoding="utf-8")
     assert "export async function connectPrivacyPack" in profile_source

@@ -256,6 +256,7 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                     "apply",
                     "clear",
                     "normalize",
+                    "onPrivacySessionChange",
                     "reconcileNode",
                     "reconcileNodeDefinition",
                 ],
@@ -268,6 +269,10 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
             {"id": "library", "kind": "record"},
             {"id": "editor-state", "kind": "workflow"},
         ],
+        "modeScopes": [
+            {"id": "test-scope", "modeResourceId": "privacy-mode"},
+        ],
+        "protectedOperations": [],
         "suiteStatus": "incomplete",
         "suiteManifestDigest": None,
         "suiteIssueCodes": ["suite_not_configured"],

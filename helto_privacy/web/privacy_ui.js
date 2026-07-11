@@ -9,16 +9,41 @@
 // media elements. Talks to the canonical /helto_privacy/* endpoints
 // registered by helto_privacy.comfy_ui.register_helto_privacy_ui().
 
-const ROUTE_PREFIX = "/helto_privacy";
-const PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token";
-const PRIVACY_TOKEN_STORAGE_KEY = "helto_privacy_token";
-const PRIVACY_LOCKED_CODES = ["PRIVACY_LOCKED", "PRIVACY_TOKEN_REQUIRED"];
-const PRIVACY_SETUP_CODES = ["PRIVACY_KEYSTORE_UNINITIALIZED"];
+import {
+  PrivacyBrowserRequestError,
+  changePrivacyKeystorePassword,
+  ensureStoredPrivacyTokenCookie,
+  fetchPrivacyStatus,
+  initializePrivacyKeystore,
+  isPrivacyLockedError,
+  isPrivacySetupRequiredError,
+  isPrivacyUnlockRequiredError,
+  lockPrivacyKeystore,
+  privacySessionSnapshot,
+  subscribePrivacySession,
+  unlockPrivacyKeystore,
+} from "./privacy_client.js";
+
+export {
+  PrivacyBrowserRequestError,
+  changePrivacyKeystorePassword,
+  ensureStoredPrivacyTokenCookie,
+  fetchPrivacyStatus,
+  initializePrivacyKeystore,
+  isPrivacyLockedError,
+  isPrivacySetupRequiredError,
+  isPrivacyUnlockRequiredError,
+  lockPrivacyKeystore,
+  subscribePrivacySession,
+  unlockPrivacyKeystore,
+} from "./privacy_client.js";
+
 const PRIVACY_ENVELOPE_ALGORITHM = "AES-256-GCM";
 const LEGACY_ENCRYPTED_PREFIX = "__HELTO_ENC__:";
 const DIALOG_CLASS = "helto-privacy-keystore-dialog";
 const RECOVERY_DIALOG_CLASS = "helto-privacy-recovery-dialog";
 const STYLE_ID = "helto-privacy-keystore-ui-style";
+const SHARED_SURFACE_ID = "helto-privacy-surface";
 const RECOVERY_ISSUE_TYPES = Object.freeze({
   LEGACY_VALUE: "legacy_encrypted_value",
   INVALID_ENVELOPE: "invalid_encrypted_value",
@@ -31,115 +56,373 @@ export const PRIVACY_RECOVERY_ISSUE_TYPES = RECOVERY_ISSUE_TYPES;
 const RECOVERY_DESCRIPTORS = new Map();
 const OWNER_MEMOS = new WeakMap();
 const FALLBACK_OWNER = {};
+const SHARED_PRIVACY_SURFACES = new WeakMap();
 
-// ---------------------------------------------------------------------------
-// Token storage
-// ---------------------------------------------------------------------------
-
-export function getStoredPrivacyToken() {
-  try {
-    return globalThis.localStorage?.getItem(PRIVACY_TOKEN_STORAGE_KEY) || "";
-  } catch {
-    return "";
+// Destructively remove concealed content from the DOM. The caller must fetch
+// and render it again only after an authorized reveal; this module never keeps
+// a plaintext copy for hover, focus, or later restoration.
+export function concealPrivacyContent(element, { mode = "collapsed" } = {}) {
+  if (!element || typeof element !== "object") return false;
+  const tagName = String(element.tagName || "").toUpperCase();
+  if (tagName === "INPUT" || tagName === "TEXTAREA") {
+    element.value = "";
+    element.placeholder = "";
+    element.name = "";
+  } else if (typeof element.replaceChildren === "function") {
+    element.replaceChildren();
+    element.textContent = "";
+  } else {
+    element.textContent = "";
   }
-}
-
-export function storePrivacyToken(token) {
-  try {
-    if (token) globalThis.localStorage?.setItem(PRIVACY_TOKEN_STORAGE_KEY, String(token));
-    else globalThis.localStorage?.removeItem(PRIVACY_TOKEN_STORAGE_KEY);
-  } catch {
-    /* localStorage unavailable — token stays per-request. */
-  }
-  writePrivacyTokenCookie(token);
-}
-
-export function ensureStoredPrivacyTokenCookie(documentRef = globalThis.document) {
-  const token = getStoredPrivacyToken();
-  if (!token) return false;
-  writePrivacyTokenCookie(token, documentRef);
+  for (const attribute of [
+    "value", "placeholder", "name", "src", "srcset", "alt", "title",
+    "aria-label", "aria-description", "data-tooltip",
+  ]) element.removeAttribute?.(attribute);
+  element.setAttribute?.("aria-hidden", "true");
+  element.inert = true;
+  element.blur?.();
+  addPrivacyClass(
+    element,
+    mode === "masked" ? "helto-text-masked" : "helto-hidden-collapsed",
+  );
   return true;
 }
 
-function writePrivacyTokenCookie(token, documentRef = globalThis.document) {
-  // Image/media elements cannot send custom headers, so privacy-mode
-  // thumbnails and waveforms authenticate with this cookie instead.
-  try {
-    if (!documentRef) return;
-    documentRef.cookie = token
-      ? `${PRIVACY_TOKEN_STORAGE_KEY}=${encodeURIComponent(String(token))}; path=/; SameSite=Lax`
-      : `${PRIVACY_TOKEN_STORAGE_KEY}=; path=/; SameSite=Lax; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
-  } catch {
-    /* cookies unavailable — header-based callers still work. */
-  }
+export function preparePrivacyReveal(element) {
+  if (!element || typeof element !== "object") return false;
+  element.removeAttribute?.("aria-hidden");
+  element.inert = false;
+  removePrivacyClass(element, "helto-text-masked");
+  removePrivacyClass(element, "helto-hidden-collapsed");
+  return true;
 }
 
-export function isPrivacyLockedError(error) {
-  const message = String(error?.message ?? error ?? "");
-  return PRIVACY_LOCKED_CODES.some((code) => message.includes(code));
+function addPrivacyClass(element, className) {
+  const classes = new Set(String(element.className || "").split(/\s+/).filter(Boolean));
+  classes.add(className);
+  element.className = [...classes].join(" ");
 }
 
-export function isPrivacySetupRequiredError(error) {
-  const message = String(error?.message ?? error ?? "");
-  return PRIVACY_SETUP_CODES.some((code) => message.includes(code));
-}
-
-export function isPrivacyUnlockRequiredError(error) {
-  return isPrivacyLockedError(error) || isPrivacySetupRequiredError(error);
+function removePrivacyClass(element, className) {
+  element.className = String(element.className || "")
+    .split(/\s+/)
+    .filter((item) => item && item !== className)
+    .join(" ");
 }
 
 // ---------------------------------------------------------------------------
-// Canonical keystore API
+// One shared status, recovery, and mode surface for every attested pack
 // ---------------------------------------------------------------------------
 
-async function fetchPrivacyJson(endpoint, payload = null) {
-  const headers = { "Content-Type": "application/json" };
-  const token = getStoredPrivacyToken();
-  if (token) headers[PRIVACY_TOKEN_HEADER] = token;
-  const options = payload
-    ? { method: "POST", headers, body: JSON.stringify(payload) }
-    : undefined;
-  const response = await fetch(`${ROUTE_PREFIX}/${endpoint}`, options);
-  const text = await response.text();
-  let data = {};
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch {
-    throw new Error(text || response.statusText || `HTTP ${response.status}`);
+export function mountSharedPrivacySurface({
+  packId,
+  readiness,
+  modeScopes = [],
+  modeClient,
+  documentRef = globalThis.document,
+  fetchStatus = fetchPrivacyStatus,
+}) {
+  const id = String(packId || "").trim();
+  if (
+    !documentRef?.createElement
+    || !documentRef.body
+    || !/^[a-z0-9][a-z0-9._-]*$/.test(id)
+    || modeClient?.id !== id
+    || typeof modeClient.readAll !== "function"
+    || typeof modeClient.transition !== "function"
+    || typeof fetchStatus !== "function"
+  ) return null;
+
+  let controller = SHARED_PRIVACY_SURFACES.get(documentRef);
+  if (!controller) {
+    installStyles(documentRef);
+    controller = createSharedPrivacySurface(documentRef, fetchStatus);
+    SHARED_PRIVACY_SURFACES.set(documentRef, controller);
   }
-  if (!response.ok || data.ok === false || data.error) throw new Error(data.error || response.statusText);
-  return data;
-}
-
-export async function fetchPrivacyStatus() {
-  return fetchPrivacyJson("status");
-}
-
-export async function initializePrivacyKeystore(password) {
-  const result = await fetchPrivacyJson("keystore/init", { password });
-  storePrivacyToken(result.token || "");
-  return result;
-}
-
-export async function unlockPrivacyKeystore(password) {
-  const result = await fetchPrivacyJson("unlock", { password });
-  storePrivacyToken(result.token || "");
-  return result;
-}
-
-export async function lockPrivacyKeystore() {
-  const result = await fetchPrivacyJson("lock", {});
-  storePrivacyToken("");
-  return result;
-}
-
-export async function changePrivacyKeystorePassword(currentPassword, newPassword) {
-  const result = await fetchPrivacyJson("keystore/change_password", {
-    current_password: currentPassword,
-    new_password: newPassword,
+  controller.registerPack({
+    packId: id,
+    readiness: String(readiness || "blocked"),
+    modeScopes,
+    modeClient,
   });
-  storePrivacyToken(result.token || "");
-  return result;
+  return controller.public;
+}
+
+function createSharedPrivacySurface(documentRef, fetchStatus) {
+  const root = documentRef.createElement("section");
+  root.id = SHARED_SURFACE_ID;
+  root.className = "helto-root helto-privacy-surface";
+  root.setAttribute("role", "region");
+  root.setAttribute("aria-label", "Helto privacy");
+  const initialSession = privacySessionSnapshot();
+  root.setAttribute("data-session-state", initialSession.state);
+  documentRef.body.append(root);
+
+  const state = {
+    documentRef,
+    fetchStatus,
+    status: null,
+    sessionState: initialSession.state,
+    packs: new Map(),
+    expanded: false,
+    refreshing: false,
+  };
+
+  const controller = {
+    registerPack(pack) {
+      state.packs.set(pack.packId, {
+        ...pack,
+        modeScopes: normalizeBrowserModeScopes(pack.modeScopes),
+        resolvedScopes: [],
+        error: "",
+        transitionError: "",
+      });
+      renderSharedPrivacySurface(state, controller.public);
+    },
+    async refresh() {
+      if (state.refreshing) return state.refreshing;
+      state.refreshing = (async () => {
+        try {
+          state.status = await state.fetchStatus();
+        } catch {
+          state.status = { ok: false, error: "PRIVACY_STATUS_UNAVAILABLE" };
+        }
+        await Promise.all([...state.packs.values()].map(async (pack) => {
+          try {
+            const result = await pack.modeClient.readAll();
+            pack.resolvedScopes = Array.isArray(result?.scopes) ? result.scopes : [];
+            pack.error = "";
+          } catch {
+            pack.resolvedScopes = [];
+            pack.error = "Unavailable";
+          }
+        }));
+        renderSharedPrivacySurface(state, controller.public);
+      })().finally(() => {
+        state.refreshing = false;
+      });
+      return state.refreshing;
+    },
+    async transition(packIdValue, scopeId, target) {
+      const pack = state.packs.get(String(packIdValue || ""));
+      const scope = pack?.modeScopes.find((item) => item.id === scopeId);
+      if (!pack || !scope || !["inherit", "private", "public"].includes(target)) {
+        throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_MODE_INVALID");
+      }
+      if (pack.readiness !== "ready" || state.status?.suiteStatus !== "active") {
+        throw new PrivacyBrowserRequestError("PRIVACY_SUITE_BLOCKED", 409);
+      }
+      try {
+        const result = await pack.modeClient.transition(
+          scopeId,
+          target,
+        );
+        if (result === null) return null;
+        pack.transitionError = "";
+        await controller.refresh();
+        return result;
+      } catch {
+        pack.transitionError = "Transition failed";
+        await controller.refresh();
+        renderSharedPrivacySurface(state, controller.public);
+        throw new PrivacyBrowserRequestError("PRIVACY_MODE_TRANSITION_FAILED");
+      }
+    },
+    public: null,
+  };
+  controller.public = Object.freeze({
+    root,
+    refresh: () => controller.refresh(),
+    transition: (packIdValue, scopeId, target) => (
+      controller.transition(packIdValue, scopeId, target)
+    ),
+  });
+  subscribePrivacySession((session) => {
+    state.sessionState = session.state;
+    root.setAttribute("data-session-state", session.state);
+    renderSharedPrivacySurface(state, controller.public);
+  }, { emitCurrent: true });
+  renderSharedPrivacySurface(state, controller.public);
+  return controller;
+}
+
+function normalizeBrowserModeScopes(scopes) {
+  if (!Array.isArray(scopes)) return [];
+  return scopes.flatMap((scope) => {
+    const id = String(scope?.id || "");
+    const modeResourceId = String(scope?.modeResourceId || "");
+    return /^[a-z0-9][a-z0-9._-]*$/.test(id)
+      && /^[a-z0-9][a-z0-9._-]*$/.test(modeResourceId)
+      ? [Object.freeze({ id, modeResourceId })]
+      : [];
+  });
+}
+
+function renderSharedPrivacySurface(state, surface) {
+  const { documentRef, status } = state;
+  const header = documentRef.createElement("div");
+  header.className = "helto-toolbar helto-privacy-surface-header";
+  const title = documentRef.createElement("strong");
+  title.textContent = "Privacy";
+  const session = documentRef.createElement("span");
+  session.className = `helto-pill ${state.sessionState === "unlocked" ? "is-ok" : "is-warn"}`;
+  session.textContent = state.sessionState === "unlocked" ? "Unlocked" : "Locked";
+  const toggle = createSurfaceButton(documentRef, state.expanded ? "Close" : "Open", "surface-toggle");
+  toggle.setAttribute("aria-expanded", String(state.expanded));
+  toggle.addEventListener("click", () => {
+    state.expanded = !state.expanded;
+    renderSharedPrivacySurface(state, surface);
+  });
+  header.append(title, session, toggle);
+
+  const panel = documentRef.createElement("div");
+  panel.className = "helto-panel helto-privacy-surface-panel";
+  panel.hidden = !state.expanded;
+
+  const statusLine = documentRef.createElement("div");
+  statusLine.className = "helto-privacy-status";
+  if (!status) statusLine.textContent = "Privacy status not checked.";
+  else if (status.ok === false) statusLine.textContent = "Privacy status unavailable.";
+  else if (status.suiteStatus !== "active") statusLine.textContent = "Blocked installation";
+  else if (!status.keystoreInitialized) statusLine.textContent = "Set up privacy to continue.";
+  else if (status.keystoreLocked) statusLine.textContent = "Privacy is locked.";
+  else statusLine.textContent = "Privacy is ready.";
+  panel.append(statusLine);
+
+  const actions = documentRef.createElement("div");
+  actions.className = "helto-toolbar helto-privacy-surface-actions";
+  const actionSpecs = [
+    ["Set up", "setup", () => showPrivacyKeystoreDialog("setup", { documentRef })],
+    ["Unlock", "unlock", () => showPrivacyKeystoreDialog("unlock", { documentRef })],
+    ["Change password", "change-password", () => showPrivacyKeystoreDialog("change", { documentRef })],
+    ["Lock", "lock", () => lockPrivacyKeystore()],
+    ["Recovery", "recovery", () => showPrivacyRecoveryDialog({ documentRef })],
+  ];
+  for (const [label, action, handler] of actionSpecs) {
+    const button = createSurfaceButton(documentRef, label, action);
+    if (action === "setup") button.className += " is-primary";
+    button.disabled = ["setup", "unlock", "change-password"].includes(action)
+      && (!status || status.suiteStatus !== "active");
+    button.addEventListener("click", async () => {
+      button.disabled = true;
+      try {
+        await handler();
+        await surface.refresh();
+      } finally {
+        button.disabled = false;
+      }
+    });
+    actions.append(button);
+  }
+  panel.append(actions);
+
+  const packs = documentRef.createElement("div");
+  packs.className = "helto-privacy-pack-list helto-scroll";
+  for (const pack of [...state.packs.values()].sort((a, b) => a.packId.localeCompare(b.packId))) {
+    packs.append(renderSharedPrivacyPack(state, surface, pack));
+  }
+  panel.append(packs);
+  rootReplaceChildren(state, header, panel);
+}
+
+function renderSharedPrivacyPack(state, surface, pack) {
+  const card = state.documentRef.createElement("section");
+  card.className = "helto-inset helto-privacy-pack";
+  const heading = state.documentRef.createElement("h3");
+  heading.textContent = pack.packId;
+  const readiness = state.documentRef.createElement("span");
+  readiness.className = `helto-pill ${pack.readiness === "ready" ? "is-ok" : "is-blocked"}`;
+  readiness.textContent = pack.readiness === "ready" ? "Ready" : "Blocked";
+  card.append(heading, readiness);
+  if (pack.error) {
+    const unavailable = state.documentRef.createElement("p");
+    unavailable.textContent = "Unavailable";
+    card.append(unavailable);
+    return card;
+  }
+  if (pack.transitionError) {
+    const failed = state.documentRef.createElement("p");
+    failed.className = "helto-privacy-transition-error";
+    failed.setAttribute("role", "status");
+    failed.textContent = "Privacy mode transition failed.";
+    card.append(failed);
+  }
+  for (const declaredScope of pack.modeScopes) {
+    const scope = pack.resolvedScopes.find((item) => item.id === declaredScope.id);
+    const row = state.documentRef.createElement("div");
+    row.className = "helto-privacy-mode-row";
+    const scopeName = state.documentRef.createElement("span");
+    scopeName.textContent = declaredScope.id;
+    const effective = state.documentRef.createElement("span");
+    effective.className = "helto-pill is-active";
+    effective.textContent = scope?.effective === "public" ? "Public" : "Private";
+    const inherited = state.documentRef.createElement("span");
+    inherited.textContent = scope?.declared === "inherit" ? "Inherited" : "Explicit";
+    const select = state.documentRef.createElement("select");
+    select.className = "helto-select";
+    select.setAttribute("aria-label", `Privacy mode for ${declaredScope.id}`);
+    for (const value of ["inherit", "private", "public"]) {
+      const option = state.documentRef.createElement("option");
+      option.value = value;
+      option.textContent = value[0].toUpperCase() + value.slice(1);
+      select.append(option);
+    }
+    select.value = scope?.declared || "inherit";
+    const apply = createSurfaceButton(state.documentRef, "Apply", "mode-transition");
+    apply.disabled = pack.readiness !== "ready" || state.status?.suiteStatus !== "active";
+    apply.addEventListener("click", async () => {
+      apply.disabled = true;
+      try {
+        await surface.transition(pack.packId, declaredScope.id, select.value);
+      } catch {
+        /* The shared surface renders the fixed transition failure state. */
+      } finally {
+        apply.disabled = false;
+      }
+    });
+    row.append(scopeName, effective, inherited, select, apply);
+    card.append(row);
+    const metadata = state.documentRef.createElement("div");
+    metadata.className = "helto-privacy-mode-metadata";
+    const source = safeModeMetadata(scope?.inheritedFrom, "unavailable");
+    const transitionStatus = safeModeMetadata(scope?.transitionStatus, "unavailable");
+    const transition = state.documentRef.createElement("span");
+    transition.textContent = `Source: ${source} · Transition: ${transitionStatus}`;
+    const floors = state.documentRef.createElement("span");
+    const safeFloors = Array.isArray(scope?.floors)
+      ? scope.floors.flatMap((floor) => {
+        const kind = safeModeMetadata(floor?.kind, "");
+        const sourceId = safeModeMetadata(floor?.sourceId, "");
+        return kind && sourceId ? [`${kind}: ${sourceId}`] : [];
+      })
+      : [];
+    floors.textContent = safeFloors.length
+      ? `Active floors: ${safeFloors.join(", ")}`
+      : "No active floors";
+    metadata.append(transition, floors);
+    card.append(metadata);
+  }
+  return card;
+}
+
+function safeModeMetadata(value, fallback) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9._-]*$/.test(normalized) ? normalized : fallback;
+}
+
+function createSurfaceButton(documentRef, label, action) {
+  const button = documentRef.createElement("button");
+  button.type = "button";
+  button.className = "helto-button";
+  button.textContent = label;
+  button.setAttribute("data-action", action);
+  return button;
+}
+
+function rootReplaceChildren(state, ...children) {
+  if (typeof state.documentRef.getElementById(SHARED_SURFACE_ID)?.replaceChildren === "function") {
+    state.documentRef.getElementById(SHARED_SURFACE_ID).replaceChildren(...children);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +942,7 @@ function createRecoveryIssue({ id, type, node, descriptor, field, target, messag
     descriptorId: descriptor.id,
     nodeId: node?.id ?? node?.node_id ?? null,
     nodeType: nodeTypeCandidates(node)[0] || "",
-    nodeTitle: safeNodeTitle(node, descriptor),
+    nodeTitle: safeNodeTitle(node),
     nodeLabel: descriptor.label,
     fieldKind: field?.kind || target?.kind || "",
     fieldName: field?.name || target?.name || "",
@@ -678,8 +961,11 @@ function createRecoveryIssue({ id, type, node, descriptor, field, target, messag
   return issue;
 }
 
-function safeNodeTitle(node, descriptor) {
-  return String(node?.title || node?.label || nodeTypeCandidates(node)[0] || descriptor.label || "Node");
+function safeNodeTitle(node) {
+  const numericId = Number.isInteger(node?.id)
+    ? node.id
+    : (Number.isInteger(node?.node_id) ? node.node_id : null);
+  return numericId === null ? "Privacy node" : `Privacy node ${numericId}`;
 }
 
 function looksLikeEncryptedJson(value) {
@@ -802,7 +1088,6 @@ function encryptionHandlerFor(issue, options) {
     field,
     descriptor,
     issue,
-    token: getStoredPrivacyToken(),
   });
 }
 
@@ -875,7 +1160,8 @@ function summarizeRecoveryAction(issue, action) {
 }
 
 function sanitizeErrorMessage(error) {
-  const message = String(error?.message ?? error ?? "Privacy recovery failed.");
+  const code = String(error?.code || "");
+  const message = String(error?.message ?? error ?? "");
   const knownCode = [
     "PRIVACY_ENCRYPTION_UNAVAILABLE",
     "PRIVACY_ENCRYPTION_FAILED",
@@ -883,18 +1169,36 @@ function sanitizeErrorMessage(error) {
     "PRIVACY_TOKEN_REQUIRED",
     "PRIVACY_KEYSTORE_UNINITIALIZED",
     "PRIVACY_PASSWORD_INVALID",
-  ].find((code) => message.includes(code));
-  return knownCode ? message : "Privacy recovery failed for this field.";
+  ].find((candidate) => code === candidate || message.includes(candidate));
+  return privacyUiErrorLabel(knownCode, "Privacy recovery failed for this field.");
 }
 
 function isPrivacyEncryptionUnavailable(error) {
+  const code = String(error?.code || "");
   const message = String(error?.message ?? error ?? "");
   return (
-    message.includes("PRIVACY_ENCRYPTION_UNAVAILABLE")
+    [
+      "PRIVACY_ENCRYPTION_UNAVAILABLE",
+      "PRIVACY_LOCKED",
+      "PRIVACY_TOKEN_REQUIRED",
+      "PRIVACY_KEYSTORE_UNINITIALIZED",
+    ].includes(code)
+    || message.includes("PRIVACY_ENCRYPTION_UNAVAILABLE")
     || message.includes("PRIVACY_LOCKED")
     || message.includes("PRIVACY_TOKEN_REQUIRED")
     || message.includes("PRIVACY_KEYSTORE_UNINITIALIZED")
   );
+}
+
+function privacyUiErrorLabel(code, fallback = "Privacy operation failed.") {
+  return ({
+    PRIVACY_PASSWORD_INVALID: "The privacy password was not accepted.",
+    PRIVACY_LOCKED: "Privacy is locked.",
+    PRIVACY_TOKEN_REQUIRED: "Privacy must be unlocked again.",
+    PRIVACY_KEYSTORE_UNINITIALIZED: "Privacy setup is required.",
+    PRIVACY_ENCRYPTION_UNAVAILABLE: "Privacy encryption is unavailable.",
+    PRIVACY_ENCRYPTION_FAILED: "Privacy encryption failed.",
+  })[code] || fallback;
 }
 
 function ownerKey(owner) {
@@ -1058,7 +1362,7 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
 
   return new Promise((resolve) => {
     const overlay = documentRef.createElement("div");
-    overlay.className = DIALOG_CLASS;
+    overlay.className = `${DIALOG_CLASS} helto-root helto-overlay`;
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
     overlay.setAttribute("aria-label", spec.title);
@@ -1071,7 +1375,7 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
     };
 
     const panel = documentRef.createElement("div");
-    panel.className = "helto-privacy-keystore-panel";
+    panel.className = "helto-privacy-keystore-panel helto-modal";
 
     const title = documentRef.createElement("h3");
     title.textContent = spec.title;
@@ -1087,6 +1391,7 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
       const caption = documentRef.createElement("span");
       caption.textContent = field.label;
       const input = documentRef.createElement("input");
+      input.className = "helto-field";
       input.type = "password";
       input.autocomplete = "off";
       input.spellcheck = false;
@@ -1101,10 +1406,11 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
     actions.className = "helto-privacy-keystore-actions";
     const cancelButton = documentRef.createElement("button");
     cancelButton.type = "button";
+    cancelButton.className = "helto-button";
     cancelButton.textContent = "Cancel";
     const submitButton = documentRef.createElement("button");
     submitButton.type = "button";
-    submitButton.className = "primary";
+    submitButton.className = "helto-button is-primary primary";
     submitButton.textContent = spec.action;
     actions.append(cancelButton, submitButton);
     panel.append(status, actions);
@@ -1119,7 +1425,10 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
         const result = await spec.run(values);
         finish(result);
       } catch (error) {
-        status.textContent = error.message || String(error);
+        status.textContent = privacyUiErrorLabel(
+          String(error?.code || ""),
+          "Privacy operation failed.",
+        );
         submitButton.disabled = false;
       }
     };
@@ -1164,7 +1473,7 @@ export async function showPrivacyRecoveryDialog(options = {}) {
 
   return new Promise((resolve) => {
     const overlay = documentRef.createElement("div");
-    overlay.className = RECOVERY_DIALOG_CLASS;
+    overlay.className = `${RECOVERY_DIALOG_CLASS} helto-root helto-overlay`;
     overlay.setAttribute("role", "dialog");
     overlay.setAttribute("aria-modal", "true");
     overlay.setAttribute("aria-label", "Privacy Recovery");
@@ -1177,7 +1486,7 @@ export async function showPrivacyRecoveryDialog(options = {}) {
     };
 
     const panel = documentRef.createElement("div");
-    panel.className = "helto-privacy-recovery-panel";
+    panel.className = "helto-privacy-recovery-panel helto-modal";
     overlay.append(panel);
     renderRecoveryDialogPanel(panel, model, documentRef);
 
@@ -1194,7 +1503,9 @@ export async function showPrivacyRecoveryDialog(options = {}) {
       const button = documentRef.createElement("button");
       button.type = "button";
       button.textContent = label;
-      if (primary) button.className = "primary";
+      button.className = primary
+        ? "helto-button is-primary primary"
+        : "helto-button";
       button.addEventListener("click", async () => {
         for (const item of buttons) item.disabled = true;
         status.textContent = "Working...";
@@ -1219,6 +1530,7 @@ export async function showPrivacyRecoveryDialog(options = {}) {
 
     const closeButton = documentRef.createElement("button");
     closeButton.type = "button";
+    closeButton.className = "helto-button";
     closeButton.textContent = issues.length ? "Cancel" : "Close";
     closeButton.addEventListener("click", () => finish({ model, result: null }));
     actions.prepend(closeButton);
@@ -1316,42 +1628,77 @@ function installStyles(documentRef) {
   if (!documentRef || documentRef.getElementById?.(STYLE_ID)) return;
   const style = documentRef.createElement("style");
   style.id = STYLE_ID;
-  // Helto design tokens inlined (canonical source:
-  // helto-designsystem/reference/tokens.css). Body-mounted overlays scope
-  // their own token block. Gold = selection/primary, blue = focus ring only.
+  // Canonical Helto tokens and component recipes. Gold is active/primary;
+  // blue is focus only. Concealment rules intentionally retain !important.
   style.textContent = `
-    .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS} {
-      --htd-bg: #0d1320; --htd-surface: #151c2a; --htd-surface-2: #1b2333; --htd-surface-3: #232d3f; --htd-surface-hover: #2c3850;
-      --htd-border: #2a3346; --htd-border-strong: #3a465c; --htd-border-hover: #4c5970; --htd-text: #e7ebf3; --htd-text-dim: #9aa6bd; --htd-text-faint: #6f7c95;
-      --htd-accent: #f1c75c; --htd-accent-strong: #ffd873; --htd-accent-border: rgba(241,199,92,0.55);
-      --htd-focus: #5e9bff; --htd-ring: 0 0 0 2px rgba(94,155,255,0.5); --htd-danger: #ec5a6b;
-      --htd-radius-sm: 5px; --htd-radius-lg: 10px; --htd-shadow-pop: 0 14px 36px rgba(0,0,0,0.55);
+    :root {
+      --helto-bg: #181825; --helto-surface: #1e1e2e; --helto-surface-2: #313244;
+      --helto-surface-3: #45475a; --helto-surface-hover: #585b70;
+      --helto-border: #313244; --helto-border-strong: #45475a; --helto-border-hover: #6c7086;
+      --helto-text: #cdd6f4; --helto-text-dim: #a6adc8; --helto-text-faint: #7f849c;
+      --helto-accent: #fab387; --helto-accent-strong: #fddcc4; --helto-accent-border: #93664a;
+      --helto-accent-bg: #46301f; --helto-focus: #89b4fa;
+      --helto-focus-ring: 0 0 0 3px rgba(137, 180, 250, 0.28);
+      --helto-danger: #f38ba8; --helto-danger-border: #96526a; --helto-ok: #a6e3a1;
+      --helto-warn: #f9e2af; --helto-info: #74c7ec;
+      --helto-radius-sm: 5px; --helto-radius: 6px; --helto-radius-lg: 10px;
+      --helto-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+      --helto-shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5);
+      --helto-transition: 0.12s ease;
+      --helto-font-sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --helto-font-size: 12px; --helto-line: 1.4;
     }
-    .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS} { position: fixed; inset: 0; z-index: 10090; display: flex; align-items: center; justify-content: center; background: rgba(6,9,15,0.72); backdrop-filter: blur(4px); color: var(--htd-text-dim); font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
-    .helto-privacy-keystore-panel { width: min(380px, calc(100vw - 28px)); display: flex; flex-direction: column; gap: 10px; background: linear-gradient(135deg, rgba(27,35,51,0.92), rgba(13,19,32,0.96)); border: 1px solid var(--htd-border-strong); border-radius: var(--htd-radius-lg); box-shadow: var(--htd-shadow-pop); padding: 16px; box-sizing: border-box; }
-    .helto-privacy-keystore-panel h3 { margin: 0; font-size: 15px; font-weight: 700; color: var(--htd-text); }
-    .helto-privacy-keystore-hint { margin: 0; color: var(--htd-text-dim); }
-    .helto-privacy-keystore-field { display: grid; gap: 4px; color: var(--htd-text-faint); }
-    .helto-privacy-keystore-field input { height: 30px; box-sizing: border-box; padding: 0 8px; background: var(--htd-bg); color: var(--htd-text); border: 1px solid var(--htd-border-strong); border-radius: var(--htd-radius-sm); font: inherit; transition: border-color .12s ease, box-shadow .12s ease; }
-    .helto-privacy-keystore-field input:focus-visible { outline: none; border-color: var(--htd-focus); box-shadow: var(--htd-ring); }
-    .helto-privacy-keystore-status { min-height: 16px; color: var(--htd-danger); }
-    .helto-privacy-keystore-actions { display: flex; justify-content: flex-end; gap: 8px; }
-    .helto-privacy-keystore-actions button { min-width: 88px; padding: 7px 14px; cursor: pointer; background: linear-gradient(180deg, var(--htd-surface-3), var(--htd-surface-2)); color: var(--htd-text); border: 1px solid var(--htd-border-strong); border-radius: var(--htd-radius-sm); font: inherit; transition: background .12s ease, border-color .12s ease, color .12s ease; }
-    .helto-privacy-keystore-actions button:hover:not(:disabled) { background: linear-gradient(180deg, var(--htd-surface-hover), var(--htd-surface-3)); border-color: var(--htd-border-hover); color: #fff; }
-    .helto-privacy-keystore-actions button:focus-visible { outline: none; border-color: var(--htd-focus); box-shadow: var(--htd-ring); }
-    .helto-privacy-keystore-actions button:disabled { opacity: .48; cursor: not-allowed; }
-    .helto-privacy-keystore-actions button.primary { border-color: var(--htd-accent-border); background: linear-gradient(180deg, #4f4322, #3c3318); color: var(--htd-accent-strong); }
-    .helto-privacy-keystore-actions button.primary:hover:not(:disabled) { background: linear-gradient(180deg, #5b4d27, #46391b); color: #fff3cf; }
-    .helto-privacy-recovery-panel { width: min(520px, calc(100vw - 28px)); max-height: min(620px, calc(100vh - 32px)); display: flex; flex-direction: column; gap: 10px; background: linear-gradient(135deg, rgba(27,35,51,0.94), rgba(13,19,32,0.98)); border: 1px solid var(--htd-border-strong); border-radius: var(--htd-radius-lg); box-shadow: var(--htd-shadow-pop); padding: 16px; box-sizing: border-box; }
-    .helto-privacy-recovery-panel h3 { margin: 0; font-size: 15px; font-weight: 700; color: var(--htd-text); }
+    .helto-root { box-sizing: border-box; color: var(--helto-text); font: var(--helto-font-size) / var(--helto-line) var(--helto-font-sans); -webkit-font-smoothing: antialiased; }
+    .helto-root *, .helto-root *::before, .helto-root *::after { box-sizing: border-box; }
+    .helto-panel { background: var(--helto-surface); border: 1px solid var(--helto-border); border-radius: var(--helto-radius); box-shadow: var(--helto-shadow); padding: 9px; }
+    .helto-inset { background: var(--helto-bg); border: 1px solid var(--helto-border); border-radius: var(--helto-radius); }
+    .helto-toolbar { display: flex; align-items: center; gap: 6px; min-height: 34px; padding: 5px; border-radius: var(--helto-radius); background: linear-gradient(180deg, var(--helto-surface-2), var(--helto-surface)); box-shadow: inset 0 0 0 1px var(--helto-border); }
+    .helto-button { min-width: 28px; height: 24px; padding: 0 8px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid var(--helto-border-strong); border-radius: var(--helto-radius-sm); background: linear-gradient(180deg, var(--helto-surface-3), var(--helto-surface-2)); color: var(--helto-text); font: inherit; white-space: nowrap; cursor: pointer; transition: background var(--helto-transition), border-color var(--helto-transition), color var(--helto-transition), box-shadow var(--helto-transition); }
+    .helto-button:hover:not(:disabled) { background: linear-gradient(180deg, var(--helto-surface-hover), var(--helto-surface-3)); border-color: var(--helto-border-hover); color: #e6ebf9; }
+    .helto-button:disabled { opacity: .4; cursor: not-allowed; }
+    .helto-button.is-primary, .helto-button.is-active { border-color: var(--helto-accent-border); background: linear-gradient(180deg, #4f3a2a, #3d2d20); color: var(--helto-accent-strong); }
+    .helto-button:focus-visible, .helto-field:focus, .helto-select:focus { outline: none; border-color: var(--helto-focus); box-shadow: var(--helto-focus-ring); }
+    .helto-field { height: 26px; padding: 0 8px; border: 1px solid var(--helto-border-strong); border-radius: var(--helto-radius-sm); background: var(--helto-surface-2); color: var(--helto-text); font: inherit; }
+    .helto-select { height: 24px; min-width: 72px; padding: 0 8px; border: 1px solid var(--helto-border-strong); border-radius: var(--helto-radius-sm); background: var(--helto-surface-2); color: var(--helto-text); font: inherit; cursor: pointer; }
+    .helto-pill { height: 24px; display: inline-flex; align-items: center; padding: 0 9px; border: 1px solid var(--helto-border-strong); border-radius: 999px; background: var(--helto-surface-2); color: #bac2de; font-weight: 600; white-space: nowrap; }
+    .helto-pill.is-ok { border-color: #4f7050; background: #223423; color: var(--helto-ok); }
+    .helto-pill.is-warn { border-color: #7d7147; background: #363019; color: var(--helto-warn); }
+    .helto-pill.is-blocked { border-color: var(--helto-danger-border); background: #3a2130; color: #f6cadb; }
+    .helto-pill.is-active { border-color: var(--helto-accent-border); color: var(--helto-accent-strong); }
+    .helto-overlay, .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS} { position: fixed; inset: 0; z-index: 10090; display: flex; align-items: center; justify-content: center; padding: 12px; background: rgba(17, 17, 27, .72); backdrop-filter: blur(4px); }
+    .helto-modal { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--helto-border-strong); border-radius: var(--helto-radius-lg); background: linear-gradient(135deg, rgba(49, 50, 68, .92), rgba(24, 24, 37, .96)); box-shadow: var(--helto-shadow-pop); padding: 16px; }
+    .helto-privacy-keystore-panel { width: min(380px, calc(100vw - 28px)); gap: 10px; }
+    .helto-privacy-recovery-panel { width: min(520px, calc(100vw - 28px)); max-height: min(620px, calc(100vh - 32px)); gap: 10px; }
+    .helto-privacy-keystore-panel h3, .helto-privacy-recovery-panel h3 { margin: 0; font-size: 15px; color: var(--helto-text); }
+    .helto-privacy-keystore-hint { margin: 0; color: var(--helto-text-dim); }
+    .helto-privacy-keystore-field { display: grid; gap: 4px; color: var(--helto-text-faint); }
+    .helto-privacy-keystore-status, .helto-privacy-recovery-status { min-height: 16px; color: var(--helto-danger); }
+    .helto-privacy-keystore-actions { display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
     .helto-privacy-recovery-counts { display: flex; flex-wrap: wrap; gap: 6px; }
-    .helto-privacy-recovery-counts span { border: 1px solid var(--htd-border); background: var(--htd-surface-2); color: var(--htd-text-dim); border-radius: var(--htd-radius-sm); padding: 3px 6px; }
-    .helto-privacy-recovery-list { display: grid; gap: 8px; overflow: auto; padding-right: 2px; }
-    .helto-privacy-recovery-node { display: grid; gap: 5px; border: 1px solid var(--htd-border); background: rgba(13,19,32,0.58); border-radius: var(--htd-radius-sm); padding: 8px; }
-    .helto-privacy-recovery-node h4 { margin: 0; color: var(--htd-text); font-size: 12px; font-weight: 650; }
-    .helto-privacy-recovery-issue { color: var(--htd-text-dim); overflow-wrap: anywhere; }
-    .helto-privacy-recovery-status { min-height: 16px; color: var(--htd-danger); }
-    .helto-privacy-recovery-actions { flex-wrap: wrap; }
+    .helto-privacy-recovery-counts span { border: 1px solid var(--helto-border); background: var(--helto-surface-2); color: var(--helto-text-dim); border-radius: var(--helto-radius-sm); padding: 3px 6px; }
+    .helto-privacy-recovery-list { display: grid; gap: 8px; overflow: auto; }
+    .helto-privacy-recovery-node { display: grid; gap: 5px; border: 1px solid var(--helto-border); background: var(--helto-bg); border-radius: var(--helto-radius-sm); padding: 8px; }
+    .helto-privacy-recovery-node h4 { margin: 0; color: var(--helto-text); font-size: 12px; }
+    .helto-privacy-recovery-issue { color: var(--helto-text-dim); overflow-wrap: anywhere; }
+    .helto-privacy-surface { position: fixed; z-index: 10020; top: 10px; right: 10px; width: min(520px, calc(100vw - 20px)); }
+    .helto-privacy-surface-header strong { margin-right: auto; }
+    .helto-privacy-surface-panel { margin-top: 6px; display: grid; gap: 8px; box-shadow: var(--helto-shadow-pop); }
+    .helto-privacy-surface-panel[hidden] { display: none !important; }
+    .helto-privacy-surface-actions { flex-wrap: wrap; }
+    .helto-privacy-pack-list { display: grid; gap: 8px; max-height: min(420px, 60vh); overflow: auto; }
+    .helto-privacy-pack { padding: 8px; display: grid; grid-template-columns: 1fr auto; gap: 7px; }
+    .helto-privacy-pack h3 { margin: 0; font-size: 12px; overflow-wrap: anywhere; }
+    .helto-privacy-mode-row { grid-column: 1 / -1; display: grid; grid-template-columns: minmax(70px, 1fr) auto auto auto auto; align-items: center; gap: 6px; }
+    .helto-privacy-mode-metadata { grid-column: 1 / -1; display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 10px; color: var(--helto-text-faint); font-size: 11px; }
+    .helto-privacy-status { padding: 7px 10px; border: 1px solid #7d5a41; border-radius: var(--helto-radius); background: #30231a; color: #f8d0ae; box-shadow: var(--helto-shadow-pop); }
+    .helto-hidden-collapsed { opacity: 0 !important; filter: blur(8px) !important; pointer-events: none !important; }
+    .helto-text-masked { background: var(--helto-bg) !important; border-color: var(--helto-bg) !important; color: transparent !important; -webkit-text-fill-color: transparent !important; caret-color: transparent !important; text-shadow: none !important; }
+    .helto-text-masked::placeholder { color: transparent !important; }
+    .helto-text-masked.is-revealed { background: var(--helto-surface-2) !important; border-color: var(--helto-border-strong) !important; color: inherit !important; -webkit-text-fill-color: currentColor !important; caret-color: auto !important; }
+    .helto-root.is-private .helto-private img, .helto-root.is-private .helto-private-text { opacity: 0; }
+    .helto-root.is-private.is-revealed .helto-private img, .helto-root.is-private.is-revealed .helto-private-text { opacity: 1; }
+    .helto-root.is-private:not(.is-revealed) .helto-private-label { color: transparent !important; text-shadow: none !important; }
+    @media (max-width: 640px) { .helto-privacy-mode-row { grid-template-columns: 1fr auto; } .helto-privacy-mode-row > * { min-width: 0; } }
   `;
   documentRef.head?.append(style);
 }

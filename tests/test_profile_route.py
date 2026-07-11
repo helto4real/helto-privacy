@@ -117,7 +117,13 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     monkeypatch.setattr(
         comfy_ui.keystore,
         "keystore_status",
-        lambda: {"exists": True, "unlocked": False},
+        lambda: {
+            "keystoreAvailable": True,
+            "keystoreInitialized": True,
+            "keystoreLocked": True,
+            "keystorePath": "/SYNTHETIC_PRIVATE_PATH",
+            "sessionPath": "/SYNTHETIC_PRIVATE_SESSION",
+        },
     )
     status_handler = prompt_server.routes.handlers[
         ("GET", f"{comfy_ui.ROUTE_PREFIX}/status")
@@ -125,12 +131,15 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     status_response = asyncio.run(status_handler(types.SimpleNamespace()))
     assert status_response.data == {
         "ok": True,
-        "exists": True,
-        "unlocked": False,
+        "keystoreAvailable": True,
+        "keystoreInitialized": True,
+        "keystoreLocked": True,
         "suiteStatus": "incomplete",
         "suiteManifestDigest": None,
         "suiteIssueCodes": ["suite_not_configured"],
     }
+    assert status_response.headers == {"Cache-Control": "no-store"}
+    assert "SYNTHETIC_PRIVATE" not in str(status_response.data)
 
     monkeypatch.setattr(
         comfy_ui,
@@ -168,8 +177,100 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     assert response.data["suiteStatus"] == "incomplete"
     assert response.data["suiteManifestDigest"] is None
     assert response.data["resources"] == [{"id": "privacy-mode", "kind": "mode"}]
+    assert response.data["modeScopes"] == [
+        {"id": "route-test", "modeResourceId": "privacy-mode"}
+    ]
+    assert response.data["protectedOperations"] == []
     assert "token" not in str(response.data).lower()
     assert "secret" not in str(response.data).lower()
+
+    class Resolution:
+        declared = types.SimpleNamespace(value="private")
+        effective = types.SimpleNamespace(value="private")
+        inherited_from = "base-private"
+        floors = ()
+        transition_status = types.SimpleNamespace(value="idle")
+
+    class Mode:
+        def resolve(self, scope_id):
+            assert scope_id == "route-test"
+            return Resolution()
+
+        def transition(self, scope_id, target, authorization):
+            assert (scope_id, target, authorization) == (
+                "route-test",
+                "public",
+                "synthetic-authorization",
+            )
+            return types.SimpleNamespace(
+                scope_id=scope_id,
+                declared=types.SimpleNamespace(value="public"),
+                effective=types.SimpleNamespace(value="public"),
+                status=types.SimpleNamespace(value="idle"),
+            )
+
+    class Authorization:
+        def authorize_declassification(self, request, scope_id, target):
+            assert request.headers["X-Helto-Privacy-Declassification"] == "confirmed"
+            assert (scope_id, target) == ("route-test", "public")
+            return "synthetic-authorization"
+
+    fake_pack = types.SimpleNamespace(
+        profile=profile,
+        authorization=Authorization(),
+        mode=lambda resource_id: Mode(),
+    )
+    monkeypatch.setattr(runtime, "bound_privacy_pack", lambda pack_id: fake_pack)
+
+    mode_handler = prompt_server.routes.handlers[
+        ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes")
+    ]
+    mode_response = asyncio.run(
+        mode_handler(types.SimpleNamespace(match_info={"pack_id": profile.id}))
+    )
+    assert mode_response.data == {
+        "ok": True,
+        "packId": profile.id,
+        "scopes": [
+            {
+                "id": "route-test",
+                "modeResourceId": "privacy-mode",
+                "declared": "private",
+                "effective": "private",
+                "inheritedFrom": "base-private",
+                "floors": [],
+                "transitionStatus": "idle",
+            }
+        ],
+    }
+    assert mode_response.headers == {"Cache-Control": "no-store"}
+
+    async def transition_payload():
+        return {"target": "public"}
+
+    transition_handler = prompt_server.routes.handlers[
+        (
+            "POST",
+            f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition",
+        )
+    ]
+    transition_response = asyncio.run(
+        transition_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "scope_id": "route-test"},
+                headers={"X-Helto-Privacy-Declassification": "confirmed"},
+                json=transition_payload,
+            )
+        )
+    )
+    assert transition_response.data == {
+        "ok": True,
+        "scopeId": "route-test",
+        "declared": "public",
+        "effective": "public",
+        "transitionStatus": "idle",
+    }
+    assert transition_response.headers == {"Cache-Control": "no-store"}
 
     missing = asyncio.run(
         handler(types.SimpleNamespace(match_info={"pack_id": "helto.missing"}))
@@ -181,6 +282,14 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     module_handler = prompt_server.routes.handlers[
         ("GET", comfy_ui.PROFILE_MODULE_ROUTE)
     ]
+    client_module_handler = prompt_server.routes.handlers[
+        ("GET", comfy_ui.CLIENT_MODULE_ROUTE)
+    ]
+    client_module_response = asyncio.run(
+        client_module_handler(types.SimpleNamespace())
+    )
+    assert client_module_response.status == 200
+    assert "connectAttestedPrivacyProfileClient" in client_module_response.kwargs["text"]
     release = _release(ready=False)
     suite = SuiteInstallation(release)
     suite._verify_inventory(_inventory(release.manifest))

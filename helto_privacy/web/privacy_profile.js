@@ -1,7 +1,16 @@
 // Atomic browser compiler for Helto privacy profiles. This module owns only
 // profile attestation, typed browser handles, and ComfyUI lifecycle binding.
 
-const ROUTE_PREFIX = "/helto_privacy";
+import {
+  connectAttestedPrivacyProfileClient,
+  isPrivacySetupRequiredError,
+  subscribePrivacySession,
+} from "../privacy_client.js";
+import {
+  mountSharedPrivacySurface,
+  showPrivacyKeystoreDialog,
+} from "../privacy.js";
+
 export const PRIVACY_CONTRACT_V2 = "helto.privacy.v2";
 
 const STATUS = Object.freeze({
@@ -70,6 +79,22 @@ export class BrowserAuthorizationHandle {
       throw new PrivacyPackConnectionError("server_suite_not_active");
     }
   }
+
+}
+
+export class BrowserSessionHandle {
+  constructor(entry) {
+    HANDLE_ENTRIES.set(this, entry);
+    Object.freeze(this);
+  }
+
+  get state() {
+    return HANDLE_ENTRIES.get(this).sessionState;
+  }
+
+  subscribe(listener, options = {}) {
+    return subscribePrivacySession(listener, options);
+  }
 }
 
 class BrowserResourceHandle {
@@ -83,9 +108,35 @@ class BrowserResourceHandle {
   get readiness() {
     return new BrowserReadinessHandle(HANDLE_ENTRIES.get(this));
   }
+
+  invoke(operationId, body = undefined) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    const operation = entry.protectedOperations.find(
+      (item) => item.id === operationId && item.resourceId === this.resourceId,
+    );
+    if (!operation) throw new PrivacyPackConnectionError("unknown_browser_operation");
+    return entry.transport.invoke(this.resourceId, operation.id, body);
+  }
 }
 
-export class BrowserModeHandle extends BrowserResourceHandle {}
+export class BrowserModeHandle extends BrowserResourceHandle {
+  resolve(scopeId) {
+    const entry = HANDLE_ENTRIES.get(this);
+    return entry.transport.mode.resolve(this.resourceId, scopeId);
+  }
+
+  transition(scopeId, target) {
+    const entry = HANDLE_ENTRIES.get(this);
+    if (!entry.modeScopes.some(
+      (scope) => scope.id === scopeId && scope.modeResourceId === this.resourceId,
+    )) {
+      throw new PrivacyPackConnectionError("unknown_browser_mode_scope");
+    }
+    entry.pack.authorization.requireReady();
+    return entry.transport.mode.transition(scopeId, target);
+  }
+}
 export class BrowserWorkflowHandle extends BrowserResourceHandle {}
 export class BrowserRecordHandle extends BrowserResourceHandle {}
 export class BrowserArtifactHandle extends BrowserResourceHandle {}
@@ -100,6 +151,7 @@ class BrowserPrivacyPack {
     this.suiteManifestDigest = entry.suiteManifestDigest;
     this.readiness = new BrowserReadinessHandle(entry);
     this.authorization = new BrowserAuthorizationHandle(entry);
+    this.session = new BrowserSessionHandle(entry);
     Object.freeze(this);
   }
 
@@ -132,8 +184,6 @@ export async function connectPrivacyPack({
   profileFingerprint,
   suiteManifestDigest,
   adapters = {},
-  fetchProfile = fetchPrivacyProfile,
-  attestBrowser = attestBrowserManifest,
 }) {
   const id = String(packId || "").trim();
   const fingerprint = String(profileFingerprint || "").trim();
@@ -141,13 +191,12 @@ export async function connectPrivacyPack({
   if (
     !app
     || !id
-    || !fingerprint
+    || !/^[0-9a-f]{64}$/.test(fingerprint)
     || !/^[0-9a-f]{64}$/.test(suiteDigest)
     || contract !== PRIVACY_CONTRACT_V2
     || !adapters
     || typeof adapters !== "object"
     || Array.isArray(adapters)
-    || typeof attestBrowser !== "function"
   ) {
     throw new PrivacyPackConnectionError("invalid_browser_declaration");
   }
@@ -170,12 +219,23 @@ export async function connectPrivacyPack({
     return existing.pack;
   }
 
-  let attestation;
+  let transport;
   try {
-    attestation = await fetchProfile(id);
-  } catch {
+    transport = await connectAttestedPrivacyProfileClient({
+      packId: id,
+      profileFingerprint: fingerprint,
+      suiteManifestDigest: suiteDigest,
+      promptUnlock: ({ error }) => showPrivacyKeystoreDialog(
+        isPrivacySetupRequiredError(error) ? "setup" : "unlock",
+      ),
+    });
+  } catch (error) {
+    if (error?.code === "PRIVACY_BROWSER_ATTESTATION_DRIFT") {
+      throw new PrivacyPackConnectionError("browser_server_attestation_drift");
+    }
     throw new PrivacyPackConnectionError("server_attestation_unavailable");
   }
+  const { attestation } = transport;
   validateServerAttestation({
     id,
     contract,
@@ -184,12 +244,6 @@ export async function connectPrivacyPack({
     adapters,
     attestation,
   });
-  try {
-    await attestBrowser(suiteDigest);
-  } catch {
-    throw new PrivacyPackConnectionError("browser_manifest_attestation_failed");
-  }
-
   if (PRIVACY_EXTENSION_APP && PRIVACY_EXTENSION_APP !== app) {
     throw new PrivacyPackConnectionError("comfyui_app_conflict");
   }
@@ -211,11 +265,39 @@ export async function connectPrivacyPack({
       id: String(item.id),
       kind: String(item.kind),
     })),
+    modeScopes: attestation.modeScopes.map((item) => Object.freeze({
+      id: String(item.id),
+      modeResourceId: String(item.modeResourceId),
+    })),
+    protectedOperations: attestation.protectedOperations.map((item) => Object.freeze({
+      id: String(item.id),
+      resourceId: String(item.resourceId),
+      route: String(item.route),
+      method: String(item.method),
+    })),
     handles: new Map(),
+    transport,
+    sessionState: Object.freeze({ state: "unknown", revision: 0 }),
+    sessionUnsubscribe: null,
+    surface: null,
     status: STATUS.READY,
     pack: null,
   };
   entry.pack = new BrowserPrivacyPack(entry);
+  entry.sessionUnsubscribe = subscribePrivacySession((session) => {
+    entry.sessionState = session;
+    for (const adapter of Object.values(entry.adapters)) {
+      try {
+        adapter.onPrivacySessionChange(session);
+      } catch {
+        entry.status = STATUS.CONFLICT;
+      }
+    }
+  }, { emitCurrent: true });
+  if (entry.status === STATUS.CONFLICT) {
+    entry.sessionUnsubscribe();
+    throw new PrivacyPackConnectionError("browser_session_binding_failed");
+  }
 
   CONNECTED_PRIVACY_PACKS.set(id, entry);
   try {
@@ -223,35 +305,18 @@ export async function connectPrivacyPack({
     await reconcileExistingNodeDefinitions(app, entry);
     await reconcileExistingPrivacyNodes(app, entry);
   } catch {
+    entry.sessionUnsubscribe?.();
     entry.status = STATUS.CONFLICT;
     throw new PrivacyPackConnectionError("browser_lifecycle_registration_failed");
   }
+  entry.surface = mountSharedPrivacySurface({
+    packId: entry.id,
+    readiness: entry.status,
+    modeScopes: entry.modeScopes,
+    modeClient: entry.transport.mode,
+  });
+  entry.surface?.refresh().catch(() => {});
   return entry.pack;
-}
-
-async function fetchPrivacyProfile(packId) {
-  const response = await fetch(`${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}`, {
-    headers: { Accept: "application/json" },
-  });
-  const payload = await response.json();
-  if (!response.ok || payload?.ok === false) throw new Error("Profile attestation failed.");
-  return payload;
-}
-
-async function attestBrowserManifest(manifestDigest) {
-  const response = await fetch(`${ROUTE_PREFIX}/suite/browser-attestation`, {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ manifestDigest }),
-  });
-  const payload = await response.json();
-  if (!response.ok || payload?.ok === false) {
-    throw new Error("Browser manifest attestation failed.");
-  }
-  return payload;
 }
 
 function validateServerAttestation({
@@ -291,11 +356,56 @@ function validateServerAttestation({
     }
     resourceIds.add(resource.id);
   }
+  if (!Array.isArray(attestation.modeScopes)) {
+    throw new PrivacyPackConnectionError("invalid_server_mode_scope_declaration");
+  }
+  const modeScopeIds = new Set();
+  for (const scope of attestation.modeScopes) {
+    if (
+      !scope?.id
+      || !scope?.modeResourceId
+      || modeScopeIds.has(scope.id)
+      || !attestation.resources.some(
+        (resource) => resource.id === scope.modeResourceId && resource.kind === RESOURCE_KIND.MODE,
+      )
+    ) {
+      throw new PrivacyPackConnectionError("invalid_server_mode_scope_declaration");
+    }
+    modeScopeIds.add(scope.id);
+  }
+  if (!Array.isArray(attestation.protectedOperations)) {
+    throw new PrivacyPackConnectionError("invalid_server_operation_declaration");
+  }
+  const operationIds = new Set();
+  for (const operation of attestation.protectedOperations) {
+    if (
+      !operation?.id
+      || !operation?.resourceId
+      || !isSafeBrowserOperationRoute(operation.route)
+      || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(operation.method)
+      || operationIds.has(operation.id)
+      || !attestation.resources.some((resource) => resource.id === operation.resourceId)
+    ) {
+      throw new PrivacyPackConnectionError("invalid_server_operation_declaration");
+    }
+    operationIds.add(operation.id);
+  }
 
   const requirements = Array.isArray(attestation.requiredBrowserAdapters)
     ? attestation.requiredBrowserAdapters
     : [];
   validateBrowserAdapterBindings(requirements, adapters);
+}
+
+function isSafeBrowserOperationRoute(route) {
+  const value = String(route || "");
+  return value.startsWith("/")
+    && !value.startsWith("//")
+    && !value.includes("?")
+    && !value.includes("#")
+    && !value.includes("\\")
+    && !value.includes("{")
+    && !value.includes("}");
 }
 
 function validateBrowserAdapterBindings(requirements, adapters) {

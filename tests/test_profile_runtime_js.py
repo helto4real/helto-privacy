@@ -5,10 +5,18 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIVACY_PROFILE = ROOT / "helto_privacy" / "web" / "privacy_profile.js"
+PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
+PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
-    module_path = tmp_path / "privacy_profile.mjs"
+    (tmp_path / "package.json").write_text('{"type":"module"}', encoding="utf-8")
+    (tmp_path / "privacy.js").write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "privacy_client.js").write_text(
+        PRIVACY_CLIENT.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    module_path = tmp_path / "privacy_profile" / "privacy_profile.js"
+    module_path.parent.mkdir()
     module_path.write_text(PRIVACY_PROFILE.read_text(encoding="utf-8"), encoding="utf-8")
     script_path = tmp_path / "test.mjs"
     script_path.write_text(
@@ -19,10 +27,6 @@ def run_node_module_test(tmp_path, body: str) -> None:
 
             const fingerprint = "a".repeat(64);
             const suiteDigest = "d".repeat(64);
-            globalThis.fetch = async () => ({{
-              ok: true,
-              async json() {{ return {{ ok: true }}; }},
-            }});
             const attestation = (overrides = {{}}) => ({{
               id: "helto.director",
               contract: privacy.PRIVACY_CONTRACT_V2,
@@ -37,6 +41,7 @@ def run_node_module_test(tmp_path, body: str) -> None:
                   "apply",
                   "clear",
                   "normalize",
+                  "onPrivacySessionChange",
                   "reconcileNode",
                   "reconcileNodeDefinition",
                 ],
@@ -48,8 +53,35 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 {{ id: "thumbnail", kind: "artifact" }},
                 {{ id: "render", kind: "execution" }},
               ],
+              modeScopes: [
+                {{ id: "global", modeResourceId: "privacy-mode" }},
+              ],
+              protectedOperations: [
+                {{
+                  id: "record.use",
+                  resourceId: "library",
+                  route: "/helto-test/records/use",
+                  method: "POST",
+                }},
+              ],
               ...overrides,
             }});
+            let serverAttestation = () => attestation();
+            globalThis.fetch = async (url) => {{
+              const target = String(url);
+              let payload = {{ ok: true }};
+              if (target.includes("/profiles/") && !target.endsWith("/modes")) {{
+                payload = serverAttestation();
+              }} else if (target.endsWith("/unlock")) {{
+                payload = {{ ok: true, token: "SYNTHETIC_SESSION_TOKEN" }};
+              }}
+              return {{
+                ok: true,
+                status: 200,
+                async json() {{ return payload; }},
+                async text() {{ return JSON.stringify(payload); }},
+              }};
+            }};
 
             {textwrap.dedent(body)}
             """
@@ -71,11 +103,13 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         tmp_path,
         """
         const calls = [];
+        const sessionCalls = [];
         const adapter = {
           secret: "MUST_NOT_ESCAPE",
           apply() {},
           clear() {},
           normalize() {},
+          onPrivacySessionChange(session) { sessionCalls.push(session); },
           reconcileNode(node, context) { calls.push([node.id, context.phase]); },
           reconcileNodeDefinition(_nodeType, nodeData, context) {
             calls.push([nodeData.name, context.phase]);
@@ -95,7 +129,6 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
           profileFingerprint: fingerprint,
           suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": adapter },
-          fetchProfile: async () => attestation(),
         };
 
         const pack = await privacy.connectPrivacyPack(options);
@@ -105,11 +138,27 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         assert.equal(app.registerCount, 1);
         assert.deepEqual(calls, [["HeltoTimeline", "definition-existing"], [1, "existing"]]);
         assert(pack.authorization instanceof privacy.BrowserAuthorizationHandle);
+        assert.equal(typeof pack.authorization.request, "undefined");
+        assert(typeof pack.session.subscribe === "function");
         assert(pack.mode("privacy-mode") instanceof privacy.BrowserModeHandle);
         assert(pack.workflow("timeline") instanceof privacy.BrowserWorkflowHandle);
         assert(pack.records("library") instanceof privacy.BrowserRecordHandle);
+        assert(typeof pack.records("library").invoke === "function");
         assert(pack.artifacts("thumbnail") instanceof privacy.BrowserArtifactHandle);
         assert(pack.execution("render") instanceof privacy.BrowserExecutionHandle);
+        assert.deepEqual(
+          await pack.records("library").invoke(
+            "record.use",
+            { recordId: "synthetic-record" },
+          ),
+          { ok: true },
+        );
+        assert.throws(
+          () => pack.records("library").invoke(
+            "record.delete",
+          ),
+          (error) => error.code === "unknown_browser_operation",
+        );
 
         await app.extension.nodeCreated({ id: 3, type: "HeltoTimeline" });
         await app.extension.loadedGraphNode({ id: 4, comfyClass: "HeltoTimeline" });
@@ -127,6 +176,21 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         assert(!JSON.stringify(pack).includes("MUST_NOT_ESCAPE"));
         assert.equal("token" in pack, false);
         assert.equal("decrypt" in pack, false);
+
+        const sessionEvents = [];
+        const unsubscribe = pack.session.subscribe((event) => sessionEvents.push(event));
+        globalThis.localStorage = {
+          getItem: () => "",
+          setItem() {},
+          removeItem() {},
+        };
+        const shared = await import(new URL("./privacy.js", import.meta.url));
+        await shared.unlockPrivacyKeystore("synthetic password");
+        assert.equal(sessionEvents.at(-1).state, "unlocked");
+        assert.equal(sessionCalls.at(-1).state, "unlocked");
+        assert(!JSON.stringify(sessionEvents).includes("SYNTHETIC_SESSION_TOKEN"));
+        assert(!JSON.stringify(sessionCalls).includes("SYNTHETIC_SESSION_TOKEN"));
+        unsubscribe();
         """,
     )
 
@@ -142,24 +206,23 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
           profileFingerprint: fingerprint,
           suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": {
-            apply() {}, clear() {}, normalize() {},
-            reconcileNode() {}, reconcileNodeDefinition() {},
+                apply() {}, clear() {}, normalize() {},
+                onPrivacySessionChange() {},
+                reconcileNode() {}, reconcileNodeDefinition() {},
           } },
         };
 
+        serverAttestation = () => attestation({ fingerprint: "b".repeat(64) });
         await assert.rejects(
-          () => privacy.connectPrivacyPack({
-            ...base,
-            fetchProfile: async () => attestation({ fingerprint: "b".repeat(64) }),
-          }),
+          () => privacy.connectPrivacyPack(base),
           (error) => error.code === "browser_server_attestation_drift"
             && !error.message.includes("helto.director"),
         );
+        serverAttestation = () => attestation();
         await assert.rejects(
           () => privacy.connectPrivacyPack({
             ...base,
             suiteManifestDigest: "e".repeat(64),
-            fetchProfile: async () => attestation(),
           }),
           (error) => error.code === "browser_server_attestation_drift",
         );
@@ -167,7 +230,6 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
           () => privacy.connectPrivacyPack({
             ...base,
             adapters: {},
-            fetchProfile: async () => attestation(),
           }),
           (error) => error.code === "browser_adapter_mismatch",
         );
@@ -175,22 +237,17 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
           () => privacy.connectPrivacyPack({
             ...base,
             adapters: { "timeline-editor": {} },
-            fetchProfile: async () => attestation(),
           }),
           (error) => error.code === "browser_adapter_mismatch",
         );
+        serverAttestation = () => attestation({ status: "waiting_for_prompt_server" });
         await assert.rejects(
-          () => privacy.connectPrivacyPack({
-            ...base,
-            fetchProfile: async () => attestation({ status: "waiting_for_prompt_server" }),
-          }),
+          () => privacy.connectPrivacyPack(base),
           (error) => error.code === "server_profile_not_ready",
         );
 
-        const verificationPack = await privacy.connectPrivacyPack({
-          ...base,
-          fetchProfile: async () => attestation({ suiteStatus: "activation-required" }),
-        });
+        serverAttestation = () => attestation({ suiteStatus: "activation-required" });
+        const verificationPack = await privacy.connectPrivacyPack(base);
         verificationPack.readiness.requireReady();
         assert.throws(
           () => verificationPack.authorization.requireReady(),
@@ -207,6 +264,7 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
         const app = { graph: { nodes: [] }, registerExtension() {} };
         const adapter = {
           apply() {}, clear() {}, normalize() {},
+          onPrivacySessionChange() {},
           reconcileNode() {}, reconcileNodeDefinition() {},
         };
         const pack = await privacy.connectPrivacyPack({
@@ -215,7 +273,6 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
           profileFingerprint: fingerprint,
           suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": adapter },
-          fetchProfile: async () => attestation(),
         });
 
         assert.equal(await privacy.connectPrivacyPack({
@@ -224,10 +281,10 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
           profileFingerprint: fingerprint,
           suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": {
-            apply() {}, clear() {}, normalize() {},
-            reconcileNode() {}, reconcileNodeDefinition() {},
+                apply() {}, clear() {}, normalize() {},
+                onPrivacySessionChange() {},
+                reconcileNode() {}, reconcileNodeDefinition() {},
           } },
-          fetchProfile: async () => attestation(),
         }), pack);
         await assert.rejects(
           () => privacy.connectPrivacyPack({
@@ -236,7 +293,6 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
             profileFingerprint: fingerprint,
             suiteManifestDigest: suiteDigest,
             adapters: { "timeline-editor": {} },
-            fetchProfile: async () => attestation(),
           }),
           (error) => error.code === "browser_adapter_mismatch",
         );
@@ -249,7 +305,6 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
             profileFingerprint: "b".repeat(64),
             suiteManifestDigest: suiteDigest,
             adapters: { "timeline-editor": adapter },
-            fetchProfile: async () => attestation({ fingerprint: "b".repeat(64) }),
           }),
           (error) => error.code === "browser_profile_conflict",
         );
@@ -262,7 +317,6 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
             profileFingerprint: fingerprint,
             suiteManifestDigest: suiteDigest,
             adapters: { "timeline-editor": adapter },
-            fetchProfile: async () => attestation(),
           }),
           (error) => error.code === "browser_pack_blocked",
         );
