@@ -350,27 +350,27 @@ def _utils_formats() -> dict[str, Any]:
 
     selector_values = {
         "edited_bboxes": (
-            '{"synthetic-image":[0,0,1,1]}',
-            "c90503eb5d0c18aff0fc2b78",
+            '{"/synthetic/root/a.png":[{"height":4,"width":3,"x":1,"y":2}]}'
         ),
         "edited_masks": (
-            '{"synthetic-image":"SYNTHETIC_MASK_REFERENCE"}',
-            "0463d744b87f15e828424465",
+            '{"/synthetic/root/a.png":{"key":"synthetic-legacy-mask"}}'
         ),
-        "selected_images": (
-            '{"selected":["SYNTHETIC_SELECTOR_IMAGE"]}',
-            "73f8755ab7d10214aac78088",
-        ),
+        "selected_images": '["/synthetic/root/a.png"]',
     }
-    generations["priv2"]["selectorMigration"] = {}
-    for name, (plain, nonce) in selector_values.items():
-        encrypted = _priv2(plain.encode(), key, bytes.fromhex(nonce))
-        workflow_value = "__HELTO_ENC__:" + base64.b64encode(encrypted).decode()
-        generations["priv2"]["selectorMigration"][name] = {
-            "expected": plain,
-            "workflow": workflow_value,
-            "workflowSha256": _sha(workflow_value.encode()),
-        }
+    nonce_lengths = {"raw-xor": 16, "priv1": 16, "priv2": 12, "priv3": 4}
+    for generation, (encrypt, _nonces) in specifications.items():
+        generations[generation]["selectorMigration"] = {}
+        for name, plain in selector_values.items():
+            nonce = hashlib.sha256(
+                f"selector-{generation}-{name}".encode("ascii")
+            ).digest()[: nonce_lengths[generation]]
+            encrypted = encrypt(plain.encode(), nonce)
+            workflow_value = "__HELTO_ENC__:" + base64.b64encode(encrypted).decode()
+            generations[generation]["selectorMigration"][name] = {
+                "expected": plain,
+                "workflow": workflow_value,
+                "workflowSha256": _sha(workflow_value.encode()),
+            }
 
     return {
         "fixtureVersion": 1,

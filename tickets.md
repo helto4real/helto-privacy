@@ -305,14 +305,14 @@ masks.
 
 **Blocked by:** Move selector masks and thumbnails to managed artifacts.
 
-- [ ] Declare selected images, edited masks, and edited bounding boxes as one
+- [x] Declare selected images, edited masks, and edited bounding boxes as one
       normalized workflow resource with private-by-default mode and semantic
       execution projection.
-- [ ] Implement real locate, normalize, apply, clear, root authorization, and
+- [x] Implement real locate, normalize, apply, clear, root authorization, and
       product-operation adapters without moving selector domain logic shared.
-- [ ] Protect scan, source view, thumbnail, mask, paste, delete, cache, and root
+- [x] Protect scan, source view, thumbnail, mask, paste, delete, cache, and root
       operations through bound authorization/workflow/artifact handles.
-- [ ] Prove every historical byte generation and referenced mask migrates in one
+- [x] Prove every historical byte generation and referenced mask migrates in one
       receipt, and any failure preserves all original workflow and mask bytes.
 
 ## Move Prompt Enhancer and provider credentials

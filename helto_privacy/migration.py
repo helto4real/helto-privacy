@@ -151,6 +151,22 @@ class MigrationReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class MigrationGroupReceipt:
+    """One safe receipt shared by an atomic set of migration obligations."""
+
+    id: str
+    obligation_ids: tuple[str, ...]
+    disposition: str = "migrated"
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "receiptId": self.id,
+            "obligationIds": list(self.obligation_ids),
+            "disposition": self.disposition,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class RetirementSeal:
     """Safe per-reader seal over one explicit audit scope and discovery epoch."""
 
@@ -459,8 +475,11 @@ class MigrationHandle:
             if any(
                 isinstance(pending, dict)
                 and pending.get("phase") == "finalize-pending"
-                and isinstance(obligations.get(pending.get("obligationId")), dict)
-                and obligations[pending["obligationId"]].get("readerId") == reader_id
+                and any(
+                    isinstance(obligations.get(obligation_id), dict)
+                    and obligations[obligation_id].get("readerId") == reader_id
+                    for obligation_id in _pending_obligation_ids(pending)
+                )
                 for pending in state.get("transactions", {}).values()
             ):
                 raise MigrationError("audit_scope_has_pending_finalization")
@@ -751,7 +770,7 @@ class MigrationHandle:
                     (transaction_id, item)
                     for transaction_id, item in state.get("transactions", {}).items()
                     if isinstance(item, dict)
-                    and item.get("obligationId") == obligation_id
+                    and obligation_id in _pending_obligation_ids(item)
                     and item.get("phase") == "prepared"
                 ),
                 ("", None),
@@ -777,22 +796,39 @@ class MigrationHandle:
         authorization: object,
     ) -> MigrationReceipt:
         with _exclusive_migration_transaction():
-            return self._complete(
-                obligation_id,
+            receipt = self._complete_many(
+                (obligation_id,),
+                expected_normalized,
+                transaction,
+                authorization,
+            )
+        return MigrationReceipt(receipt.id, obligation_id)
+
+    def complete_many(
+        self,
+        obligation_ids: Iterable[str],
+        expected_normalized: object,
+        transaction: object,
+        authorization: object,
+    ) -> MigrationGroupReceipt:
+        """Rewrite several obligations under one commit and one receipt."""
+
+        normalized_ids = _normalized_obligation_ids(obligation_ids)
+        with _exclusive_migration_transaction():
+            return self._complete_many(
+                normalized_ids,
                 expected_normalized,
                 transaction,
                 authorization,
             )
 
-    def _complete(
+    def _complete_many(
         self,
-        obligation_id: str,
+        obligation_ids: tuple[str, ...],
         expected_normalized: object,
         transaction: object,
         authorization: object,
-    ) -> MigrationReceipt:
-        """Rewrite, read back, and receipt one obligation as one transaction."""
-
+    ) -> MigrationGroupReceipt:
         require_current_authorization(
             authorization,
             "migration.complete",
@@ -812,69 +848,77 @@ class MigrationHandle:
 
         with _LOCK:
             state = _load_state()
-            item = state.get("obligations", {}).get(obligation_id)
-            if not isinstance(item, dict) or item.get("packId") != self._profile.id:
+            items = tuple(
+                state.get("obligations", {}).get(obligation_id)
+                for obligation_id in obligation_ids
+            )
+            if any(
+                not isinstance(item, dict) or item.get("packId") != self._profile.id
+                for item in items
+            ):
                 raise MigrationError("unknown_migration_obligation")
-            existing_receipt_id = ""
-            finalize_pending_id = ""
-            finalize_pending = None
-            if item.get("disposition") != "unresolved":
-                existing_receipt_id = str(item.get("receiptId") or "")
-                finalize_pending_id, finalize_pending = next(
-                    (
-                        (transaction_id, pending)
-                        for transaction_id, pending in state.get("transactions", {}).items()
-                        if isinstance(pending, dict)
-                        and pending.get("obligationId") == obligation_id
-                        and pending.get("phase") == "finalize-pending"
-                    ),
-                    ("", None),
-                )
-                if not existing_receipt_id:
+            dispositions = tuple(str(item.get("disposition") or "unresolved") for item in items)
+            receipt_ids = {str(item.get("receiptId") or "") for item in items}
+            if all(disposition == "migrated" for disposition in dispositions):
+                if len(receipt_ids) != 1 or "" in receipt_ids:
                     raise MigrationError("migration_obligation_closed")
+                existing_receipt_id = next(iter(receipt_ids))
+            elif any(disposition != "unresolved" for disposition in dispositions):
+                raise MigrationError("migration_obligation_closed")
+            else:
+                existing_receipt_id = ""
+            pending_id, pending = next(
+                (
+                    (transaction_id, item)
+                    for transaction_id, item in state.get("transactions", {}).items()
+                    if isinstance(item, dict)
+                    and _pending_obligation_ids(item) == obligation_ids
+                    and item.get("phase") == "finalize-pending"
+                ),
+                ("", None),
+            )
 
         if existing_receipt_id:
-            if finalize_pending_id and isinstance(finalize_pending, dict):
-                stored_expected = _restore_json_value(finalize_pending.get("expected"))
-                original = _restore_json_value(finalize_pending.get("original"))
-                if not hmac.compare_digest(
-                    _canonical_value(stored_expected),
-                    _canonical_value(expected_normalized),
-                ):
-                    raise MigrationError("migration_expected_value_mismatch")
+            if not pending_id or not isinstance(pending, dict):
+                return MigrationGroupReceipt(existing_receipt_id, obligation_ids)
+            stored_expected = _restore_json_value(pending.get("expected"))
+            original = _restore_json_value(pending.get("original"))
+            if not hmac.compare_digest(
+                _canonical_value(stored_expected),
+                _canonical_value(expected_normalized),
+            ):
+                raise MigrationError("migration_expected_value_mismatch")
+            try:
+                verification = transaction.read_back()
+            except Exception:
+                verification = None
+            if not _verification_matches(verification, stored_expected):
                 try:
-                    verification = transaction.read_back()
+                    transaction.rollback(original)
                 except Exception:
-                    verification = None
-                if not _verification_matches(verification, stored_expected):
-                    try:
-                        transaction.rollback(original)
-                    except Exception:
-                        raise MigrationError("migration_rollback_failed") from None
-                    with _LOCK:
-                        state = _load_state()
-                        rollback_item = state.get("obligations", {}).get(obligation_id)
-                        if isinstance(rollback_item, dict):
-                            rollback_item["disposition"] = "unresolved"
-                            rollback_item.pop("receiptId", None)
-                        state.get("receipts", {}).pop(existing_receipt_id, None)
-                        state.get("transactions", {}).pop(finalize_pending_id, None)
-                        _save_state(state)
-                    raise MigrationError("migration_verification_failed")
+                    raise MigrationError("migration_rollback_failed") from None
                 with _LOCK:
                     state = _load_state()
-                    # Re-persist the visible receipt to establish durability
-                    # before the original representation is retired.
+                    for obligation_id in obligation_ids:
+                        item = state.get("obligations", {}).get(obligation_id)
+                        if isinstance(item, dict):
+                            item["disposition"] = "unresolved"
+                            item.pop("receiptId", None)
+                    state.get("receipts", {}).pop(existing_receipt_id, None)
+                    state.get("transactions", {}).pop(pending_id, None)
                     _save_state(state)
-                try:
-                    transaction.finalize(original)
-                except Exception:
-                    raise MigrationError("migration_finalization_pending") from None
-                with _LOCK:
-                    state = _load_state()
-                    state.get("transactions", {}).pop(finalize_pending_id, None)
-                    _save_state(state)
-            return MigrationReceipt(existing_receipt_id, obligation_id)
+                raise MigrationError("migration_verification_failed")
+            with _LOCK:
+                _save_state(_load_state())
+            try:
+                transaction.finalize(original)
+            except Exception:
+                raise MigrationError("migration_finalization_pending") from None
+            with _LOCK:
+                state = _load_state()
+                state.get("transactions", {}).pop(pending_id, None)
+                _save_state(state)
+            return MigrationGroupReceipt(existing_receipt_id, obligation_ids)
 
         try:
             original = transaction.capture_original()
@@ -888,17 +932,23 @@ class MigrationHandle:
         transaction_id = f"hp-transaction-{secrets.token_hex(16)}"
         with _LOCK:
             state = _load_state()
-            item = state.get("obligations", {}).get(obligation_id)
-            if not isinstance(item, dict) or item.get("disposition") != "unresolved":
+            items = tuple(
+                state.get("obligations", {}).get(obligation_id)
+                for obligation_id in obligation_ids
+            )
+            if any(
+                not isinstance(item, dict) or item.get("disposition") != "unresolved"
+                for item in items
+            ):
                 raise MigrationError("migration_obligation_closed")
             if any(
-                isinstance(pending, dict)
-                and pending.get("obligationId") == obligation_id
+                set(_pending_obligation_ids(pending)).intersection(obligation_ids)
                 for pending in state.get("transactions", {}).values()
+                if isinstance(pending, dict)
             ):
                 raise MigrationError("migration_obligation_in_progress")
             state.setdefault("transactions", {})[transaction_id] = {
-                "obligationId": obligation_id,
+                "obligationIds": list(obligation_ids),
                 "original": protected_original,
                 "expected": protected_expected,
                 "phase": "prepared",
@@ -930,14 +980,21 @@ class MigrationHandle:
         try:
             with _LOCK:
                 state = _load_state()
-                item = state.get("obligations", {}).get(obligation_id)
-                if not isinstance(item, dict) or item.get("disposition") != "unresolved":
+                items = tuple(
+                    state.get("obligations", {}).get(obligation_id)
+                    for obligation_id in obligation_ids
+                )
+                if any(
+                    not isinstance(item, dict) or item.get("disposition") != "unresolved"
+                    for item in items
+                ):
                     raise MigrationError("migration_obligation_closed")
-                item["disposition"] = "migrated"
-                item["receiptId"] = receipt_id
+                for item in items:
+                    item["disposition"] = "migrated"
+                    item["receiptId"] = receipt_id
                 state.setdefault("receipts", {})[receipt_id] = {
-                    "obligationId": obligation_id,
-                    "readerId": item.get("readerId"),
+                    "obligationIds": list(obligation_ids),
+                    "readerIds": sorted({str(item.get("readerId") or "") for item in items}),
                     "verified": True,
                     "createdAtNs": time.time_ns(),
                 }
@@ -951,18 +1008,15 @@ class MigrationHandle:
             try:
                 with _LOCK:
                     rollback_state = _load_state()
-                    rollback_item = rollback_state.get("obligations", {}).get(
-                        obligation_id
-                    )
-                    if isinstance(rollback_item, dict):
-                        rollback_item["disposition"] = "unresolved"
-                        rollback_item.pop("receiptId", None)
+                    for obligation_id in obligation_ids:
+                        item = rollback_state.get("obligations", {}).get(obligation_id)
+                        if isinstance(item, dict):
+                            item["disposition"] = "unresolved"
+                            item.pop("receiptId", None)
                     rollback_state.get("receipts", {}).pop(receipt_id, None)
                     rollback_state.get("transactions", {}).pop(transaction_id, None)
                     _save_state(rollback_state)
             except MigrationError:
-                # Product bytes are authoritative again. Any unreadable or
-                # uncertain evidence state blocks future migration operations.
                 pass
             raise persistence_error
 
@@ -970,12 +1024,12 @@ class MigrationHandle:
             transaction.finalize(original)
         except Exception:
             raise MigrationError("migration_finalization_pending") from None
-
         with _LOCK:
             state = _load_state()
             state.get("transactions", {}).pop(transaction_id, None)
             _save_state(state)
-        return MigrationReceipt(receipt_id, obligation_id)
+        return MigrationGroupReceipt(receipt_id, obligation_ids)
+
 
 
 @contextmanager
@@ -1023,6 +1077,28 @@ def _exclusive_migration_transaction():
             fcntl.flock(descriptor, fcntl.LOCK_UN)
         finally:
             os.close(descriptor)
+
+
+def _normalized_obligation_ids(obligation_ids: Iterable[str]) -> tuple[str, ...]:
+    try:
+        normalized = tuple(obligation_ids)
+    except TypeError:
+        raise MigrationError("invalid_migration_obligation_set") from None
+    if (
+        not normalized
+        or any(not isinstance(item, str) or not item for item in normalized)
+        or len(normalized) != len(set(normalized))
+    ):
+        raise MigrationError("invalid_migration_obligation_set")
+    return tuple(sorted(normalized))
+
+
+def _pending_obligation_ids(pending: Mapping[str, object]) -> tuple[str, ...]:
+    grouped = pending.get("obligationIds")
+    if isinstance(grouped, list) and all(isinstance(item, str) for item in grouped):
+        return tuple(grouped)
+    single = pending.get("obligationId")
+    return (single,) if isinstance(single, str) and single else ()
 
 
 def migration_state_path() -> Path:

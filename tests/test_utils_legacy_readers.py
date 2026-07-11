@@ -218,10 +218,11 @@ def test_utils_fixture_catalog_is_content_addressed_and_provenance_recorded():
                     separators=(",", ":"),
                 ).encode("utf-8")
                 assert hashlib.sha256(canonical).hexdigest() == item[name]["sha256"]
-    for field in fixture["generations"]["priv2"]["selectorMigration"].values():
-        assert hashlib.sha256(field["workflow"].encode("utf-8")).hexdigest() == field[
-            "workflowSha256"
-        ]
+    for generation in fixture["generations"].values():
+        for field in generation["selectorMigration"].values():
+            assert hashlib.sha256(field["workflow"].encode("utf-8")).hexdigest() == field[
+                "workflowSha256"
+            ]
 
 
 def test_authenticated_generations_and_containers_fail_closed_on_derived_mutations():

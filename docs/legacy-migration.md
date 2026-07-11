@@ -82,6 +82,15 @@ cannot interfere with an active owner. A visible finalize-pending receipt is
 re-persisted and its current representation is read back again before source
 retirement, including after an earlier durability error.
 
+When one product boundary contains several independently discovered locations,
+use `pack.migration.complete_many(...)`. It runs the fixed transaction once,
+attaches one receipt to every supplied obligation, and keeps the whole set
+unresolved if staging, commit, read-back, receipt persistence, or rollback
+fails. Finalization resumes as one group after interruption. The
+single-obligation `complete(...)` method uses the same implementation with a
+one-item obligation set. Group identity is canonical and independent of caller
+ordering; retirement seals remain blocked until grouped finalization finishes.
+
 Every protected migration-state read/modify/write operation uses that same
 inter-process lock. Every keystore mutator likewise shares a separate
 inter-process lock, preventing concurrent ComfyUI processes from overwriting

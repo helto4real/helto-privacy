@@ -81,7 +81,7 @@ class Reader:
         self.read_obligation_counts = []
 
     def probe(self, source, _context):
-        return source == "SYNTHETIC_LEGACY_VALUE"
+        return isinstance(source, str) and source.startswith("SYNTHETIC_LEGACY_VALUE")
 
     def read(self, _source, context):
         self.read_obligation_counts.append(context.unresolved_count)
@@ -294,6 +294,129 @@ def test_verified_transaction_receipt_is_all_or_nothing(migration_pack):
     assert transaction.rollback_values == []
     stored = (tmp_path / "migration" / "state.json").read_text(encoding="utf-8")
     assert "SYNTHETIC" not in stored
+
+
+def test_grouped_transaction_closes_every_obligation_with_one_receipt(migration_pack):
+    pack, _reader, token, _tmp_path = migration_pack
+    read_authorization = authorize_privacy_request(
+        Request(token),
+        "migration.read",
+        pack_id=pack.profile.id,
+    )
+    discovered = tuple(
+        pack.migration.discover_and_read(
+            "state-v1-binding",
+            f"SYNTHETIC_LEGACY_VALUE_{field_name}",
+            read_authorization,
+        )
+        for field_name in ("selected", "masks", "bboxes")
+    )
+    obligation_ids = tuple(item.obligation.id for item in discovered)
+    transaction = MigrationTransaction()
+
+    receipt = pack.migration.complete_many(
+        obligation_ids,
+        {"value": "SYNTHETIC_NORMALIZED_VALUE"},
+        transaction,
+        authorize_privacy_request(
+            Request(token),
+            "migration.complete",
+            pack_id=pack.profile.id,
+        ),
+    )
+
+    assert receipt.obligation_ids == tuple(sorted(obligation_ids))
+    assert receipt.disposition == "migrated"
+    assert {
+        pack.migration.obligation(obligation_id).disposition
+        for obligation_id in obligation_ids
+    } == {"migrated"}
+    assert transaction.finalized is True
+
+
+def test_grouped_transaction_failure_leaves_every_obligation_open(migration_pack):
+    pack, _reader, token, _tmp_path = migration_pack
+    read_authorization = authorize_privacy_request(
+        Request(token),
+        "migration.read",
+        pack_id=pack.profile.id,
+    )
+    discovered = tuple(
+        pack.migration.discover_and_read(
+            "state-v1-binding",
+            f"SYNTHETIC_LEGACY_VALUE_{field_name}",
+            read_authorization,
+        )
+        for field_name in ("selected", "masks", "bboxes")
+    )
+    obligation_ids = tuple(item.obligation.id for item in discovered)
+    transaction = MigrationTransaction(valid_readback=False)
+    original = transaction.original
+
+    with pytest.raises(migration.MigrationError) as failure:
+        pack.migration.complete_many(
+            obligation_ids,
+            {"value": "SYNTHETIC_NORMALIZED_VALUE"},
+            transaction,
+            authorize_privacy_request(
+                Request(token),
+                "migration.complete",
+                pack_id=pack.profile.id,
+            ),
+        )
+
+    assert failure.value.code == "migration_verification_failed"
+    assert transaction.original == original
+    assert {
+        pack.migration.obligation(obligation_id).disposition
+        for obligation_id in obligation_ids
+    } == {"unresolved"}
+
+
+def test_grouped_receipt_resumes_one_pending_finalization(migration_pack):
+    pack, _reader, token, _tmp_path = migration_pack
+    discovered = tuple(
+        pack.migration.discover_and_read(
+            "state-v1-binding",
+            f"SYNTHETIC_LEGACY_VALUE_{field_name}",
+            authorize_privacy_request(
+                Request(token),
+                "migration.read",
+                pack_id=pack.profile.id,
+            ),
+        )
+        for field_name in ("selected", "masks", "bboxes")
+    )
+    obligation_ids = tuple(item.obligation.id for item in discovered)
+    transaction = MigrationTransaction(fail_finalize=True)
+
+    with pytest.raises(migration.MigrationError) as pending:
+        pack.migration.complete_many(
+            obligation_ids,
+            {"value": "SYNTHETIC_NORMALIZED_VALUE"},
+            transaction,
+            authorize_privacy_request(
+                Request(token),
+                "migration.complete",
+                pack_id=pack.profile.id,
+            ),
+        )
+    assert pending.value.code == "migration_finalization_pending"
+
+    transaction.fail_finalize = False
+    receipt = pack.migration.complete_many(
+        tuple(reversed(obligation_ids)),
+        {"value": "SYNTHETIC_NORMALIZED_VALUE"},
+        transaction,
+        authorize_privacy_request(
+            Request(token),
+            "migration.complete",
+            pack_id=pack.profile.id,
+        ),
+    )
+
+    assert receipt.obligation_ids == tuple(sorted(obligation_ids))
+    assert transaction.original is None
 
 
 def test_failed_verification_restores_exact_original_and_keeps_obligation_open(
@@ -736,6 +859,63 @@ def test_reader_cannot_seal_while_an_obligation_exists_outside_the_scope(
             ),
         )
     assert unresolved.value.code == "audit_scope_has_unresolved_migrations"
+
+
+def test_reader_cannot_seal_while_group_finalization_is_pending(migration_pack):
+    pack, _reader, token, _tmp_path = migration_pack
+    items = tuple(
+        migration.AuditItem(name, migration.AuditItemKind.WORKFLOW)
+        for name in ("workflow-a", "workflow-b")
+    )
+    pack.migration.declare_audit_scope(
+        "manual-workflows",
+        "state-v1",
+        items,
+        authorize_privacy_request(
+            Request(token),
+            "migration.audit.declare",
+            pack_id=pack.profile.id,
+        ),
+    )
+    discovered = tuple(
+        pack.migration.audit_source(
+            "manual-workflows",
+            item.id,
+            "state-v1-binding",
+            f"SYNTHETIC_LEGACY_VALUE_{item.id}",
+            authorize_privacy_request(
+                Request(token),
+                "migration.audit.read",
+                pack_id=pack.profile.id,
+            ),
+        )
+        for item in items
+    )
+    transaction = MigrationTransaction(fail_finalize=True)
+    with pytest.raises(migration.MigrationError):
+        pack.migration.complete_many(
+            tuple(item.obligation.id for item in discovered),
+            {"value": "SYNTHETIC_NORMALIZED_VALUE"},
+            transaction,
+            authorize_privacy_request(
+                Request(token),
+                "migration.complete",
+                pack_id=pack.profile.id,
+            ),
+        )
+
+    with pytest.raises(migration.MigrationError) as pending:
+        pack.migration.confirm_retirement_seal(
+            "manual-workflows",
+            "state-v1",
+            authorize_privacy_request(
+                Request(token),
+                "migration.audit.seal",
+                pack_id=pack.profile.id,
+            ),
+        )
+
+    assert pending.value.code == "audit_scope_has_pending_finalization"
 
 
 @pytest.mark.parametrize("source_format", tuple(migration.LegacyKeyFormat))

@@ -2,7 +2,7 @@
   "id": "helto-cross-repository-acceptance",
   "schema": "helto.privacy.acceptance-catalog.v1",
   "version": 1,
-  "fixtureCatalogSha256": "14b283a86721b563e0854e68af70796af98ef6d4c778e9325c3104071a1bcde8",
+  "fixtureCatalogSha256": "8e6148c615b938848a6501051f85757e86d5a782c49727156843f832082f0c13",
   "environments": [
     {
       "python": "3.13.14",

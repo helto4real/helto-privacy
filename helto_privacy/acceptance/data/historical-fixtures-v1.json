@@ -19,7 +19,7 @@
       "producerFunction": "services/privacy.py:encrypt_state",
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "aio_v1_state.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": "sha256:helto-aio-v1-historical-fixture-key"
     },
     {
@@ -38,7 +38,7 @@
       "producerFunction": "services/privacy.py:encrypt_state",
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "aio_v1_builder_state.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": "sha256:helto-aio-v1-historical-fixture-key"
     },
     {
@@ -57,7 +57,7 @@
       "producerFunction": "shared/privacy.py:encrypt_state",
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "director_v1_state.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": "sha256:helto-director-v1-historical-fixture-key"
     },
     {
@@ -76,7 +76,7 @@
       "producerFunction": "privacy.py:encrypt_state",
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "smart_prompt_v1_state.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": "sha256:helto-smart-prompt-v1-historical-fixture-key"
     },
     {
@@ -95,14 +95,14 @@
       "producerFunction": "web/js/smart_prompt_manager.js:buildSpmExportPackage",
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "smart_prompt_v1_export.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": "sha256:helto-smart-prompt-v1-historical-fixture-key"
     },
     {
       "id": "utils-legacy-formats",
       "kind": "historical",
       "sourcePath": "utils_legacy_formats.json",
-      "fixtureSha256": "36181cb95991270fd04cc202338bc503ba17427eeda290ebd694a89e8f269b07",
+      "fixtureSha256": "6bc35b55fc06bc8d266eb4605fd3c964631adf70a7e89ee0f040de3a0218703c",
       "ciphertextSha256": "ae95d39016ba6f1188b1c52393046a7e3a3f67f8cf50f43ba49a8049c3603d17",
       "expectedNormalizedSha256": "a59b8f48a83d460862081bea9a53ad41d6fd7c98057bae8af9ed3edf5492d2ea",
       "readerId": "utils-all-historical-readers-v1",
@@ -114,14 +114,14 @@
       "producerFunction": "shared/privacy.py and helto_selector_backend/crypto.py",
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "utils_legacy_formats.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": "sha256:helto-utils-test-keys"
     },
     {
       "id": "utils-priv1-tag-tamper",
       "kind": "derived",
       "sourcePath": "utils_legacy_formats.json",
-      "fixtureSha256": "36181cb95991270fd04cc202338bc503ba17427eeda290ebd694a89e8f269b07",
+      "fixtureSha256": "6bc35b55fc06bc8d266eb4605fd3c964631adf70a7e89ee0f040de3a0218703c",
       "ciphertextSha256": "855b00b75c25df627f285c15f247476ec64b72a0b404f1e1068070844baa8511",
       "expectedNormalizedSha256": "02526572f044b61d64e943ff02a51589c0bdd98888f9985f6d16ddff369d532e",
       "readerId": "utils-priv1-v1",
@@ -133,7 +133,7 @@
       "producerFunction": null,
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "utils_legacy_formats.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": null,
       "sourceFixtureId": "utils-legacy-formats",
       "mutation": "flip-final-byte"
@@ -142,7 +142,7 @@
       "id": "utils-priv2-tag-tamper",
       "kind": "derived",
       "sourcePath": "utils_legacy_formats.json",
-      "fixtureSha256": "36181cb95991270fd04cc202338bc503ba17427eeda290ebd694a89e8f269b07",
+      "fixtureSha256": "6bc35b55fc06bc8d266eb4605fd3c964631adf70a7e89ee0f040de3a0218703c",
       "ciphertextSha256": "ab62401dc91dab2d3e9bc8d7c496061bfef435268f07032187e6d40d075fc820",
       "expectedNormalizedSha256": "02526572f044b61d64e943ff02a51589c0bdd98888f9985f6d16ddff369d532e",
       "readerId": "utils-priv2-v1",
@@ -154,7 +154,7 @@
       "producerFunction": null,
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "utils_legacy_formats.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": null,
       "sourceFixtureId": "utils-legacy-formats",
       "mutation": "flip-final-byte"
@@ -163,7 +163,7 @@
       "id": "utils-priv3-truncation",
       "kind": "derived",
       "sourcePath": "utils_legacy_formats.json",
-      "fixtureSha256": "36181cb95991270fd04cc202338bc503ba17427eeda290ebd694a89e8f269b07",
+      "fixtureSha256": "6bc35b55fc06bc8d266eb4605fd3c964631adf70a7e89ee0f040de3a0218703c",
       "ciphertextSha256": "d14909f15a2392e7fe7eb9b74596f2077e94ac74cbdc8c2091c1867bc4bccefc",
       "expectedNormalizedSha256": "5544b1c84ce088d88964c6e6281e04933d2b5c4388d87f8502bc98369f4221dd",
       "readerId": "utils-priv3-v1",
@@ -175,7 +175,7 @@
       "producerFunction": null,
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "utils_legacy_formats.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": null,
       "sourceFixtureId": "utils-legacy-formats",
       "mutation": "remove-final-byte"
@@ -184,7 +184,7 @@
       "id": "utils-raw-xor-ungated",
       "kind": "derived",
       "sourcePath": "utils_legacy_formats.json",
-      "fixtureSha256": "36181cb95991270fd04cc202338bc503ba17427eeda290ebd694a89e8f269b07",
+      "fixtureSha256": "6bc35b55fc06bc8d266eb4605fd3c964631adf70a7e89ee0f040de3a0218703c",
       "ciphertextSha256": "43bc99517dab8738f8527e97d439002538483c2a96121e102168910055bf5173",
       "expectedNormalizedSha256": "5544b1c84ce088d88964c6e6281e04933d2b5c4388d87f8502bc98369f4221dd",
       "readerId": "utils-raw-xor-v0",
@@ -196,7 +196,7 @@
       "producerFunction": null,
       "generatorCommand": ["python", "-m", "helto_privacy.acceptance.generate_fixtures", "--check", "--fixture", "utils_legacy_formats.json"],
       "generatorEnvironment": "python-cryptography",
-      "generatorEnvironmentSha256": "c6312c28090cddc142ba0c0d4f2fd0ae3987ac34d53e95a4b123d30ff2acf2c9",
+      "generatorEnvironmentSha256": "119e59b073ef688c3ba25c5f5c869e87d9417d35570fe35c23dd3515c44218d6",
       "keyProvenance": null,
       "sourceFixtureId": "utils-legacy-formats",
       "mutation": "remove-location-carrier"
