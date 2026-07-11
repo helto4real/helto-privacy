@@ -15,6 +15,7 @@ from helto_privacy.comfy_ui import (
 )
 from helto_privacy.envelope import PrivacyEnvelopeCodec
 from helto_privacy.keystore import KEYSTORE_CRYPTO_AVAILABLE
+from _legacy_envelope_fixture import write_legacy_state_fixture
 
 pytestmark = pytest.mark.skipif(
     not KEYSTORE_CRYPTO_AVAILABLE,
@@ -53,8 +54,11 @@ class _FakePromptServer:
 
 
 def _legacy_key_file(directory, codec_schema="helto.test-pack"):
-    codec = PrivacyEnvelopeCodec(codec_schema)
-    envelope = codec.encrypt_state({"secret": "legacy"}, base_dir=directory)
+    envelope, _key, _key_id = write_legacy_state_fixture(
+        directory,
+        codec_schema,
+        {"secret": "legacy"},
+    )
     return envelope
 
 

@@ -42,8 +42,10 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from . import keystore
 from .keystore import PrivacyKeystoreError
@@ -66,6 +68,62 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 
 _ROUTES_REGISTERED = False
 _LEGACY_KEY_DIRS: list[Path] = []
+
+
+def _bootstrap_mutation_denial(
+    request: object,
+    *,
+    require_json: bool,
+) -> tuple[str, int] | None:
+    """Reject browser cross-origin bootstrap mutations before state changes."""
+
+    candidate_headers = getattr(request, "headers", {})
+    headers = candidate_headers if isinstance(candidate_headers, Mapping) else {}
+    fetch_site = str(headers.get("Sec-Fetch-Site") or "").strip().lower()
+    if fetch_site and fetch_site != "same-origin":
+        return "PRIVACY_REQUEST_ORIGIN_INVALID", 403
+
+    origin = str(headers.get("Origin") or "").strip()
+    if origin:
+        host = str(headers.get("Host") or "").strip().lower()
+        scheme = str(getattr(request, "scheme", "") or "").strip().lower()
+        supplied_origin = _origin_identity(origin)
+        effective_origin = _origin_identity(f"{scheme}://{host}")
+        if (
+            supplied_origin is None
+            or effective_origin is None
+            or supplied_origin != effective_origin
+        ):
+            return "PRIVACY_REQUEST_ORIGIN_INVALID", 403
+
+    if require_json:
+        content_type = str(
+            getattr(request, "content_type", "")
+            or headers.get("Content-Type")
+            or ""
+        ).partition(";")[0].strip().lower()
+        if content_type != "application/json":
+            return "PRIVACY_REQUEST_CONTENT_TYPE_INVALID", 415
+    return None
+
+
+def _origin_identity(value: str) -> tuple[str, str, int] | None:
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.path not in {"", "/"}
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return parsed.scheme, parsed.hostname.lower(), port
+    except (TypeError, ValueError):
+        return None
 
 
 def register_legacy_key_dir(path: str | os.PathLike[str] | None) -> None:
@@ -149,6 +207,9 @@ def register_helto_privacy_ui(
             record_browser_manifest_attestation,
         )
 
+        denied = _bootstrap_mutation_denial(request, require_json=True)
+        if denied is not None:
+            return _privacy_error_response(web, *denied)
         try:
             payload = await request.json()
             digest = str(payload.get("manifestDigest") or "")
@@ -706,6 +767,9 @@ def register_helto_privacy_ui(
 
     @routes.post(f"{ROUTE_PREFIX}/unlock")
     async def post_helto_privacy_unlock(request):
+        denied = _bootstrap_mutation_denial(request, require_json=True)
+        if denied is not None:
+            return _privacy_error_response(web, *denied)
         try:
             require_active_process_suite()
             payload = await request.json()
@@ -725,7 +789,10 @@ def register_helto_privacy_ui(
             )
 
     @routes.post(f"{ROUTE_PREFIX}/lock")
-    async def post_helto_privacy_lock(_request):
+    async def post_helto_privacy_lock(request):
+        denied = _bootstrap_mutation_denial(request, require_json=True)
+        if denied is not None:
+            return _privacy_error_response(web, *denied)
         try:
             return web.json_response({"ok": True, **keystore.lock_keystore()})
         except Exception:  # noqa: BLE001
@@ -737,6 +804,9 @@ def register_helto_privacy_ui(
 
     @routes.post(f"{ROUTE_PREFIX}/keystore/init")
     async def post_helto_privacy_init(request):
+        denied = _bootstrap_mutation_denial(request, require_json=True)
+        if denied is not None:
+            return _privacy_error_response(web, *denied)
         try:
             require_active_process_suite()
             payload = await request.json()
@@ -756,6 +826,9 @@ def register_helto_privacy_ui(
 
     @routes.post(f"{ROUTE_PREFIX}/keystore/change_password")
     async def post_helto_privacy_change_password(request):
+        denied = _bootstrap_mutation_denial(request, require_json=True)
+        if denied is not None:
+            return _privacy_error_response(web, *denied)
         try:
             require_active_process_suite()
             payload = await request.json()

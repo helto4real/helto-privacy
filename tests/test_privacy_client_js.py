@@ -131,6 +131,8 @@ def test_attested_client_retries_once_without_leaking_token_to_url_or_events(tmp
         );
         assert(calls.every((call) => call.options.credentials === "same-origin"));
         assert(globalThis.document.cookie.includes("REPLACEMENT_TOKEN_CANARY"));
+        assert(globalThis.document.cookie.includes("SameSite=Strict"));
+        assert(!globalThis.document.cookie.includes("SameSite=Lax"));
         assert(!JSON.stringify(events).includes("TOKEN_CANARY"));
         assert.equal(events.at(-1).state, "unlocked");
         assert(Object.isFrozen(requestClient));

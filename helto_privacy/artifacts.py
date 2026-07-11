@@ -341,6 +341,10 @@ async def write_artifact(
     if (declaration.retention is ArtifactRetention.RUN_SCOPED_SPILL) is not _run_scoped:
         raise ArtifactError("PRIVACY_ARTIFACT_RETENTION_INVALID")
     await _run_blocking(_require_private_scope, installation, declaration)
+    try:
+        await _run_blocking(keystore.require_unlocked_session)
+    except keystore.PrivacyKeystoreError:
+        raise ArtifactError("PRIVACY_ARTIFACT_STORAGE_FAILED") from None
     safe_owner = _owner_id(owner_id)
     adapter = adapters.get(declaration.payload_adapter)
     encode = getattr(adapter, "encode", None)

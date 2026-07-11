@@ -5,6 +5,7 @@ import types
 
 import helto_privacy.comfy_ui as comfy_ui
 import helto_privacy.artifacts as artifacts
+import helto_privacy.keystore as keystore
 import helto_privacy.runtime as runtime
 import helto_privacy.suite_runtime as suite_runtime
 from helto_privacy.records import (
@@ -66,6 +67,33 @@ class _Routes:
             return handler
 
         return register
+
+
+def _mutation_request(
+    payload=None,
+    *,
+    origin="http://127.0.0.1:8188",
+    host="127.0.0.1:8188",
+    fetch_site="same-origin",
+    content_type="application/json",
+    scheme="http",
+):
+    async def read_json():
+        return payload or {}
+
+    headers = {
+        "Content-Type": content_type,
+        "Host": host,
+        "Sec-Fetch-Site": fetch_site,
+    }
+    if origin is not None:
+        headers["Origin"] = origin
+    return types.SimpleNamespace(
+        headers=headers,
+        content_type=content_type,
+        json=read_json,
+        scheme=scheme,
+    )
 
 
 def _profile():
@@ -141,6 +169,88 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     prompt_server = types.SimpleNamespace(routes=_Routes())
     assert runtime.reconcile_prompt_server(prompt_server) is True
 
+    bootstrap_payloads = {
+        f"{comfy_ui.ROUTE_PREFIX}/suite/browser-attestation": {
+            "manifestDigest": "a" * 64,
+        },
+        f"{comfy_ui.ROUTE_PREFIX}/unlock": {"password": "synthetic password"},
+        f"{comfy_ui.ROUTE_PREFIX}/lock": {},
+        f"{comfy_ui.ROUTE_PREFIX}/keystore/init": {
+            "password": "synthetic password",
+        },
+        f"{comfy_ui.ROUTE_PREFIX}/keystore/change_password": {
+            "current_password": "synthetic password",
+            "new_password": "synthetic new password",
+        },
+    }
+    for path, payload in bootstrap_payloads.items():
+        handler = prompt_server.routes.handlers[("POST", path)]
+        rejected = asyncio.run(
+            handler(
+                _mutation_request(
+                    payload,
+                    origin="https://attacker.invalid",
+                    fetch_site="cross-site",
+                )
+            )
+        )
+        assert rejected.status == 403
+        assert rejected.data == {
+            "ok": False,
+            "error": "PRIVACY_REQUEST_ORIGIN_INVALID",
+        }
+
+    for path, payload in bootstrap_payloads.items():
+        handler = prompt_server.routes.handlers[("POST", path)]
+        rejected = asyncio.run(
+            handler(_mutation_request(payload, content_type="text/plain"))
+        )
+        assert rejected.status == 415
+        assert rejected.data == {
+            "ok": False,
+            "error": "PRIVACY_REQUEST_CONTENT_TYPE_INVALID",
+        }
+    assert keystore.keystore_status()["keystoreInitialized"] is False
+
+    unlock_handler = prompt_server.routes.handlers[
+        ("POST", f"{comfy_ui.ROUTE_PREFIX}/unlock")
+    ]
+    mismatched_origin = asyncio.run(
+        unlock_handler(
+            _mutation_request(
+                {"password": "synthetic password"},
+                origin="https://attacker.invalid",
+                fetch_site="",
+            )
+        )
+    )
+    assert mismatched_origin.status == 403
+    assert mismatched_origin.data["error"] == "PRIVACY_REQUEST_ORIGIN_INVALID"
+
+    same_site = asyncio.run(
+        unlock_handler(
+            _mutation_request(
+                {"password": "synthetic password"},
+                origin=None,
+                fetch_site="same-site",
+            )
+        )
+    )
+    assert same_site.status == 403
+    assert same_site.data["error"] == "PRIVACY_REQUEST_ORIGIN_INVALID"
+
+    cross_scheme = asyncio.run(
+        unlock_handler(
+            _mutation_request(
+                {"password": "synthetic password"},
+                origin="https://127.0.0.1:8188",
+                fetch_site="same-origin",
+            )
+        )
+    )
+    assert cross_scheme.status == 403
+    assert cross_scheme.data["error"] == "PRIVACY_REQUEST_ORIGIN_INVALID"
+
     monkeypatch.setattr(
         comfy_ui.keystore,
         "keystore_status",
@@ -174,14 +284,8 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         isolated_privacy_paths[1],
     )
 
-    async def unlock_payload():
-        return {"password": "synthetic password"}
-
-    unlock_handler = prompt_server.routes.handlers[
-        ("POST", f"{comfy_ui.ROUTE_PREFIX}/unlock")
-    ]
     blocked_unlock = asyncio.run(
-        unlock_handler(types.SimpleNamespace(json=unlock_payload))
+        unlock_handler(_mutation_request({"password": "synthetic password"}))
     )
     assert blocked_unlock.status == 409
     assert blocked_unlock.data == {
@@ -749,15 +853,12 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     suite._verify_inventory(_inventory(release.manifest))
     register_process_suite(suite)
 
-    async def browser_attestation_payload():
-        return {"manifestDigest": release.manifest.digest}
-
     browser_attestation_handler = prompt_server.routes.handlers[
         ("POST", f"{comfy_ui.ROUTE_PREFIX}/suite/browser-attestation")
     ]
     browser_attestation = asyncio.run(
         browser_attestation_handler(
-            types.SimpleNamespace(json=browser_attestation_payload)
+            _mutation_request({"manifestDigest": release.manifest.digest})
         )
     )
     assert browser_attestation.status == 200
@@ -797,14 +898,8 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
 
     conflicting_browser = asyncio.run(
         browser_attestation_handler(
-            types.SimpleNamespace(
-                json=lambda: _async_value({"manifestDigest": "e" * 64})
-            )
+            _mutation_request({"manifestDigest": "e" * 64})
         )
     )
     assert conflicting_browser.status == 409
     assert suite_runtime.process_suite_status_payload()["suiteStatus"] == "conflict"
-
-
-async def _async_value(value):
-    return value

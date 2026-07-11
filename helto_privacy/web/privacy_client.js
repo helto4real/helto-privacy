@@ -51,8 +51,8 @@ function writePrivacyTokenCookie(token, documentRef = globalThis.document) {
   try {
     if (!documentRef) return;
     documentRef.cookie = token
-      ? `${PRIVACY_TOKEN_STORAGE_KEY}=${encodeURIComponent(String(token))}; path=/; SameSite=Lax`
-      : `${PRIVACY_TOKEN_STORAGE_KEY}=; path=/; SameSite=Lax; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+      ? `${PRIVACY_TOKEN_STORAGE_KEY}=${encodeURIComponent(String(token))}; path=/; SameSite=Strict`
+      : `${PRIVACY_TOKEN_STORAGE_KEY}=; path=/; SameSite=Strict; expires=Thu, 01 Jan 1970 00:00:00 GMT`;
   } catch {
     /* cookies unavailable — header-based callers still work. */
   }

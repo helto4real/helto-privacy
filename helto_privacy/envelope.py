@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import math
 import os
@@ -99,14 +98,14 @@ class PrivacyEnvelopeCodec:
         self.key_provider = key_provider or default_keystore
 
     def crypto_status(self, base_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-        path = key_path(base_dir)
+        status = self.key_provider.keystore_status()
         return {
             "available": CRYPTO_AVAILABLE,
             "algorithm": ALGORITHM,
-            "keyExists": path.exists(),
-            "keyPath": str(path),
+            "keyExists": bool(status.get("keystoreInitialized", False)),
+            "keyPath": str(status.get("keystorePath") or ""),
             "error": "" if CRYPTO_AVAILABLE else f"Python package 'cryptography' is required: {CRYPTO_IMPORT_ERROR}",
-            **self.key_provider.keystore_status(),
+            **status,
         }
 
     def is_encrypted_payload(self, value: Any) -> bool:
@@ -124,7 +123,7 @@ class PrivacyEnvelopeCodec:
 
     def encrypt_state(self, state: Mapping[str, Any], base_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
         require_active_process_suite()
-        key, key_id = self._load_or_create_key(base_dir, create=True)
+        key, key_id = self._current_key(base_dir)
         nonce = secrets.token_bytes(12)
         plaintext = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ciphertext = AESGCM(key).encrypt(nonce, plaintext, self._aad(key_id))  # type: ignore[operator]
@@ -175,7 +174,7 @@ class PrivacyEnvelopeCodec:
         chunk_size: int | None = None,
     ) -> dict[str, Any]:
         require_active_process_suite()
-        key, key_id = self._load_or_create_key(base_dir, create=True)
+        key, key_id = self._current_key(base_dir)
         if chunk_size is None:
             chunk_size = self._byte_chunk_size()
         elif (
@@ -285,47 +284,20 @@ class PrivacyEnvelopeCodec:
             total_chunks=total_chunks,
         )
 
-    def _load_or_create_key(
+    def _current_key(
         self,
         base_dir: str | os.PathLike[str] | None = None,
-        create: bool = True,
     ) -> tuple[bytes, str]:
         if not CRYPTO_AVAILABLE:
             raise PrivacyError(f"Python package 'cryptography' is required for privacy mode: {CRYPTO_IMPORT_ERROR}")
-
-        if base_dir is None and self.key_provider.keystore_exists():
-            try:
-                return self.key_provider.primary_session_key()
-            except PrivacyKeystoreError as exc:
-                raise PrivacyError(str(exc)) from exc
-
-        path = key_path(base_dir)
-        if path.exists():
-            try:
-                payload = json.loads(path.read_text(encoding="utf-8"))
-                key = _b64url_decode(str(payload.get("key", "")))
-                key_id = str(payload.get("keyId", "")).strip()
-            except Exception as exc:  # noqa: BLE001 - bad local key should become a readable privacy error.
-                raise PrivacyError(f"Could not read privacy key file '{path}': {exc}") from exc
-            if len(key) != 32 or not key_id:
-                raise PrivacyError(f"Privacy key file '{path}' is malformed.")
-            return key, key_id
-
-        if not create:
-            raise PrivacyError(f"Privacy key file is missing: {path}")
-
-        key = secrets.token_bytes(32)
-        key_id = _b64url_encode(hashlib.sha256(key).digest()[:12])
-        _write_private_json(
-            path,
-            {
-                "version": 1,
-                "algorithm": ALGORITHM,
-                "keyId": key_id,
-                "key": _b64url_encode(key),
-            },
-        )
-        return key, key_id
+        if base_dir is not None:
+            raise PrivacyError(
+                "Current privacy envelopes do not read or write legacy key directories."
+            )
+        try:
+            return self.key_provider.primary_session_key()
+        except PrivacyKeystoreError as exc:
+            raise PrivacyError(str(exc)) from exc
 
     def _key_for_payload(
         self,
@@ -333,13 +305,12 @@ class PrivacyEnvelopeCodec:
         base_dir: str | os.PathLike[str] | None,
         mismatch_error: str,
     ) -> bytes:
-        key, key_id = self._load_or_create_key(base_dir, create=False)
+        key, key_id = self._current_key(base_dir)
         if payload_key_id == key_id:
             return key
-        if base_dir is None and self.key_provider.keystore_exists():
-            alt = self.key_provider.session_key_for(payload_key_id)
-            if alt is not None:
-                return alt
+        alt = self.key_provider.session_key_for(payload_key_id)
+        if alt is not None:
+            return alt
         raise PrivacyError(mismatch_error)
 
     def _aad(self, key_id: str) -> bytes:
@@ -448,27 +419,6 @@ class PrivacyEnvelopeCodec:
             raise PrivacyError("Encrypted byte payload is missing chunks.")
         if plaintext_total != plaintext_size:
             raise PrivacyError("Encrypted byte payload decrypted to an unexpected size.")
-
-
-def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(path.parent, 0o700)
-    except OSError:
-        pass
-    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(text, encoding="utf-8")
-    try:
-        os.chmod(tmp_path, 0o600)
-    except OSError:
-        pass
-    tmp_path.replace(path)
-    try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
-
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")

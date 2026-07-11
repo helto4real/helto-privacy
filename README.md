@@ -297,7 +297,10 @@ state = codec.decrypt_state(envelope)
 
 These writer/reveal methods require the process-wide exact suite to be active;
 verification, pending, incomplete, mismatched, and conflicting states fail
-closed. Verification tooling uses `MaintenanceCapability` instead of the codec.
+closed. They also require an initialized, unlocked shared keystore. The current
+codec never creates, reads, or writes a plaintext `privacy_key.json`; passing a
+legacy `base_dir` is rejected. Verification tooling uses
+`MaintenanceCapability` instead of the codec.
 
 For byte payloads:
 
@@ -677,6 +680,11 @@ isolated synthetic acceptance state and keep private product UI concealed until
 an authorized reveal. Do not register a generic `ProtectedOperation` for an
 artifact resource or retain a consumer-owned private-media route.
 
+Artifact writes verify an unlocked shared session before invoking the consumer
+encoder, then the envelope codec rechecks the session while encrypting. The
+early check avoids creating encoded plaintext while locked; the codec remains
+the final fail-closed key boundary.
+
 ## Shared UI and Canonical Routes (ComfyUI)
 
 Inside ComfyUI, packs do not implement their own unlock endpoints or dialogs.
@@ -711,6 +719,12 @@ legacy-directory argument exists only for coordinated cutover. It registers:
 - `GET  /helto_privacy/ui/privacy_snapshot.js` — runtime snapshot coordinator
 - `GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js` — the exact
   browser profile compiler
+
+Status, profile attestation, and mode status are intentionally public,
+product-data-free bootstrap surfaces. State-changing bootstrap routes reject
+cross-site or mismatched-origin requests and require `application/json`. The
+browser session cookie uses `SameSite=Strict`; protected routes still require
+the current header or cookie token as declared by their operation.
 
 New integrations declare exact reader units, locations, and historical-key
 imports through the shared migration contract. This keeps retirement evidence
@@ -772,8 +786,8 @@ For each Helto node pack:
 ## Threat Model
 
 Gained: stolen disks, backups, and synced dotfiles cannot decrypt private
-state without the password. Other network clients cannot call privacy routes
-without the session token.
+state without the password. Other network clients cannot call protected
+privacy routes without the session token.
 
 Not gained: malware running as the same OS user while the keystore is unlocked
 can read the session cache. Use full-disk encryption and encrypted swap for

@@ -16,6 +16,7 @@ from helto_privacy.keystore import (
     PrivacyKeystoreError,
 )
 from helto_privacy.suite_runtime import SuiteBlockedError
+from _legacy_envelope_fixture import write_legacy_state_fixture
 
 pytestmark = pytest.mark.skipif(
     not KEYSTORE_CRYPTO_AVAILABLE,
@@ -135,8 +136,12 @@ def test_initialize_twice_is_rejected():
 
 def test_legacy_key_is_imported_and_retired():
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
-    legacy_envelope = codec.encrypt_state({"old": "workflow"})
     legacy_path = envelope_module.config_dir() / "privacy_key.json"
+    legacy_envelope, _legacy_key, _legacy_key_id = write_legacy_state_fixture(
+        envelope_module.config_dir(),
+        DIRECTOR_SCHEMA,
+        {"old": "workflow"},
+    )
     assert legacy_path.exists()
 
     initialize_keystore_with_legacy_migration(PASSWORD, envelope_module.config_dir())
@@ -153,8 +158,11 @@ def test_add_keys_to_existing_keystore_imports_decrypt_only_key(tmp_path):
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
     keystore.initialize_keystore(PASSWORD)
     second_dir = tmp_path / "second_pack"
-    legacy_envelope = codec.encrypt_state({"old": "other pack"}, base_dir=second_dir)
-    legacy_key, legacy_key_id = codec._load_or_create_key(second_dir, create=False)
+    legacy_envelope, legacy_key, legacy_key_id = write_legacy_state_fixture(
+        second_dir,
+        DIRECTOR_SCHEMA,
+        {"old": "other pack"},
+    )
 
     with pytest.raises(PrivacyKeystoreError, match="PRIVACY_PASSWORD_INVALID"):
         keystore.add_keys_to_keystore("wrong password", [(legacy_key_id, legacy_key)])
@@ -250,13 +258,17 @@ def test_session_cache_survives_module_state_reset():
     assert codec.decrypt_state(envelope) == {"secret": "prompt"}
 
 
-def test_explicit_base_dir_keeps_legacy_behavior(tmp_path):
+def test_explicit_base_dir_cannot_bypass_locked_keystore(tmp_path):
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
     keystore.initialize_keystore(PASSWORD)
     keystore.lock_keystore()
 
-    envelope = codec.encrypt_state({"secret": "prompt"}, base_dir=tmp_path / "standalone")
-    assert codec.decrypt_state(envelope, base_dir=tmp_path / "standalone") == {"secret": "prompt"}
+    with pytest.raises(PrivacyError, match="legacy key directories"):
+        codec.encrypt_state(
+            {"secret": "prompt"},
+            base_dir=tmp_path / "standalone",
+        )
+    assert not (tmp_path / "standalone" / "privacy_key.json").exists()
 
 
 class _FakeRequest:

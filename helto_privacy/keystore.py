@@ -468,6 +468,13 @@ def primary_session_key() -> tuple[bytes, str]:
     return session["keys"][key_id], key_id
 
 
+def require_unlocked_session() -> None:
+    """Require a current unlocked session without returning key material."""
+
+    require_active_process_suite()
+    _require_session()
+
+
 def session_key_for(key_id: str) -> bytes | None:
     require_active_process_suite()
     session = _read_session()

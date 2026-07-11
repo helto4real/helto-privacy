@@ -84,7 +84,6 @@ codec, preserving whatever function names the rest of the pack already calls
 ```python
 from pathlib import Path
 from helto_privacy import PrivacyEnvelopeCodec, PrivacyError  # noqa: F401
-from helto_privacy import envelope as _envelope
 
 _SCHEMA = "helto.<this-pack's-existing-schema>"   # from Step 0 — DO NOT invent a new one
 _codec = PrivacyEnvelopeCodec(_SCHEMA)
@@ -95,23 +94,20 @@ def config_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "config"
 
 
-def encrypt_state(state, base_dir=None):
-    return _codec.encrypt_state(state, base_dir=base_dir)
+def encrypt_state(state):
+    return _codec.encrypt_state(state)
 
-def decrypt_state(payload, base_dir=None):
-    return _codec.decrypt_state(payload, base_dir=base_dir)
+def decrypt_state(payload):
+    return _codec.decrypt_state(payload)
 
 # ...same one-liners for encrypt_bytes/decrypt_bytes/is_encrypted_payload/crypto_status...
 ```
 
-> **Warning — CWD footgun.** The package's own legacy fallback
-> (`helto_privacy.envelope.key_path(None)`) resolves to
-> `Path.cwd()/config`, which under ComfyUI is the *ComfyUI* directory, not
-> the pack. Never rely on it. Always route legacy-file access through the
-> pack-anchored `config_dir()` above. Exact legacy readers and key imports must
-> declare that location through the migration contract; do not make a current
-> writer fall back to it. Once the user has a keystore, `base_dir=None`
-> resolves to the keystore.
+> **No current legacy-key fallback.** The codec requires the initialized,
+> unlocked shared keystore and rejects `base_dir` for current reads and writes.
+> Keep `config_dir()` only to anchor the pack's declared historical key/data
+> sources. Register those locations through the migration contract; exact
+> readers and verified key import are the only paths allowed to access them.
 
 If the pack loads under two module namespaces (ComfyUI loader packages under
 a runtime name, like the Director's `comfyui_helto_director_runtime.*`),
@@ -180,6 +176,10 @@ code only an opaque authorization capability. The cookie exists because
 `<img>`/media elements cannot send custom headers; dispatch privacy-mode
 thumbnail/preview routes too, not just JSON endpoints. The old token guards are
 compatibility wrappers and now fail closed when no keystore exists.
+Unauthenticated setup, unlock, lock, password, and browser-attestation mutations
+also require same-origin browser metadata and `application/json`; do not call
+them through cross-origin forms or plaintext request bodies. The shared client
+sets the media-compatible session cookie with `SameSite=Strict`.
 
 **Frontend: connect the exact attested profile — do not copy request, session,
 mode, or dialog code into the pack.**

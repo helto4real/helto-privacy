@@ -206,6 +206,39 @@ def test_durable_artifact_write_is_atomic_encrypted_and_purpose_bound(
     assert "durable-mask" not in str(wrong_kind)
 
 
+def test_artifact_write_rejects_locked_session_before_encoding(
+    artifact_pack,
+    monkeypatch,
+):
+    pack, root, _token = artifact_pack
+    encode_calls = []
+
+    def encode(_self, value):
+        encode_calls.append(value)
+        return bytes(value)
+
+    monkeypatch.setattr(ArtifactAdapter, "encode", encode)
+    keystore.lock_keystore()
+    handle = pack.artifacts("media")
+
+    async def exercise():
+        with pytest.raises(ArtifactError) as locked:
+            await handle.write(
+                "durable-mask",
+                generate_artifact_owner_id(),
+                b"SYNTHETIC_LOCKED_ARTIFACT",
+            )
+        return locked.value
+
+    failure = asyncio.run(exercise())
+
+    assert failure.code == "PRIVACY_ARTIFACT_STORAGE_FAILED"
+    assert encode_calls == []
+    assert not list(root.rglob("*.hpa"))
+    ledger = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    assert ledger["entries"] == []
+
+
 def test_retention_classes_replace_expire_sweep_and_release_by_owner(
     artifact_pack,
     monkeypatch,
