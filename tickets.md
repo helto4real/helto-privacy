@@ -288,13 +288,13 @@ encoding, roots, keys, and regeneration stay consumer-owned.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare mask and thumbnail artifact kinds, owners, purposes, retention,
+- [x] Declare mask and thumbnail artifact kinds, owners, purposes, retention,
       operations, plaintext derivatives, and allowed-root adapter requirements.
-- [ ] Route storage, reads, leases, purge, cleanup, and startup recovery through
+- [x] Route storage, reads, leases, purge, cleanup, and startup recovery through
       bound artifact handles while retaining PNG/WebP product behavior.
-- [ ] Add historical mask and current cache integration tests, including
+- [x] Add historical mask and current cache integration tests, including
       regeneration and injected persistence/cleanup failures.
-- [ ] Keep the existing selector path live until selector workflow migration is
+- [x] Keep the existing selector path live until selector workflow migration is
       ready to consume the new durable-mask transaction.
 
 ## Move selector workflow state and operations
