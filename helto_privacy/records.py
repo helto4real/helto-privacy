@@ -12,6 +12,7 @@ from enum import Enum
 from threading import Lock
 
 from ._plaintext import clear_mutable_plaintext
+from ._private_response import private_response_headers
 from .envelope import PrivacyEnvelopeCodec, PrivacyError
 from .guard import AuthorizedPrivacyRequest, require_current_authorization
 from .profile import PrivacyProfile, RecordDeclaration
@@ -195,24 +196,24 @@ def private_record_response_headers(
     """Return cache-safe private response defaults with generic filenames."""
 
     correlation = correlation_id or _correlation_id()
-    if not _valid_correlation_id(correlation):
-        raise RecordError("PRIVACY_RECORD_DIAGNOSTIC_INVALID")
-    headers = {
-        "Cache-Control": "private, no-store",
-        "Pragma": "no-cache",
-        "Referrer-Policy": "no-referrer",
-        "Vary": "Cookie, X-Helto-Privacy-Token",
-        "X-Content-Type-Options": "nosniff",
-        "X-Helto-Privacy-Correlation-ID": correlation,
-    }
+    disposition = None
+    filename = None
     if download_kind is not None:
         if not isinstance(download_kind, str):
             raise RecordError("PRIVACY_RECORD_DIAGNOSTIC_INVALID")
         filename = _GENERIC_FILENAMES.get(download_kind)
         if filename is None:
             raise RecordError("PRIVACY_RECORD_DIAGNOSTIC_INVALID")
-        headers["Content-Disposition"] = f'attachment; filename="{filename}"'
-    return headers
+        disposition = "attachment"
+    try:
+        return private_response_headers(
+            correlation,
+            correlation_prefix="hp-record-",
+            disposition=disposition,
+            filename=filename,
+        )
+    except ValueError:
+        raise RecordError("PRIVACY_RECORD_DIAGNOSTIC_INVALID") from None
 
 
 def safe_record_diagnostic(

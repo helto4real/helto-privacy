@@ -501,3 +501,92 @@ def test_record_transport_uses_only_attested_fixed_routes_and_confirmation(tmp_p
         assert.equal(typeof transport.records.request, "undefined");
         """,
     )
+
+
+def test_attested_artifact_transport_issues_only_opaque_fixed_leases(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        globalThis.localStorage = {
+          getItem: () => "",
+          setItem() {},
+          removeItem() {},
+        };
+        globalThis.document = { cookie: "" };
+        const calls = [];
+        globalThis.fetch = async (url, options = {}) => {
+          const target = String(url);
+          if (target.endsWith("/profiles/helto.test")) return response({
+            ok: true,
+            id: "helto.test",
+            fingerprint: "a".repeat(64),
+            suiteManifestDigest: "b".repeat(64),
+            protectedOperations: [],
+            protectedFields: [],
+            executionProjections: [],
+            records: [],
+            artifacts: [{
+              id: "thumbnail",
+              resourceId: "media",
+              scopeId: "global",
+              retention: "regenerable-cache",
+              operations: ["preview"],
+              mediaType: "image/webp",
+            }],
+            modeScopes: [],
+          });
+          if (target.endsWith("/suite/browser-attestation")) return response({ ok: true });
+          calls.push({ target, options });
+          return response({
+            ok: true,
+            lease: {
+              url: "/helto_privacy/artifacts/hp-lease-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+              expiresInSeconds: 60,
+            },
+          });
+        };
+        const transport = await client.connectAttestedPrivacyProfileClient({
+          packId: "helto.test",
+          profileFingerprint: "a".repeat(64),
+          suiteManifestDigest: "b".repeat(64),
+          promptUnlock: async () => null,
+        });
+        const reference = {
+          schema: "helto.private-artifact-reference",
+          version: 1,
+          id: "hp-art-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        };
+
+        const lease = await transport.artifacts.lease(
+          "media",
+          "thumbnail",
+          reference,
+          "preview",
+        );
+
+        assert.deepEqual(lease, {
+          url: "/helto_privacy/artifacts/hp-lease-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          expiresInSeconds: 60,
+        });
+        assert.equal(calls.length, 1);
+        assert.equal(
+          calls[0].target,
+          "/helto_privacy/profiles/helto.test/artifacts/media/thumbnail/"
+            + `${reference.id}/lease/preview`,
+        );
+        assert.equal(calls[0].options.method, "POST");
+        assert(!calls[0].target.includes("SYNTHETIC"));
+        assert.equal(typeof transport.artifacts.request, "undefined");
+        assert.throws(
+          () => transport.artifacts.lease("media", "thumbnail", reference, "download"),
+          (error) => error.code === "PRIVACY_ARTIFACT_OPERATION_INVALID",
+        );
+        assert.throws(
+          () => transport.artifacts.lease("media", "thumbnail", {
+            ...reference,
+            id: "0123456789abcdef0123456789abcdef",
+          }, "preview"),
+          (error) => error.code === "PRIVACY_ARTIFACT_REFERENCE_INVALID",
+        );
+        """,
+    )

@@ -171,15 +171,15 @@ path-bearing capabilities.
 **Blocked by:** Compile atomic privacy profiles; Resolve privacy mode and
 transitions.
 
-- [ ] Implement atomic encrypted writes with private permissions and
+- [x] Implement atomic encrypted writes with private permissions and
       authenticated purpose binding to consumer, artifact kind, and version.
-- [ ] Enforce durable-adjunct, regenerable-cache, run-scoped-spill, and
+- [x] Enforce durable-adjunct, regenerable-cache, run-scoped-spill, and
       served-transient retention classes with owners, cleanup ledgers, and
       startup sweeps.
-- [ ] Serve through opaque random leases that require a current session and
+- [x] Serve through opaque random leases that require a current session and
       operation scope, expire/revoke on lock or restart, and return private
       no-store responses with generic names.
-- [ ] Keep blocking work off the event loop with bounded concurrency,
+- [x] Keep blocking work off the event loop with bounded concurrency,
       backpressure, in-memory or streamed reveal, transition-time derivative
       purge, and interruption-safe cleanup.
 

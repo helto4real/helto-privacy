@@ -18,6 +18,8 @@ Registered surface (pack-neutral, stable):
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/reveal/{operation}``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/delete``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/replace``
+- ``POST /helto_privacy/profiles/{pack_id}/artifacts/{resource_id}/{artifact_kind}/{artifact_id}/lease/{operation}``
+- ``GET  /helto_privacy/artifacts/{lease_id}`` — authenticated private stream
 - ``POST /helto_privacy/unlock`` / ``/lock``
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
@@ -509,10 +511,116 @@ def register_helto_privacy_ui(
     async def post_helto_privacy_record_replace(request):
         return await _destructive_record_route(request, web, operation="replace")
 
+    artifact_lease_route = (
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/artifacts/"
+        "{resource_id}/{artifact_kind}/{artifact_id}/lease/{operation}"
+    )
+
+    @routes.post(artifact_lease_route)
+    async def post_helto_privacy_artifact_lease(request):
+        from .artifacts import ArtifactError, ArtifactReference
+        from .guard import PrivacyRouteError
+        from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            resource_id = str(request.match_info.get("resource_id") or "")
+            artifact_kind = str(request.match_info.get("artifact_kind") or "")
+            operation = str(request.match_info.get("operation") or "")
+            authorization = pack.authorization.authorize_request(
+                request,
+                f"artifact.{operation}",
+            )
+            lease = await pack.artifacts(resource_id).lease(
+                artifact_kind,
+                ArtifactReference(str(request.match_info.get("artifact_id") or "")),
+                operation,
+                authorization,
+            )
+            correlation = "hp-artifact-" + os.urandom(12).hex()
+            return web.json_response(
+                {"ok": True, "lease": lease.to_payload()},
+                headers=_artifact_response_headers(correlation),
+            )
+        except PackBlockedError:
+            return _artifact_route_error_response(
+                web,
+                "PRIVACY_PROFILE_UNAVAILABLE",
+                404,
+            )
+        except UnknownResourceError:
+            return _artifact_route_error_response(
+                web,
+                "PRIVACY_ARTIFACT_RESOURCE_INVALID",
+                400,
+            )
+        except PrivacyRouteError as exc:
+            return _artifact_route_error_response(web, exc.code, exc.http_status)
+        except SuiteBlockedError:
+            return _artifact_route_error_response(web, "PRIVACY_SUITE_BLOCKED", 409)
+        except ArtifactError as exc:
+            return _artifact_route_error_response(
+                web,
+                exc.code,
+                _artifact_error_status(exc.code),
+                exc.correlation_id,
+            )
+        except Exception:  # noqa: BLE001
+            return _artifact_route_error_response(
+                web,
+                "PRIVACY_ARTIFACT_LEASE_INVALID",
+                409,
+            )
+
+    @routes.get(f"{ROUTE_PREFIX}/artifacts/{{lease_id}}")
+    async def get_helto_privacy_artifact(request):
+        from .artifacts import ArtifactError, open_artifact_lease
+        from .guard import PrivacyRouteError
+
+        try:
+            stream = await open_artifact_lease(
+                request,
+                str(request.match_info.get("lease_id") or ""),
+            )
+        except PrivacyRouteError as exc:
+            return _artifact_route_error_response(web, exc.code, exc.http_status)
+        except SuiteBlockedError:
+            return _artifact_route_error_response(web, "PRIVACY_SUITE_BLOCKED", 409)
+        except ArtifactError as exc:
+            return _artifact_route_error_response(
+                web,
+                exc.code,
+                _artifact_error_status(exc.code),
+                exc.correlation_id,
+            )
+        except Exception:  # noqa: BLE001
+            return _artifact_route_error_response(
+                web,
+                "PRIVACY_ARTIFACT_LEASE_INVALID",
+                409,
+            )
+
+        response = web.StreamResponse(
+            status=200,
+            headers={**stream.headers, "Content-Type": stream.media_type},
+        )
+        await response.prepare(request)
+        chunks = stream.iter_chunks()
+        try:
+            async for chunk in chunks:
+                await response.write(chunk)
+        except ArtifactError:
+            return response
+        finally:
+            await chunks.aclose()
+        await response.write_eof()
+        return response
+
     @routes.post(
         f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition"
     )
     async def post_helto_privacy_mode_transition(request):
+        from .artifacts import run_artifact_mode_transition
         from .guard import PrivacyRouteError
         from .mode import ModePolicyError, ModeTransitionError
         from .runtime import PackBlockedError, bound_privacy_pack
@@ -545,7 +653,8 @@ def register_helto_privacy_ui(
                     request,
                     "mode.transition",
                 )
-            result = pack.mode(scope.mode_resource_id).transition(
+            result = await run_artifact_mode_transition(
+                pack.mode(scope.mode_resource_id),
                 scope_id,
                 target,
                 authorization,
@@ -931,6 +1040,34 @@ def _record_route_error_response(
         {"ok": False, "error": code, "correlationId": correlation},
         status=status,
         headers=private_record_response_headers(correlation_id=correlation),
+    )
+
+
+def _artifact_error_status(code: str) -> int:
+    if code.endswith(("_INVALID", "_REQUIRED")):
+        return 400
+    if code == "PRIVACY_ARTIFACT_NOT_FOUND":
+        return 404
+    return 409
+
+
+def _artifact_response_headers(correlation_id: str) -> dict[str, str]:
+    from .artifacts import private_artifact_response_headers
+
+    return private_artifact_response_headers(correlation_id)
+
+
+def _artifact_route_error_response(
+    web,
+    code: str,
+    status: int,
+    correlation_id: str | None = None,
+):
+    correlation = correlation_id or "hp-artifact-" + os.urandom(12).hex()
+    return web.json_response(
+        {"ok": False, "error": code, "correlationId": correlation},
+        status=status,
+        headers=_artifact_response_headers(correlation),
     )
 
 

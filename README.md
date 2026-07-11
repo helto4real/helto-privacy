@@ -269,6 +269,10 @@ The keystore format is intentionally stable:
   `HELTO_PRIVACY_MODE_STATE`. It stores only modes, declaration/floor IDs,
   transition IDs/status, and adapter IDs; it never stores product values,
   credentials, keys, or decrypted content.
+- Managed artifact root: beside the keystore as `privacy_artifacts/`, or
+  `HELTO_PRIVACY_ARTIFACT_ROOT`. It contains private-permission encrypted
+  artifacts and a path-free lifecycle ledger; generated plaintext is never
+  staged as a named file.
 - Keystore schema: `helto.privacy-keystore`, version `1`.
 - Key-wrap AAD: `helto.privacy-keystore|1|<keyId>`.
 - Files are written through a temporary file and atomic replace; keystore and
@@ -552,6 +556,76 @@ Record responses use `Cache-Control: private, no-store`, `nosniff`,
 fixed stage plus coarse integer count and boolean flag. Raw exceptions, paths,
 record values, and original filenames are never response or diagnostic fields.
 
+## Managed Encrypted Artifacts and Opaque Leases
+
+Generated masks, thumbnails, waveforms, replay data, and execution spills use
+the typed artifact resource. Declare each kind with its purpose, codec adapter,
+format version, retention class, allowed lease operations, and generic media
+type:
+
+```python
+from helto_privacy import ArtifactDeclaration, ArtifactRetention
+
+ArtifactDeclaration(
+    "thumbnail",
+    "media",
+    "main",
+    "timeline-thumbnail",
+    "media-codec",
+    1,
+    ArtifactRetention.REGENERABLE_CACHE,
+    ("preview",),
+    media_type="image/webp",
+)
+```
+
+The codec adapter implements `encode`, `decode`, and
+`purge_plaintext_derivatives`; it also participates in the normal mode
+transition contract. The shared runtime encrypts before atomic exposure, uses
+`0700` directories and `0600` files, binds authentication to pack, kind,
+purpose, and format version, and keeps blocking codec/filesystem work off the
+event loop behind bounded admission.
+
+Consumers choose one lifecycle: durable adjuncts survive until owner release,
+regenerable caches expire/evict and are discarded when unreadable, run-scoped
+spills clean up exactly once through `async with artifacts.run()`, and served
+transients retire on replacement, expiry, consumption, owner release, or
+startup recovery. Use opaque owners from `generate_artifact_owner_id()`:
+
+```python
+owner = generate_artifact_owner_id()
+media = privacy.artifacts("media")
+reference = await media.write("thumbnail", owner, encoded_thumbnail)
+
+async with media.run() as run:
+    spill_reference = await run.write("render-spill", spill_bytes)
+    await render_from(spill_reference)
+```
+
+The browser receives only an attested typed lease operation:
+
+```js
+const lease = await privacy.artifacts("media").lease(
+  "thumbnail",
+  artifactReference,
+  "preview",
+);
+preview.src = lease.url;
+```
+
+The URL contains only a random server-held `hp-lease-*` ID—not an artifact ID,
+path, filename, session token, or encrypted path token. Serving requires the
+current privacy session again, streams authenticated plaintext with
+backpressure and `private, no-store`, and revokes on use, expiry, lock, restart,
+profile conflict, or explicit revocation. The service creates no plaintext
+artifact file, and operator-blind maintenance never receives a decrypt, key,
+lease, or reveal handle. Plaintext exists only transiently inside the authorized
+ComfyUI process and consumer codec call. This does not make content already
+authorized and rendered in the browser invisible to browser automation; use
+isolated synthetic acceptance state and keep private product UI concealed until
+an authorized reveal. Do not register a generic `ProtectedOperation` for an
+artifact resource or retain a consumer-owned private-media route.
+
 ## Shared UI and Canonical Routes (ComfyUI)
 
 Inside ComfyUI, packs do not implement their own unlock endpoints or dialogs.
@@ -576,6 +650,8 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 - `GET  /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}`
 - `POST /helto_privacy/profiles/{pack_id}/records/.../reveal/{operation}`
 - `POST /helto_privacy/profiles/{pack_id}/records/.../delete`, `/replace`
+- `POST /helto_privacy/profiles/{pack_id}/artifacts/{resource_id}/{artifact_kind}/{artifact_id}/lease/{operation}`
+- `GET  /helto_privacy/artifacts/{lease_id}` — authenticated private stream
 - `POST /helto_privacy/suite/browser-attestation`
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`

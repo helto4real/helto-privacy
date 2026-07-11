@@ -316,7 +316,97 @@ class RecordHandle(_ResourceHandle):
 
 @dataclass(frozen=True, slots=True)
 class ArtifactHandle(_ResourceHandle):
-    pass
+    async def write(self, artifact_kind: str, owner_id: str, value: object):
+        self.readiness.require_ready()
+        from .artifacts import write_artifact
+
+        return await write_artifact(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            artifact_kind=artifact_kind,
+            owner_id=owner_id,
+            value=value,
+        )
+
+    async def read(self, artifact_kind: str, reference: object):
+        self.readiness.require_ready()
+        from .artifacts import read_artifact
+
+        return await read_artifact(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            artifact_kind=artifact_kind,
+            reference=reference,
+        )
+
+    def run(self, owner_id: str | None = None):
+        self.readiness.require_ready()
+        from .artifacts import ArtifactRun
+
+        return ArtifactRun(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            owner_id=owner_id,
+        )
+
+    async def retire(self, artifact_kind: str, reference: object) -> int:
+        self.readiness.require_ready()
+        from .artifacts import retire_artifact
+
+        return await retire_artifact(
+            profile=self._installation.profile,
+            resource_id=self.resource_id,
+            artifact_kind=artifact_kind,
+            reference=reference,
+        )
+
+    async def release_owner(self, owner_id: str) -> int:
+        self.readiness.require_ready()
+        from .artifacts import release_owner_artifacts
+
+        return await release_owner_artifacts(
+            profile=self._installation.profile,
+            resource_id=self.resource_id,
+            owner_id=owner_id,
+        )
+
+    async def sweep(self):
+        self.readiness.require_ready()
+        from .artifacts import sweep_artifacts
+
+        return await sweep_artifacts()
+
+    async def lease(
+        self,
+        artifact_kind: str,
+        reference: object,
+        operation: str,
+        authorization,
+    ):
+        self.readiness.require_ready()
+        from .artifacts import issue_artifact_lease
+
+        return await issue_artifact_lease(
+            installation=self._installation,
+            profile=self._installation.profile,
+            resource_id=self.resource_id,
+            artifact_kind=artifact_kind,
+            reference=reference,
+            operation=operation,
+            authorization=authorization,
+        )
+
+    def revoke(self, lease_id: str) -> bool:
+        self.readiness.require_ready()
+        from .artifacts import revoke_artifact_lease
+
+        return revoke_artifact_lease(lease_id)
 
 
 @dataclass(frozen=True, slots=True)
@@ -478,6 +568,10 @@ def install(
     """Atomically validate, bind, and install one complete privacy profile."""
 
     bound_adapters = _validate_adapter_bindings(profile, adapters)
+    if profile.artifacts:
+        from .artifacts import initialize_artifact_service
+
+        initialize_artifact_service(profile)
     with _LOCK:
         existing = _INSTALLATIONS.get(profile.id)
         if existing is not None:
@@ -485,8 +579,10 @@ def install(
                 raise ProfileConflictError("profile_installation_blocked")
             if existing.profile.fingerprint != profile.fingerprint:
                 existing.status = InstallationStatus.CONFLICT
+                from .artifacts import invalidate_artifact_profile
                 from .execution import invalidate_execution_profile
 
+                invalidate_artifact_profile(profile.id)
                 invalidate_execution_profile(profile.id)
                 raise ProfileConflictError("profile_fingerprint_conflict")
             if existing.pack is None:  # Defensive invariant; never expose a partial pack.
@@ -589,6 +685,17 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "revealOperations": list(record.reveal_operations),
                 }
                 for record in profile.records
+            ],
+            "artifacts": [
+                {
+                    "id": artifact.id,
+                    "resourceId": artifact.resource_id,
+                    "scopeId": artifact.scope_id,
+                    "retention": artifact.retention.value,
+                    "operations": list(artifact.operations),
+                    "mediaType": artifact.media_type,
+                }
+                for artifact in profile.artifacts
             ],
             "protectedOperations": [
                 {

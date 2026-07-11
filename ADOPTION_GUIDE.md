@@ -494,7 +494,53 @@ filename, path, prompt, name, tag, exception string, token, workflow value, or
 record payload in logs, errors, filenames, or diagnostics. Errors expose only a
 stable `PRIVACY_RECORD_*` code and fresh `hp-record-*` correlation ID.
 
-## Step 9 — Tests (non-negotiable hygiene)
+## Step 9 — Move generated privacy artifacts behind the managed lifecycle
+
+Declare every generated mask, thumbnail, waveform, replay payload, temporary
+preview, and execution spill as an `ArtifactDeclaration`. Choose exactly one
+shared retention class: `DURABLE_ADJUNCT`, `REGENERABLE_CACHE`,
+`RUN_SCOPED_SPILL`, or `SERVED_TRANSIENT`. The consumer owns payload
+encoding/decoding, allowed-root validation for existing user files, cache keys,
+and regeneration. `helto-privacy` owns encrypted atomic storage, permissions,
+owners, expiry/eviction, cleanup retry, startup sweeping, and serving.
+
+Artifact adapters implement `encode(value) -> bytes`, `decode(bytes)`, and
+`purge_plaintext_derivatives(artifact_kind)`, plus the mode-transition methods.
+The purge must remove every consumer-owned plaintext derivative; failure aborts
+the public-to-private transition. Do not decrypt to a named temporary file.
+
+```python
+owner = generate_artifact_owner_id()
+media = privacy.artifacts("media")
+reference = await media.write("thumbnail", owner, thumbnail_bytes)
+
+async with media.run() as run:
+    spill = await run.write("render-spill", spill_bytes)
+    await consume_spill(spill)
+```
+
+Replace local private-media URLs and encrypted path tokens with the attested
+browser handle:
+
+```js
+const lease = await privacy.artifacts("media").lease(
+  "thumbnail",
+  artifactReference,
+  "preview",
+);
+image.src = lease.url;
+```
+
+The returned URL is a short-lived random lease ID only. Never add a path,
+filename, artifact reference, or session token to it. Never register a generic
+`ProtectedOperation` on an artifact resource. Lock, restart, expiry, profile
+conflict, and one-use consumption revoke leases automatically. The shared
+service streams plaintext only inside the authorized ComfyUI process; it does
+not add a browser/agent decrypt surface. Browser automation can still observe
+content the authorized UI actually renders, so rendered acceptance uses only an
+isolated browser session and synthetic privacy fixtures.
+
+## Step 10 — Tests (non-negotiable hygiene)
 
 A test run once minted a real key file inside a repo's `config/` and it
 nearly got committed. Every adopting pack must add an **autouse** fixture
@@ -542,7 +588,13 @@ failure, mutable plaintext cleanup, locked confirmed delete/replacement,
 one-use confirmation, generic filenames/headers, correlation-only errors, and
 browser-side removal of injected names, paths, timestamps, and labels.
 
-## Step 10 — Validation checklist
+Artifact adoptions also test ciphertext-only durable files, purpose mismatch,
+private permissions, retention replacement/expiry/eviction, `BaseException`
+run cleanup, startup sweep, unreadable-cache disposal, cleanup retry, bounded
+off-event-loop work, one-use session-scoped leases, generic response names,
+and transition-time plaintext derivative purge.
+
+## Step 11 — Validation checklist
 
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real
@@ -568,6 +620,9 @@ browser-side removal of injected names, paths, timestamps, and labels.
       product projection, while confirmed delete/replacement remain usable.
 - [ ] Record responses and rendered shells contain none of the synthetic name,
       path, filename, timestamp, tag, hash, diagnostic, or exception canaries.
+- [ ] Artifact references and lease payloads contain no path, original filename,
+      token, plaintext, or consumer value; lock and restart invalidate every
+      lease, and generated plaintext never appears as a named file.
 - [ ] `privacy_key.json` is gone (renamed `.migrated`) and gitignored.
 - [ ] Commit style: single-line imperative subject, matching the pack's
       history.

@@ -303,6 +303,16 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 "revealOperations": [],
             },
         ],
+        "artifacts": [
+            {
+                "id": "test-preview",
+                "resourceId": "preview",
+                "scopeId": "test-scope",
+                "retention": "regenerable-cache",
+                "operations": ["preview"],
+                "mediaType": "application/octet-stream",
+            },
+        ],
         "protectedOperations": [],
         "suiteStatus": "incomplete",
         "suiteManifestDigest": None,

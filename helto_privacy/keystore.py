@@ -206,7 +206,7 @@ def lock_keystore() -> dict[str, Any]:
         path.unlink(missing_ok=True)
     except OSError:
         pass
-    _invalidate_execution_runtime("lock")
+    _invalidate_private_runtimes("lock")
     return keystore_status()
 
 
@@ -457,13 +457,15 @@ def _write_session(primary_key_id: str, keys: dict[str, bytes]) -> str:
         ],
     }
     _write_private_json(session_path(), payload)
-    _invalidate_execution_runtime("session-replaced")
+    _invalidate_private_runtimes("session-replaced")
     return token
 
 
-def _invalidate_execution_runtime(reason: str) -> None:
+def _invalidate_private_runtimes(reason: str) -> None:
+    from .artifacts import invalidate_artifact_session
     from .execution import invalidate_execution_session
 
+    invalidate_artifact_session(reason)
     invalidate_execution_session(reason)
 
 

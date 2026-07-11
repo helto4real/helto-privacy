@@ -1,8 +1,10 @@
 import asyncio
 import sys
+import threading
 import types
 
 import helto_privacy.comfy_ui as comfy_ui
+import helto_privacy.artifacts as artifacts
 import helto_privacy.runtime as runtime
 import helto_privacy.suite_runtime as suite_runtime
 from helto_privacy.records import (
@@ -29,6 +31,23 @@ class _Response:
         self.status = status
         self.headers = headers or {}
         self.kwargs = kwargs
+
+
+class _StreamResponse(_Response):
+    def __init__(self, *, status=200, headers=None):
+        super().__init__(status=status, headers=headers)
+        self.chunks = []
+        self.prepared_with = None
+        self.finished = False
+
+    async def prepare(self, request):
+        self.prepared_with = request
+
+    async def write(self, chunk):
+        self.chunks.append(bytes(chunk))
+
+    async def write_eof(self):
+        self.finished = True
 
 
 class _Routes:
@@ -100,6 +119,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     web = types.SimpleNamespace(
         json_response=lambda data, **kwargs: _Response(data, **kwargs),
         Response=_Response,
+        StreamResponse=_StreamResponse,
     )
     aiohttp = types.ModuleType("aiohttp")
     aiohttp.web = web
@@ -190,6 +210,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     assert response.data["protectedFields"] == []
     assert response.data["executionProjections"] == []
     assert response.data["records"] == []
+    assert response.data["artifacts"] == []
     assert response.data["protectedOperations"] == []
     assert "token" not in str(response.data).lower()
     assert "secret" not in str(response.data).lower()
@@ -207,6 +228,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             return Resolution()
 
         def transition(self, scope_id, target, authorization):
+            assert threading.get_ident() != route_thread
             assert (scope_id, target, authorization) == (
                 "route-test",
                 "public",
@@ -231,8 +253,11 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 "snapshot.protect",
                 "execution.prepare",
                 "record.use",
+                "artifact.preview",
             }
             return f"synthetic-{operation}"
+
+    route_thread = threading.get_ident()
 
     fake_pack = types.SimpleNamespace(
         profile=profile,
@@ -382,6 +407,17 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 "hp-record-cdefghijklmnopqr",
             )
 
+    artifact_id = "hp-art-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+    lease_id = "hp-lease-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+
+    class Artifacts:
+        async def lease(self, artifact_kind, reference, operation, authorization):
+            assert artifact_kind == "thumbnail"
+            assert reference.id == artifact_id
+            assert operation == "preview"
+            assert authorization == "synthetic-artifact.preview"
+            return artifacts.ArtifactLease(lease_id, 60)
+
     fake_pack.profile = types.SimpleNamespace(
         id=profile.id,
         scopes=profile.scopes,
@@ -395,6 +431,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     fake_pack.snapshot_field = resolve_snapshot_field
     fake_pack.execution = lambda resource_id: Execution()
     fake_pack.records = lambda resource_id: Records()
+    fake_pack.artifacts = lambda resource_id: Artifacts()
 
     async def disposition_payload():
         return {"protectedValue": "SYNTHETIC_CIPHERTEXT"}
@@ -615,6 +652,71 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         "operation": "replace",
         "correlationId": "hp-record-cdefghijklmnopqr",
     }
+
+    artifact_lease_route = (
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/artifacts/"
+        "{resource_id}/{artifact_kind}/{artifact_id}/lease/{operation}"
+    )
+    artifact_lease_handler = prompt_server.routes.handlers[
+        ("POST", artifact_lease_route)
+    ]
+    artifact_lease_response = asyncio.run(
+        artifact_lease_handler(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "media",
+                    "artifact_kind": "thumbnail",
+                    "artifact_id": artifact_id,
+                    "operation": "preview",
+                },
+                headers={},
+                cookies={},
+            )
+        )
+    )
+    assert artifact_lease_response.data == {
+        "ok": True,
+        "lease": {
+            "url": f"{comfy_ui.ROUTE_PREFIX}/artifacts/{lease_id}",
+            "expiresInSeconds": 60,
+        },
+    }
+    assert artifact_lease_response.headers["Cache-Control"] == "private, no-store"
+    assert artifact_id not in str(artifact_lease_response.data)
+
+    class SyntheticStream:
+        media_type = "image/webp"
+        correlation_id = "hp-artifact-abcdefghijklmnop"
+        headers = artifacts.private_artifact_response_headers(correlation_id)
+
+        async def iter_chunks(self):
+            yield b"SYNTHETIC_"
+            yield b"PRIVATE_BYTES"
+
+    async def open_synthetic_lease(request, supplied_lease_id):
+        assert supplied_lease_id == lease_id
+        assert request.cookies == {"helto_privacy_token": "opaque-session"}
+        return SyntheticStream()
+
+    monkeypatch.setattr(artifacts, "open_artifact_lease", open_synthetic_lease)
+    artifact_stream_handler = prompt_server.routes.handlers[
+        ("GET", f"{comfy_ui.ROUTE_PREFIX}/artifacts/{{lease_id}}")
+    ]
+    stream_request = types.SimpleNamespace(
+        match_info={"lease_id": lease_id},
+        headers={},
+        cookies={"helto_privacy_token": "opaque-session"},
+    )
+    artifact_stream_response = asyncio.run(artifact_stream_handler(stream_request))
+    assert artifact_stream_response.prepared_with is stream_request
+    assert artifact_stream_response.chunks == [b"SYNTHETIC_", b"PRIVATE_BYTES"]
+    assert artifact_stream_response.finished is True
+    assert artifact_stream_response.headers["Content-Type"] == "image/webp"
+    assert artifact_stream_response.headers["Cache-Control"] == "private, no-store"
+    assert artifact_stream_response.headers["Content-Disposition"] == (
+        'inline; filename="private-artifact.bin"'
+    )
 
     missing = asyncio.run(
         handler(types.SimpleNamespace(match_info={"pack_id": "helto.missing"}))

@@ -312,6 +312,9 @@ export async function connectAttestedPrivacyProfileClient({
   const recordDeclarations = Object.freeze(
     normalizeRecordDeclarations(attestation.records),
   );
+  const artifactDeclarations = Object.freeze(
+    normalizeArtifactDeclarations(attestation.artifacts),
+  );
   const mode = createAttestedPrivacyModeClient({
     packId: requestClient.identity.packId,
     modeScopes: attestation.modeScopes,
@@ -331,6 +334,11 @@ export async function connectAttestedPrivacyProfileClient({
   const records = createAttestedPrivacyRecordClient({
     packId: requestClient.identity.packId,
     declarations: recordDeclarations,
+    requestClient,
+  });
+  const artifacts = createAttestedPrivacyArtifactClient({
+    packId: requestClient.identity.packId,
+    declarations: artifactDeclarations,
     requestClient,
   });
 
@@ -357,11 +365,73 @@ export async function connectAttestedPrivacyProfileClient({
     operations,
     executionProjections,
     recordDeclarations,
+    artifactDeclarations,
     mode,
     snapshot,
     execution,
     records,
+    artifacts,
     invoke,
+  });
+}
+
+function createAttestedPrivacyArtifactClient({ packId, declarations, requestClient }) {
+  const declaration = (resourceId, artifactKind) => {
+    const resource = String(resourceId || "");
+    const kind = String(artifactKind || "");
+    const match = declarations.find(
+      (item) => item.resourceId === resource && item.id === kind,
+    );
+    if (!match) {
+      throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_DECLARATION_INVALID");
+    }
+    return match;
+  };
+  const lease = (resourceId, artifactKind, reference, operation) => {
+    const item = declaration(resourceId, artifactKind);
+    const safeOperation = String(operation || "");
+    if (!item.operations.includes(safeOperation)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_OPERATION_INVALID");
+    }
+    const artifactId = normalizeArtifactReference(reference);
+    return requestClient.request(
+      `artifact.${safeOperation}`,
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/artifacts/`
+        + `${encodeURIComponent(item.resourceId)}/${encodeURIComponent(item.id)}/`
+        + `${encodeURIComponent(artifactId)}/lease/${encodeURIComponent(safeOperation)}`,
+    ).then((result) => normalizeArtifactLease(result?.lease));
+  };
+  return Object.freeze({ lease });
+}
+
+function normalizeArtifactReference(reference) {
+  if (
+    !reference
+    || Object.keys(reference).sort().join(",") !== "id,schema,version"
+    || reference.schema !== "helto.private-artifact-reference"
+    || reference.version !== 1
+    || !/^hp-art-[A-Za-z0-9_-]{32}$/.test(String(reference.id || ""))
+  ) {
+    throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_REFERENCE_INVALID");
+  }
+  return String(reference.id);
+}
+
+function normalizeArtifactLease(lease) {
+  if (
+    !lease
+    || Object.keys(lease).sort().join(",") !== "expiresInSeconds,url"
+    || !/^\/helto_privacy\/artifacts\/hp-lease-[A-Za-z0-9_-]{32}$/.test(
+      String(lease.url || ""),
+    )
+    || !Number.isInteger(lease.expiresInSeconds)
+    || lease.expiresInSeconds < 1
+  ) {
+    throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_LEASE_INVALID");
+  }
+  return Object.freeze({
+    url: String(lease.url),
+    expiresInSeconds: lease.expiresInSeconds,
   });
 }
 
@@ -594,6 +664,50 @@ function normalizeRecordDeclarations(records) {
     }
     seen.add(id);
     return Object.freeze({ id, resourceId, scopeId, revealOperations });
+  });
+}
+
+function normalizeArtifactDeclarations(artifacts) {
+  if (!Array.isArray(artifacts)) return [];
+  const seen = new Set();
+  return artifacts.map((artifact) => {
+    const id = String(artifact?.id || "");
+    const resourceId = String(artifact?.resourceId || "");
+    const scopeId = String(artifact?.scopeId || "");
+    const retention = String(artifact?.retention || "");
+    const mediaType = String(artifact?.mediaType || "");
+    const operations = Object.freeze(
+      (Array.isArray(artifact?.operations) ? artifact.operations : [])
+        .map((value) => String(value || "")),
+    );
+    const key = `${resourceId}:${id}`;
+    if (
+      !/^[a-z0-9][a-z0-9._-]*$/.test(id)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(resourceId)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(scopeId)
+      || ![
+        "durable-adjunct",
+        "regenerable-cache",
+        "run-scoped-spill",
+        "served-transient",
+      ].includes(retention)
+      || !/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/i.test(mediaType)
+      || !operations.length
+      || operations.some((operation) => !/^[a-z0-9][a-z0-9._-]*$/.test(operation))
+      || operations.length !== new Set(operations).size
+      || seen.has(key)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_DECLARATION_INVALID");
+    }
+    seen.add(key);
+    return Object.freeze({
+      id,
+      resourceId,
+      scopeId,
+      retention,
+      operations,
+      mediaType,
+    });
   });
 }
 

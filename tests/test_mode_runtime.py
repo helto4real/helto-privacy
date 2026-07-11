@@ -1,5 +1,7 @@
 import asyncio
+from pathlib import Path
 
+import helto_privacy.artifacts as artifacts
 import helto_privacy.keystore as keystore
 import helto_privacy.mode_runtime as mode_runtime
 import helto_privacy.runtime as runtime
@@ -155,11 +157,21 @@ class RecordParticipant(TransitionParticipant):
 
 
 class ArtifactParticipant(TransitionParticipant):
+    def __init__(self, name, log):
+        super().__init__(name, log)
+        self.fail_purge = False
+
     def encode(self, value):
         return value
 
     def decode(self, value):
         return value
+
+    def purge_plaintext_derivatives(self, _artifact_kind):
+        self.log.append(("purge-plaintext", self.name))
+        if self.fail_purge:
+            raise RuntimeError("SYNTHETIC_PRIVATE_PATH_CANARY")
+        return None
 
 
 class BrowserStateAdapter:
@@ -489,6 +501,7 @@ def test_transition_prepares_every_surface_and_commits_mode_last(monkeypatch):
     assert result.status is ModeTransitionStatus.IDLE
     assert declarations["main"] is DeclaredPrivacyMode.PRIVATE
     assert log == [
+        ("purge-plaintext", "artifact-store"),
         ("prepare", "artifact-store"),
         ("prepare", "record-store"),
         ("prepare", "state-store"),
@@ -503,6 +516,60 @@ def test_transition_prepares_every_surface_and_commits_mode_last(monkeypatch):
         for adapter_id, participant in adapters.items()
         if adapter_id != "mode-source"
     )
+
+
+def test_private_transition_aborts_before_prepare_when_derivative_purge_fails(
+    monkeypatch,
+):
+    pack, adapters, declarations, log, authorization = _transaction_pack(monkeypatch)
+    adapters["artifact-store"].fail_purge = True
+
+    with pytest.raises(ModeTransitionError) as failed:
+        pack.mode("privacy-mode").transition(
+            "main",
+            DeclaredPrivacyMode.PRIVATE,
+            authorization,
+            ModeFacts(current_mode=EffectivePrivacyMode.PUBLIC),
+        )
+
+    assert failed.value.code == "PRIVACY_TRANSITION_FAILED"
+    assert declarations["main"] is DeclaredPrivacyMode.PUBLIC
+    assert log == [("purge-plaintext", "artifact-store")]
+    assert "SYNTHETIC" not in str(failed.value)
+
+
+def test_private_transition_aborts_when_plaintext_temp_cleanup_fails(
+    monkeypatch,
+    tmp_path,
+):
+    root = tmp_path / "artifacts"
+    root.mkdir()
+    monkeypatch.setenv(artifacts.ARTIFACT_ROOT_ENV, str(root))
+    pack, _adapters, declarations, log, authorization = _transaction_pack(monkeypatch)
+    plaintext_temp = root / "interrupted.plaintext"
+    plaintext_temp.write_bytes(b"SYNTHETIC_PLAINTEXT_TEMP")
+    original_unlink = Path.unlink
+
+    def fail_plaintext_unlink(path, *args, **kwargs):
+        if path == plaintext_temp:
+            raise OSError("/SYNTHETIC/PRIVATE/PATH")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_plaintext_unlink)
+
+    with pytest.raises(ModeTransitionError) as failed:
+        pack.mode("privacy-mode").transition(
+            "main",
+            DeclaredPrivacyMode.PRIVATE,
+            authorization,
+            ModeFacts(current_mode=EffectivePrivacyMode.PUBLIC),
+        )
+
+    assert failed.value.code == "PRIVACY_TRANSITION_FAILED"
+    assert declarations["main"] is DeclaredPrivacyMode.PUBLIC
+    assert log == []
+    assert plaintext_temp.exists()
+    assert "SYNTHETIC" not in str(failed.value)
 
 
 def test_malformed_transition_target_cannot_inherit_public(monkeypatch):

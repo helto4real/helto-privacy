@@ -85,12 +85,21 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 scopeId: "global",
                 revealOperations: ["use", "details"],
               }}],
+              artifacts: [{{
+                id: "thumbnail",
+                resourceId: "thumbnail",
+                scopeId: "global",
+                retention: "regenerable-cache",
+                operations: ["preview"],
+                mediaType: "image/webp",
+              }}],
               protectedOperations: [],
               ...overrides,
             }});
             let serverAttestation = () => attestation();
             const executionBodies = [];
             const recordCalls = [];
+            const artifactCalls = [];
             globalThis.fetch = async (url, options = {{}}) => {{
               const target = String(url);
               let payload = {{ ok: true }};
@@ -134,6 +143,15 @@ def run_node_module_test(tmp_path, body: str) -> None:
                   correlationId: "hp-record-abcdefghijklmnop",
                 }};
                 else payload = {{ ok: true, operation: target.split("/").at(-1) }};
+              }} else if (target.includes("/artifacts/thumbnail/thumbnail/")) {{
+                artifactCalls.push({{ target, options }});
+                payload = {{
+                  ok: true,
+                  lease: {{
+                    url: "/helto_privacy/artifacts/hp-lease-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+                    expiresInSeconds: 60,
+                  }},
+                }};
               }} else if (target.includes("/profiles/") && !target.endsWith("/modes")) {{
                 payload = serverAttestation();
               }} else if (target.endsWith("/unlock")) {{
@@ -343,7 +361,28 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
           null,
         );
         assert.equal(recordCalls.length, recordCallCount);
-        assert(pack.artifacts("thumbnail") instanceof privacy.BrowserArtifactHandle);
+        const browserArtifacts = pack.artifacts("thumbnail");
+        assert(browserArtifacts instanceof privacy.BrowserArtifactHandle);
+        assert.equal(typeof browserArtifacts.invoke, "undefined");
+        const artifactLease = await browserArtifacts.lease(
+          "thumbnail",
+          {
+            schema: "helto.private-artifact-reference",
+            version: 1,
+            id: "hp-art-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          },
+          "preview",
+        );
+        assert.deepEqual(artifactLease, {
+          url: "/helto_privacy/artifacts/hp-lease-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          expiresInSeconds: 60,
+        });
+        assert.equal(artifactCalls.length, 1);
+        assert.equal(
+          artifactCalls[0].target,
+          "/helto_privacy/profiles/helto.director/artifacts/thumbnail/thumbnail/"
+            + "hp-art-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6/lease/preview",
+        );
         assert(pack.execution("render") instanceof privacy.BrowserExecutionHandle);
         assert.throws(
           () => pack.execution("render").prepare(existingNode),

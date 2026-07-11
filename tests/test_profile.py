@@ -3,6 +3,8 @@ import pytest
 from helto_privacy.profile import (
     PRIVACY_CONTRACT_V2,
     AdapterSlot,
+    ArtifactDeclaration,
+    ArtifactRetention,
     FieldLocation,
     FieldLocationKind,
     PrivacyProfile,
@@ -15,6 +17,46 @@ from helto_privacy.profile import (
     RecordRevealProjection,
     ResourceKind,
 )
+
+
+def test_artifact_operations_must_use_the_typed_lease_contract():
+    with pytest.raises(ProfileValidationError) as generic:
+        PrivacyProfile(
+            id="helto.artifact-contract",
+            distribution="comfyui-artifact-contract",
+            resources=(
+                ProfileResource("privacy-mode", ResourceKind.MODE, ("mode",)),
+                ProfileResource("media", ResourceKind.ARTIFACT, ("artifact",)),
+            ),
+            server_adapters=(
+                AdapterSlot("mode", ResourceKind.MODE, "privacy-mode"),
+                AdapterSlot("artifact", ResourceKind.ARTIFACT, "media"),
+            ),
+            scopes=(PrivacyScope("main", "privacy-mode", "mode"),),
+            artifacts=(
+                ArtifactDeclaration(
+                    "thumbnail",
+                    "media",
+                    "main",
+                    "thumbnail",
+                    "artifact",
+                    1,
+                    ArtifactRetention.REGENERABLE_CACHE,
+                    ("preview",),
+                    media_type="image/webp",
+                ),
+            ),
+            protected_operations=(
+                ProtectedOperation(
+                    "artifact.preview",
+                    "media",
+                    "artifact",
+                    "/consumer/private-preview",
+                ),
+            ),
+        )
+
+    assert generic.value.code == "artifact_operation_must_use_typed_contract"
 
 
 def test_record_reveal_contract_requires_explicit_fields_and_fixed_operations():

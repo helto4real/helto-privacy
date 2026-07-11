@@ -1,5 +1,15 @@
 """Shared privacy helpers for Helto node packs."""
 
+from .artifacts import (
+    ARTIFACT_REFERENCE_SCHEMA,
+    ARTIFACT_REFERENCE_VERSION,
+    ArtifactError,
+    ArtifactLease,
+    ArtifactReference,
+    ArtifactRun,
+    ArtifactSweepReport,
+    generate_artifact_owner_id,
+)
 from .comfy_ui import register_helto_privacy_ui, register_legacy_key_dir
 from .envelope import (
     ALGORITHM,
@@ -174,6 +184,8 @@ from .suite_runtime import (
 
 __all__ = [
     "ALGORITHM",
+    "ARTIFACT_REFERENCE_SCHEMA",
+    "ARTIFACT_REFERENCE_VERSION",
     "AcceptanceEvidence",
     "ActivationRecord",
     "ActivationRecordStore",
@@ -181,9 +193,14 @@ __all__ = [
     "AdapterBindingError",
     "AdapterSlot",
     "ArtifactDeclaration",
+    "ArtifactError",
     "ArtifactHandle",
     "ArtifactIdentity",
+    "ArtifactLease",
     "ArtifactRetention",
+    "ArtifactReference",
+    "ArtifactRun",
+    "ArtifactSweepReport",
     "AuthorizedPrivacyRequest",
     "AuthorizationHandle",
     "BoundPrivacyPack",
@@ -283,6 +300,7 @@ __all__ = [
     "change_keystore_password",
     "check_privacy_token",
     "confirm_record_mutation",
+    "generate_artifact_owner_id",
     "generate_private_record_id",
     "private_record_response_headers",
     "dispatch_privacy_route",

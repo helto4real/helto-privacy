@@ -239,7 +239,19 @@ export class BrowserRecordHandle extends BrowserResourceHandle {
     );
   }
 }
-export class BrowserArtifactHandle extends BrowserInvokableResourceHandle {}
+export class BrowserArtifactHandle extends BrowserResourceHandle {
+  lease(artifactKind, reference, operation) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    requireArtifactDeclaration(entry, this.resourceId, artifactKind);
+    return entry.transport.artifacts.lease(
+      this.resourceId,
+      artifactKind,
+      reference,
+      operation,
+    );
+  }
+}
 export class BrowserExecutionHandle extends BrowserInvokableResourceHandle {
   prepare(owner, projectionId = null) {
     const entry = HANDLE_ENTRIES.get(this);
@@ -420,6 +432,14 @@ export async function connectPrivacyPack({
       resourceId: String(item.resourceId),
       scopeId: String(item.scopeId),
       revealOperations: Object.freeze([...item.revealOperations]),
+    })),
+    artifactDeclarations: attestation.artifacts.map((item) => Object.freeze({
+      id: String(item.id),
+      resourceId: String(item.resourceId),
+      scopeId: String(item.scopeId),
+      retention: String(item.retention),
+      operations: Object.freeze([...item.operations]),
+      mediaType: String(item.mediaType),
     })),
     protectedOperations: attestation.protectedOperations.map((item) => Object.freeze({
       id: String(item.id),
@@ -607,6 +627,42 @@ function validateServerAttestation({
     }
     recordIds.add(record.id);
   }
+  if (!Array.isArray(attestation.artifacts)) {
+    throw new PrivacyPackConnectionError("invalid_artifact_declaration");
+  }
+  const artifactIds = new Set();
+  for (const artifact of attestation.artifacts) {
+    const key = `${artifact?.resourceId}:${artifact?.id}`;
+    if (
+      !artifact?.id
+      || !artifact?.resourceId
+      || !artifact?.scopeId
+      || ![
+        "durable-adjunct",
+        "regenerable-cache",
+        "run-scoped-spill",
+        "served-transient",
+      ].includes(artifact.retention)
+      || !Array.isArray(artifact.operations)
+      || !artifact.operations.length
+      || artifact.operations.some(
+        (operation) => !/^[a-z0-9][a-z0-9._-]*$/.test(operation),
+      )
+      || artifact.operations.length !== new Set(artifact.operations).size
+      || !/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/i.test(
+        String(artifact.mediaType || ""),
+      )
+      || artifactIds.has(key)
+      || !attestation.resources.some(
+        (resource) => resource.id === artifact.resourceId
+          && resource.kind === RESOURCE_KIND.ARTIFACT,
+      )
+      || !attestation.modeScopes.some((scope) => scope.id === artifact.scopeId)
+    ) {
+      throw new PrivacyPackConnectionError("invalid_artifact_declaration");
+    }
+    artifactIds.add(key);
+  }
   const projectionIds = new Set();
   for (const projection of attestation.executionProjections) {
     if (
@@ -646,7 +702,7 @@ function validateServerAttestation({
       || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(operation.method)
       || operationIds.has(operation.id)
       || !operationResource
-      || operationResource.kind === RESOURCE_KIND.RECORD
+      || [RESOURCE_KIND.RECORD, RESOURCE_KIND.ARTIFACT].includes(operationResource.kind)
     ) {
       throw new PrivacyPackConnectionError("invalid_server_operation_declaration");
     }
@@ -725,6 +781,16 @@ function requireRecordDeclaration(entry, resourceId, recordKind) {
   );
   if (!declaration) {
     throw new PrivacyPackConnectionError("unknown_browser_record_declaration");
+  }
+  return declaration;
+}
+
+function requireArtifactDeclaration(entry, resourceId, artifactKind) {
+  const declaration = entry.artifactDeclarations.find(
+    (item) => item.resourceId === resourceId && item.id === artifactKind,
+  );
+  if (!declaration) {
+    throw new PrivacyPackConnectionError("unknown_browser_artifact_declaration");
   }
   return declaration;
 }

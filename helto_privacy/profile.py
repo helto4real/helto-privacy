@@ -12,6 +12,7 @@ from typing import Protocol, TypeVar
 
 PRIVACY_CONTRACT_V2 = "helto.privacy.v2"
 _STABLE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
+_MEDIA_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
 _MODE_TRANSITION_METHODS = (
     "prepare_mode_transition",
     "commit_mode_transition",
@@ -222,6 +223,7 @@ class ArtifactDeclaration:
     format_version: int
     retention: ArtifactRetention
     operations: tuple[str, ...]
+    media_type: str = "application/octet-stream"
 
     def __post_init__(self) -> None:
         for value in (
@@ -240,6 +242,10 @@ class ArtifactDeclaration:
             raise ProfileValidationError("invalid_artifact_version")
         if not isinstance(self.retention, ArtifactRetention):
             raise ProfileValidationError("unknown_artifact_retention")
+        if not isinstance(self.media_type, str) or _MEDIA_TYPE.fullmatch(
+            self.media_type
+        ) is None:
+            raise ProfileValidationError("invalid_artifact_media_type")
         operations = _normalized_stable_ids(self.operations, "duplicate_artifact_operation")
         if not operations:
             raise ProfileValidationError("missing_artifact_operation")
@@ -543,6 +549,8 @@ class PrivacyProfile:
                 raise ProfileValidationError("unknown_operation_resource")
             if resource.kind is ResourceKind.RECORD:
                 raise ProfileValidationError("record_operation_must_use_typed_contract")
+            if resource.kind is ResourceKind.ARTIFACT:
+                raise ProfileValidationError("artifact_operation_must_use_typed_contract")
             _require_adapter_side(resource, operation.adapter_slot, server_adapter_ids)
             used_server_adapters.add(operation.adapter_slot)
 
@@ -634,6 +642,7 @@ class PrivacyProfile:
                 artifact.payload_adapter,
                 "encode",
                 "decode",
+                "purge_plaintext_derivatives",
                 *_MODE_TRANSITION_METHODS,
             )
         for operation in self.protected_operations:
@@ -755,6 +764,7 @@ class PrivacyProfile:
                     "formatVersion": artifact.format_version,
                     "retention": artifact.retention.value,
                     "operations": list(artifact.operations),
+                    "mediaType": artifact.media_type,
                 }
                 for artifact in self.artifacts
             ],

@@ -283,6 +283,9 @@ def transition_bound_mode(
             raise
         attempted: list[str] = []
         try:
+            from .artifacts import prepare_artifact_mode_transition
+
+            prepare_artifact_mode_transition(installation, scope.id, context)
             for adapter_id in participant_ids:
                 attempted.append(adapter_id)
                 participants[adapter_id].prepare_mode_transition(context)
