@@ -29,6 +29,7 @@ from .utils_priv3 import (
     utils_priv3_reader_unit,
 )
 from .utils_raw_xor import UTILS_RAW_XOR_READER_ID, utils_raw_xor_reader_unit
+from .utils_provider_settings import utils_provider_settings_reader_units
 
 
 _GENERATIONS = ("raw-xor", "priv1", "priv2", "priv3")
@@ -226,4 +227,5 @@ def utils_legacy_reader_units() -> tuple[LegacyReaderUnit, ...]:
         utils_priv3_reader_unit(),
         *utils_workflow_reader_units(),
         *utils_queue_reader_units(),
+        *utils_provider_settings_reader_units(),
     )

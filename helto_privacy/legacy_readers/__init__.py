@@ -28,6 +28,11 @@ from .utils_containers import (
 from .utils_priv1 import UTILS_PRIV1_READER_ID, utils_priv1_reader_unit
 from .utils_priv2 import UTILS_PRIV2_READER_ID, utils_priv2_reader_unit
 from .utils_priv3 import UTILS_PRIV3_READER_ID, utils_priv3_reader_unit
+from .utils_provider_settings import (
+    UTILS_PROVIDER_SETTINGS_PLAINTEXT_READER_ID,
+    UTILS_PROVIDER_SETTINGS_WRAPPER_READER_ID,
+    utils_provider_settings_reader_units,
+)
 from .utils_raw_xor import (
     UTILS_RAW_XOR_READER_ID,
     utils_raw_xor_reader_unit,
@@ -49,6 +54,8 @@ __all__ = [
     "UTILS_PRIV2_READER_ID",
     "UTILS_PRIV3_READER_ID",
     "UTILS_PRIVACY_KEY_BIN_IMPORT_ID",
+    "UTILS_PROVIDER_SETTINGS_PLAINTEXT_READER_ID",
+    "UTILS_PROVIDER_SETTINGS_WRAPPER_READER_ID",
     "UTILS_QUEUE_JSON_READER_IDS",
     "UTILS_QUEUE_SQLITE_READER_IDS",
     "UTILS_RAW_XOR_READER_ID",
@@ -57,6 +64,7 @@ __all__ = [
     "utils_priv1_reader_unit",
     "utils_priv2_reader_unit",
     "utils_priv3_reader_unit",
+    "utils_provider_settings_reader_units",
     "utils_queue_reader_units",
     "utils_raw_xor_reader_unit",
     "utils_raw_xor_source",

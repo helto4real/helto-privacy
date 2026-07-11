@@ -372,6 +372,27 @@ def _utils_formats() -> dict[str, Any]:
                 "workflowSha256": _sha(workflow_value.encode()),
             }
 
+    prompt_enhancer_values = {
+        "script": "A synthetic {{style}} portrait",
+        "variables": (
+            '[{"fixed_index":1,"mode":"fixed","name":"style",'
+            '"values":["cinematic","documentary"]}]'
+        ),
+    }
+    for generation, (encrypt, _nonces) in specifications.items():
+        generations[generation]["promptEnhancerMigration"] = {}
+        for name, plain in prompt_enhancer_values.items():
+            nonce = hashlib.sha256(
+                f"prompt-enhancer-{generation}-{name}".encode("ascii")
+            ).digest()[: nonce_lengths[generation]]
+            encrypted = encrypt(plain.encode(), nonce)
+            workflow_value = "__HELTO_ENC__:" + base64.b64encode(encrypted).decode()
+            generations[generation]["promptEnhancerMigration"][name] = {
+                "expected": plain,
+                "workflow": workflow_value,
+                "workflowSha256": _sha(workflow_value.encode()),
+            }
+
     return {
         "fixtureVersion": 1,
         "producerCommit": _UTILS_COMMIT,

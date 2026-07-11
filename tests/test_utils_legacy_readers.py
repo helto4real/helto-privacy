@@ -30,6 +30,8 @@ from helto_privacy import (
     UTILS_PRIV2_READER_ID,
     UTILS_PRIV3_READER_ID,
     UTILS_PRIVACY_KEY_BIN_IMPORT_ID,
+    UTILS_PROVIDER_SETTINGS_PLAINTEXT_READER_ID,
+    UTILS_PROVIDER_SETTINGS_WRAPPER_READER_ID,
     UTILS_QUEUE_JSON_READER_IDS,
     UTILS_QUEUE_SQLITE_READER_IDS,
     UTILS_RAW_XOR_READER_ID,
@@ -100,6 +102,45 @@ def test_utils_byte_generations_are_independent_read_only_units():
         assert not hasattr(units[reader_id].reader, "write")
 
 
+def test_utils_provider_settings_readers_are_exact_and_read_only():
+    units = {unit.id: unit for unit in utils_legacy_reader_units()}
+    plaintext = units[UTILS_PROVIDER_SETTINGS_PLAINTEXT_READER_ID]
+    wrapper = units[UTILS_PROVIDER_SETTINGS_WRAPPER_READER_ID]
+    envelope = {
+        "version": 1,
+        "schema": "helto.comfyui-utils",
+        "encrypted": True,
+        "algorithm": "AES-256-GCM",
+        "keyId": "c3ludGhldGljLWlk",
+        "nonce": "bm9uY2UtMTIzNDU2",
+        "ciphertext": "c3ludGhldGljLXRhZy0xNg",
+    }
+
+    source = {"version": 1, "hf_token": "SYNTHETIC_PROVIDER_TOKEN"}
+    assert plaintext.reader.probe(source, _context()) is True
+    assert plaintext.reader.read(source, _context()) == {
+        "hf_token": "SYNTHETIC_PROVIDER_TOKEN"
+    }
+    assert plaintext.reader.probe({**source, "unexpected": True}, _context()) is False
+
+    source = {"version": 2, "hf_token_encrypted": envelope}
+    assert wrapper.reader.probe(source, _context()) is True
+    assert wrapper.reader.read(source, _context()) == envelope
+    assert wrapper.reader.probe(
+        {"version": 2, "hf_token_encrypted": {"schema": "wrong"}},
+        _context(),
+    ) is False
+    assert wrapper.reader.probe(
+        {
+            "version": 2,
+            "hf_token_encrypted": {**envelope, "ciphertext": "eA"},
+        },
+        _context(),
+    ) is False
+    assert not hasattr(plaintext.reader, "write")
+    assert not hasattr(wrapper.reader, "write")
+
+
 @pytest.mark.parametrize("generation", ("raw-xor", "priv1", "priv2", "priv3"))
 def test_utils_byte_readers_decode_genuine_workflow_and_mask_ciphertext(generation):
     fixture = _utils_fixture()
@@ -127,6 +168,19 @@ def test_utils_byte_readers_decode_genuine_workflow_and_mask_ciphertext(generati
     assert unit.reader.read(mask_source, _context()) == _decode(
         fixture["expected"]["maskBase64"]
     )
+
+
+@pytest.mark.parametrize("generation", ("raw-xor", "priv1", "priv2", "priv3"))
+def test_prompt_enhancer_fields_have_genuine_generation_specific_fixtures(generation):
+    fixture = _utils_fixture()
+    values = fixture["generations"][generation]["promptEnhancerMigration"]
+    units = {unit.id: unit for unit in utils_legacy_reader_units()}
+    reader = units[UTILS_WORKFLOW_READER_IDS[generation]].reader
+
+    assert set(values) == {"script", "variables"}
+    for item in values.values():
+        assert reader.probe(item["workflow"], _context()) is True
+        assert reader.read(item["workflow"], _context()) == item["expected"]
 
 
 def test_workflow_containers_are_generation_exact_for_all_historical_locations():

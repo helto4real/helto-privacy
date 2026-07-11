@@ -49,6 +49,14 @@ Installation fails if the binding, protected-field legacy declaration, or
 reader registration is incomplete. Legacy reading is no longer a consumer
 state-adapter method.
 
+Utils provider credentials have two independently removable container readers:
+`utils-provider-settings-plaintext-v1` accepts only the exact v1
+`version`/`hf_token` object, and `utils-provider-settings-wrapper-v2` accepts
+only the exact v2 wrapper around a current `helto.comfyui-utils` envelope. The
+v2 reader returns the opaque envelope; the consumer transaction decrypts it
+only while authorized and unlocked, then both sources use the same verified
+singleton rewrite. Neither reader has a writer or a fallback-to-empty path.
+
 ## Obligations and receipts
 
 An exact probe that matches is persisted as an encrypted migration obligation

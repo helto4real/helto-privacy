@@ -323,15 +323,15 @@ transaction.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare Prompt Enhancer mode, protected workflow fields, semantic
+- [x] Declare Prompt Enhancer mode, protected workflow fields, semantic
       execution projection, provider-settings record, and safe coarse status
       fields.
-- [ ] Bind editor normalization/application/clear and provider-store/dispatch
+- [x] Bind editor normalization/application/clear and provider-store/dispatch
       adapters while retaining provider selection, models, variables, and
       generation semantics.
-- [ ] Replace local memo/encryption and credential persistence behind inactive
+- [x] Replace local memo/encryption and credential persistence behind inactive
       shared handles, preserving the old live path until Utils activation.
-- [ ] Prove legacy workflow/key and plaintext credential migrations, current
+- [x] Prove legacy workflow/key and plaintext credential migrations, current
       snapshot execution, locked failure, and no credential leakage.
 
 ## Move Privacy Show Any
