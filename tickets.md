@@ -230,13 +230,13 @@ units.
 **Blocked by:** Manage encrypted artifacts and leases; Track legacy migration
 and key import.
 
-- [ ] Implement separate raw XOR, `HELTO_PRIV1`, `HELTO_PRIV2`, and
+- [x] Implement separate raw XOR, `HELTO_PRIV1`, `HELTO_PRIV2`, and
       `HELTO_PRIV3` byte readers with verified binary-key import.
-- [ ] Implement workflow-prefix and queue-wrapper container readers with exact
+- [x] Implement workflow-prefix and queue-wrapper container readers with exact
       dependency declarations, plus JSON-key import where applicable.
-- [ ] Build genuine synthetic fixtures for every generation, workflow field,
+- [x] Build genuine synthetic fixtures for every generation, workflow field,
       historical JSON/SQLite queue form, and failure case.
-- [ ] Prove one selector migration atomically rewrites its workflow fields and
+- [x] Prove one selector migration atomically rewrites its workflow fields and
       referenced historical mask or leaves every original byte authoritative.
 
 ## Protect singleton pack state and secrets

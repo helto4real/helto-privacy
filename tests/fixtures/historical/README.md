@@ -20,6 +20,11 @@ Sources:
 - Director state: `shared/privacy.py:encrypt_state` at `73b7255`. Director's
   envelope schema already matches the shared current reader, so only its
   historical key import is required.
+- Utils bytes, workflow fields, and queue containers: the exact writer
+  functions recorded in `utils_legacy_formats.json` at
+  `d19f6845bf3c2f83a3ae3d6c48bce7e7897475a8`. The PRIV3 fixture uses a
+  synthetic 17-byte chunk size so one small fixture exercises multiple chunks;
+  the historical writer function itself is unchanged.
 
 The key derivation labels are deliberately public and fixture-specific. These
 keys must never be used outside tests.
