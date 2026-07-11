@@ -248,13 +248,13 @@ product-owned.
 **Blocked by:** Provide private records and redaction; Track legacy migration
 and key import.
 
-- [ ] Provide encrypted singleton field/blob storage, optimistic or revisioned
+- [x] Provide encrypted singleton field/blob storage, optimistic or revisioned
       updates, atomic replacement, and protected generic status projections.
-- [ ] Keep domain normalization, SQLite/JSON schema, provider meaning, and
+- [x] Keep domain normalization, SQLite/JSON schema, provider meaning, and
       product update semantics in consumer adapters rather than shared policy.
-- [ ] Migrate valuable plaintext or historical state only through verified
+- [x] Migrate valuable plaintext or historical state only through verified
       write/read-back transactions before source retirement.
-- [ ] Block locked, malformed, partially migrated, or failed persistence without
+- [x] Block locked, malformed, partially migrated, or failed persistence without
       resetting, defaulting, or exposing stored values.
 
 ## Build the shared acceptance harness

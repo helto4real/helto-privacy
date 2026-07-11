@@ -552,6 +552,11 @@ def _transition_participant_ids(profile, scope) -> tuple[str, ...]:
         record.store_adapter for record in profile.records if record.scope_id == scope.id
     )
     domain_ids.update(
+        singleton.store_adapter
+        for singleton in profile.singletons
+        if singleton.scope_id == scope.id
+    )
+    domain_ids.update(
         artifact.payload_adapter
         for artifact in profile.artifacts
         if artifact.scope_id == scope.id

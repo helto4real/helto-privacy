@@ -200,7 +200,7 @@ def test_profile_fingerprint_is_stable_and_order_independent():
     )
 
     assert profile.fingerprint == (
-        "09c983d557a9c783dd46328b9ac4049a86033a29a3032cb9f8155255fe83653b"
+        "de5654bfbc7a7c0e9a47e4854e82a3f707d1db21cca5d9e03a6b730371776d67"
     )
 
     reordered = PrivacyProfile(

@@ -547,6 +547,66 @@ Record responses use `Cache-Control: private, no-store`, `nosniff`,
 fixed stage plus coarse integer count and boolean flag. Raw exceptions, paths,
 record values, and original filenames are never response or diagnostic fields.
 
+## Revisioned Protected Singletons
+
+Pack-managed queue state and provider credentials use typed singleton resources
+instead of private-record IDs or product-local encryption. The consumer keeps
+domain normalization, SQLite/JSON schema, and update meaning; the shared handle
+owns encryption, authorization, revision checks, verified read-back, rollback,
+and generic status:
+
+```python
+from helto_privacy import SingletonDeclaration, SingletonPayloadKind
+
+profile = PrivacyProfile(
+    # resources, adapters, and scopes omitted
+    singletons=(
+        SingletonDeclaration(
+            "provider-settings",
+            "pack-state",
+            "main",
+            "helto.example.provider-settings.v1",
+            "provider-settings",
+            "singleton-store",
+            SingletonPayloadKind.FIELD,
+        ),
+    ),
+)
+```
+
+The store adapter implements `read_singleton(id) -> SingletonSnapshot` and
+`begin_singleton_replace(id, expected_revision, replacement)`. The returned
+transaction implements `commit() -> bool`, `read_back()`, and `rollback()`;
+commit must be one atomic compare-and-swap in the consumer-owned storage
+schema. Shared code accepts a revision only after exact protected read-back and
+restores the prior snapshot on every partial write or verification failure.
+`False` is reserved for a compare-and-swap conflict and must mean the
+transaction made no authoritative change; shared code will not roll back over
+the concurrent writer.
+
+```python
+singletons = privacy.singletons("pack-state")
+status = singletons.status("provider-settings")
+authorization = privacy.authorization.authorize_request(
+    request, "singleton.replace"
+)
+receipt = singletons.replace_field(
+    "provider-settings",
+    normalized_settings,
+    status.revision,
+    authorization,
+)
+```
+
+Field singletons accept canonical JSON mappings; blob singletons accept bytes
+and bind them to the declared purpose. Reveals require `singleton.reveal`;
+replacement and deletion require `singleton.replace` and
+`singleton.delete`. Status never decrypts and exposes only existence,
+monotonic revision, private/current-format flags. Deletion writes a revisioned
+tombstone, preventing stale create-after-delete updates. Locked, malformed,
+partially written, stale-revision, failed-read-back, and failed-rollback states
+block without resetting or returning defaults.
+
 ## Managed Encrypted Artifacts and Opaque Leases
 
 Generated masks, thumbnails, waveforms, replay data, and execution spills use

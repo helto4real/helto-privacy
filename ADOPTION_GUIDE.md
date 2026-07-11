@@ -486,7 +486,37 @@ filename, path, prompt, name, tag, exception string, token, workflow value, or
 record payload in logs, errors, filenames, or diagnostics. Errors expose only a
 stable `PRIVACY_RECORD_*` code and fresh `hp-record-*` correlation ID.
 
-## Step 9 — Move generated privacy artifacts behind the managed lifecycle
+## Step 9 — Move pack state and secrets behind protected singletons
+
+Declare queue state, provider credentials, and other one-value pack state as
+`SingletonDeclaration` entries on a `ResourceKind.SINGLETON` resource. Choose
+`SingletonPayloadKind.FIELD` for canonical JSON mappings or `BLOB` for opaque
+bytes. Keep provider meaning, queue normalization, SQLite/JSON schemas, and
+product update rules in the consumer adapter.
+
+The store adapter returns `SingletonSnapshot` from `read_singleton(id)` and
+creates an atomic compare-and-swap transaction from
+`begin_singleton_replace(id, expected_revision, replacement)`. That transaction
+implements `commit() -> bool`, `read_back()`, and `rollback()`; the store
+adapter also implements the normal mode-transition methods. Never expose
+plaintext to the transaction: the replacement snapshot already contains only
+a current shared envelope or a revisioned tombstone.
+`commit() is False` is the atomic compare-and-swap conflict signal and must
+leave authoritative state unchanged; never implement it as a partial write.
+
+Use `privacy.singletons(resource).status(id)` for generic locked-safe status,
+then `replace_field`, `replace_blob`, `reveal_field`, `reveal_blob`, or `delete`
+with the exact `singleton.replace`, `singleton.reveal`, or `singleton.delete`
+authorization. A stale revision is a conflict, not a retry with defaults.
+Malformed, locked, partially migrated, or failed persistence remains
+authoritative and blocked.
+
+Plaintext or historical pack state is a migration source, not a permanent
+fallback. Bind its reader at `LegacyLocationKind.PACK_STATE`; retire the source
+only in the migration transaction's finalization after the singleton has been
+atomically written and decrypted/read back as the expected normalized value.
+
+## Step 10 — Move generated privacy artifacts behind the managed lifecycle
 
 Declare every generated mask, thumbnail, waveform, replay payload, temporary
 preview, and execution spill as an `ArtifactDeclaration`. Choose exactly one
@@ -532,7 +562,7 @@ not add a browser/agent decrypt surface. Browser automation can still observe
 content the authorized UI actually renders, so rendered acceptance uses only an
 isolated browser session and synthetic privacy fixtures.
 
-## Step 10 — Tests (non-negotiable hygiene)
+## Step 11 — Tests (non-negotiable hygiene)
 
 A test run once minted a real key file inside a repo's `config/` and it
 nearly got committed. Every adopting pack must add an **autouse** fixture
@@ -586,7 +616,7 @@ run cleanup, startup sweep, unreadable-cache disposal, cleanup retry, bounded
 off-event-loop work, one-use session-scoped leases, generic response names,
 and transition-time plaintext derivative purge.
 
-## Step 11 — Validation checklist
+## Step 12 — Validation checklist
 
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real

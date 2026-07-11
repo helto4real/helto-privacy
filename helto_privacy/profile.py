@@ -41,6 +41,7 @@ class ResourceKind(str, Enum):
     MODE = "mode"
     WORKFLOW = "workflow"
     RECORD = "record"
+    SINGLETON = "singleton"
     ARTIFACT = "artifact"
     EXECUTION = "execution"
 
@@ -79,6 +80,13 @@ class ArtifactRetention(str, Enum):
     REGENERABLE_CACHE = "regenerable-cache"
     RUN_SCOPED_SPILL = "run-scoped-spill"
     SERVED_TRANSIENT = "served-transient"
+
+
+class SingletonPayloadKind(str, Enum):
+    """Opaque payload families supported by the singleton service."""
+
+    FIELD = "field"
+    BLOB = "blob"
 
 
 @dataclass(frozen=True, slots=True)
@@ -266,6 +274,41 @@ class RecordDeclaration:
 
 
 @dataclass(frozen=True, slots=True)
+class SingletonDeclaration:
+    """One revisioned protected value whose domain meaning stays product-owned."""
+
+    id: str
+    resource_id: str
+    scope_id: str
+    current_schema: str
+    purpose: str
+    store_adapter: str
+    payload_kind: SingletonPayloadKind
+    legacy_reader_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.id,
+            self.resource_id,
+            self.scope_id,
+            self.current_schema,
+            self.purpose,
+            self.store_adapter,
+        ):
+            _validate_stable_id(value)
+        if not isinstance(self.payload_kind, SingletonPayloadKind):
+            raise ProfileValidationError("unknown_singleton_payload_kind")
+        object.__setattr__(
+            self,
+            "legacy_reader_ids",
+            _normalized_stable_ids(
+                self.legacy_reader_ids,
+                "duplicate_legacy_reader",
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactDeclaration:
     """Product facts for one managed privacy artifact kind."""
 
@@ -411,6 +454,7 @@ class PrivacyProfile:
     scopes: tuple[PrivacyScope, ...] = ()
     protected_fields: tuple[ProtectedField, ...] = ()
     records: tuple[RecordDeclaration, ...] = ()
+    singletons: tuple[SingletonDeclaration, ...] = ()
     artifacts: tuple[ArtifactDeclaration, ...] = ()
     protected_operations: tuple[ProtectedOperation, ...] = ()
     execution_projections: tuple[SemanticExecutionProjection, ...] = ()
@@ -427,6 +471,7 @@ class PrivacyProfile:
             scopes = tuple(self.scopes)
             protected_fields = tuple(self.protected_fields)
             records = tuple(self.records)
+            singletons = tuple(self.singletons)
             artifacts = tuple(self.artifacts)
             protected_operations = tuple(self.protected_operations)
             execution_projections = tuple(self.execution_projections)
@@ -442,6 +487,7 @@ class PrivacyProfile:
             (scopes, PrivacyScope, "unknown_scope_declaration"),
             (protected_fields, ProtectedField, "unknown_field_declaration"),
             (records, RecordDeclaration, "unknown_record_declaration"),
+            (singletons, SingletonDeclaration, "unknown_singleton_declaration"),
             (artifacts, ArtifactDeclaration, "unknown_artifact_declaration"),
             (protected_operations, ProtectedOperation, "unknown_operation_declaration"),
             (
@@ -478,6 +524,7 @@ class PrivacyProfile:
             ("scopes", scopes),
             ("protected_fields", protected_fields),
             ("records", records),
+            ("singletons", singletons),
             ("artifacts", artifacts),
             ("protected_operations", protected_operations),
             ("execution_projections", execution_projections),
@@ -532,6 +579,10 @@ class PrivacyProfile:
         scopes = _unique_by_id(self.scopes, "duplicate_scope")
         fields = _unique_by_id(self.protected_fields, "duplicate_protected_field")
         records = _unique_by_id(self.records, "duplicate_record_declaration")
+        singletons = _unique_by_id(
+            self.singletons,
+            "duplicate_singleton_declaration",
+        )
         artifacts = _unique_by_id(self.artifacts, "duplicate_artifact_declaration")
         operations = _unique_by_id(self.protected_operations, "duplicate_protected_operation")
         projections = _unique_by_id(
@@ -617,6 +668,14 @@ class PrivacyProfile:
                 artifact = artifacts.get(binding.location_id)
                 if artifact is None or artifact.resource_id != binding.resource_id:
                     raise ProfileValidationError("legacy_location_mismatch")
+            elif binding.location_kind is LegacyLocationKind.PACK_STATE:
+                singleton = singletons.get(binding.location_id)
+                if (
+                    singleton is None
+                    or singleton.resource_id != binding.resource_id
+                    or binding.reader_id not in singleton.legacy_reader_ids
+                ):
+                    raise ProfileValidationError("legacy_location_mismatch")
             else:
                 operation = operations.get(binding.location_id)
                 if operation is None or operation.resource_id != binding.resource_id:
@@ -637,6 +696,13 @@ class PrivacyProfile:
             elif key_import.location_kind is LegacyLocationKind.ARTIFACT:
                 artifact = artifacts.get(key_import.location_id)
                 if artifact is None or artifact.resource_id != key_import.resource_id:
+                    raise ProfileValidationError("legacy_location_mismatch")
+            elif key_import.location_kind is LegacyLocationKind.PACK_STATE:
+                singleton = singletons.get(key_import.location_id)
+                if (
+                    singleton is None
+                    or singleton.resource_id != key_import.resource_id
+                ):
                     raise ProfileValidationError("legacy_location_mismatch")
             else:
                 operation = operations.get(key_import.location_id)
@@ -672,12 +738,47 @@ class PrivacyProfile:
         if declared_field_readers != bound_field_readers:
             raise ProfileValidationError("legacy_reader_binding_mismatch")
 
+        declared_singleton_readers = {
+            (singleton.id, reader_id)
+            for singleton in singletons.values()
+            for reader_id in singleton.legacy_reader_ids
+        }
+        bound_singleton_readers = {
+            (binding.location_id, binding.reader_id)
+            for binding in legacy_bindings.values()
+            if binding.location_kind is LegacyLocationKind.PACK_STATE
+        }
+        pack_state_bindings = tuple(
+            binding
+            for binding in legacy_bindings.values()
+            if binding.location_kind is LegacyLocationKind.PACK_STATE
+        )
+        if len(bound_singleton_readers) != len(pack_state_bindings):
+            raise ProfileValidationError("duplicate_legacy_location_binding")
+        if declared_singleton_readers != bound_singleton_readers:
+            raise ProfileValidationError("legacy_reader_binding_mismatch")
+
         for record in records.values():
             resource = _require_resource_kind(resources, record.resource_id, ResourceKind.RECORD)
             if record.scope_id not in scopes:
                 raise ProfileValidationError("unknown_scope_reference")
             _require_adapter_side(resource, record.store_adapter, server_adapter_ids)
             used_server_adapters.add(record.store_adapter)
+
+        for singleton in singletons.values():
+            resource = _require_resource_kind(
+                resources,
+                singleton.resource_id,
+                ResourceKind.SINGLETON,
+            )
+            if singleton.scope_id not in scopes:
+                raise ProfileValidationError("unknown_scope_reference")
+            _require_adapter_side(
+                resource,
+                singleton.store_adapter,
+                server_adapter_ids,
+            )
+            used_server_adapters.add(singleton.store_adapter)
 
         for artifact in artifacts.values():
             resource = _require_resource_kind(
@@ -696,6 +797,8 @@ class PrivacyProfile:
                 raise ProfileValidationError("unknown_operation_resource")
             if resource.kind is ResourceKind.RECORD:
                 raise ProfileValidationError("record_operation_must_use_typed_contract")
+            if resource.kind is ResourceKind.SINGLETON:
+                raise ProfileValidationError("singleton_operation_must_use_typed_contract")
             if resource.kind is ResourceKind.ARTIFACT:
                 raise ProfileValidationError("artifact_operation_must_use_typed_contract")
             _require_adapter_side(resource, operation.adapter_slot, server_adapter_ids)
@@ -732,6 +835,9 @@ class PrivacyProfile:
                 protected_field.workflow_resource_id for protected_field in fields.values()
             },
             ResourceKind.RECORD: {record.resource_id for record in records.values()},
+            ResourceKind.SINGLETON: {
+                singleton.resource_id for singleton in singletons.values()
+            },
             ResourceKind.ARTIFACT: {artifact.resource_id for artifact in artifacts.values()},
             ResourceKind.EXECUTION: {
                 projection.execution_resource_id for projection in projections.values()
@@ -781,6 +887,14 @@ class PrivacyProfile:
             )
             if record.projections:
                 _add_contract(contracts, record.store_adapter, "project")
+        for singleton in self.singletons:
+            _add_contract(
+                contracts,
+                singleton.store_adapter,
+                "read_singleton",
+                "begin_singleton_replace",
+                *_MODE_TRANSITION_METHODS,
+            )
         for artifact in self.artifacts:
             _add_contract(
                 contracts,
@@ -919,6 +1033,19 @@ class PrivacyProfile:
                     ],
                 }
                 for record in self.records
+            ],
+            "singletons": [
+                {
+                    "id": singleton.id,
+                    "resourceId": singleton.resource_id,
+                    "scopeId": singleton.scope_id,
+                    "currentSchema": singleton.current_schema,
+                    "purpose": singleton.purpose,
+                    "storeAdapter": singleton.store_adapter,
+                    "payloadKind": singleton.payload_kind.value,
+                    "legacyReaderIds": list(singleton.legacy_reader_ids),
+                }
+                for singleton in self.singletons
             ],
             "artifacts": [
                 {

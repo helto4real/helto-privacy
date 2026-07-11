@@ -78,6 +78,8 @@ from .profile import (
     RecordRevealProjection,
     ResourceKind,
     SemanticExecutionProjection,
+    SingletonDeclaration,
+    SingletonPayloadKind,
 )
 from .migration import (
     AuditItem,
@@ -133,6 +135,13 @@ from .records import (
     private_record_response_headers,
     safe_record_diagnostic,
 )
+from .singletons import (
+    RevealedSingleton,
+    SingletonError,
+    SingletonMutationReceipt,
+    SingletonSnapshot,
+    SingletonStatus,
+)
 from .mode import (
     DeclaredPrivacyMode,
     EffectivePrivacyMode,
@@ -162,6 +171,7 @@ from .runtime import (
     ProfileConflictError,
     ReadinessHandle,
     RecordHandle,
+    SingletonHandle,
     UnknownResourceError,
     WorkflowHandle,
     install,
@@ -340,6 +350,14 @@ __all__ = [
     "RetirementSeal",
     "RollbackClass",
     "SemanticExecutionProjection",
+    "SingletonDeclaration",
+    "SingletonError",
+    "SingletonHandle",
+    "SingletonMutationReceipt",
+    "SingletonPayloadKind",
+    "SingletonSnapshot",
+    "SingletonStatus",
+    "RevealedSingleton",
     "SignedActivationAuthorization",
     "SignedSuiteManifest",
     "SignedSuitePromotion",

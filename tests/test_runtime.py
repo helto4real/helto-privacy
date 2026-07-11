@@ -305,6 +305,7 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 "revealOperations": [],
             },
         ],
+        "singletons": [],
         "artifacts": [
             {
                 "id": "test-preview",

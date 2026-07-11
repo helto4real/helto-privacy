@@ -316,6 +316,111 @@ class RecordHandle(_ResourceHandle):
 
 
 @dataclass(frozen=True, slots=True)
+class SingletonHandle(_ResourceHandle):
+    """Typed façade for one resource containing protected singleton values."""
+
+    def _require_active(self) -> None:
+        self.readiness.require_ready()
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
+
+    def status(self, singleton_id: str):
+        self._require_active()
+        from .singletons import singleton_status
+
+        return singleton_status(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+        )
+
+    def reveal_field(self, singleton_id: str, authorization):
+        self._require_active()
+        from .singletons import reveal_singleton_field
+
+        return reveal_singleton_field(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+            authorization=authorization,
+        )
+
+    def reveal_blob(self, singleton_id: str, authorization):
+        self._require_active()
+        from .singletons import reveal_singleton_blob
+
+        return reveal_singleton_blob(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+            authorization=authorization,
+        )
+
+    def replace_field(
+        self,
+        singleton_id: str,
+        value: object,
+        expected_revision: int,
+        authorization,
+    ):
+        self._require_active()
+        from .singletons import replace_singleton_field
+
+        return replace_singleton_field(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+            value=value,
+            expected_revision=expected_revision,
+            authorization=authorization,
+        )
+
+    def replace_blob(
+        self,
+        singleton_id: str,
+        value: object,
+        expected_revision: int,
+        authorization,
+    ):
+        self._require_active()
+        from .singletons import replace_singleton_blob
+
+        return replace_singleton_blob(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+            value=value,
+            expected_revision=expected_revision,
+            authorization=authorization,
+        )
+
+    def delete(self, singleton_id: str, expected_revision: int, authorization):
+        self._require_active()
+        from .singletons import delete_singleton
+
+        return delete_singleton(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+            expected_revision=expected_revision,
+            authorization=authorization,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ArtifactHandle(_ResourceHandle):
     async def write(self, artifact_kind: str, owner_id: str, value: object):
         self.readiness.require_ready()
@@ -512,6 +617,13 @@ class BoundPrivacyPack:
 
     def records(self, resource_id: str) -> RecordHandle:
         return self._resource(resource_id, ResourceKind.RECORD, RecordHandle)
+
+    def singletons(self, resource_id: str) -> SingletonHandle:
+        return self._resource(
+            resource_id,
+            ResourceKind.SINGLETON,
+            SingletonHandle,
+        )
 
     def artifacts(self, resource_id: str) -> ArtifactHandle:
         return self._resource(resource_id, ResourceKind.ARTIFACT, ArtifactHandle)
@@ -718,6 +830,15 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "revealOperations": list(record.reveal_operations),
                 }
                 for record in profile.records
+            ],
+            "singletons": [
+                {
+                    "id": singleton.id,
+                    "resourceId": singleton.resource_id,
+                    "scopeId": singleton.scope_id,
+                    "payloadKind": singleton.payload_kind.value,
+                }
+                for singleton in profile.singletons
             ],
             "artifacts": [
                 {
