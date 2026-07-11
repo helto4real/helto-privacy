@@ -1,0 +1,22 @@
+{
+  "envelopeSha256": "cd7ad9f8e0828b5d6e6a1c3f8ec7a7bf1dccb63c2371f7a7b70f9faad632ce92",
+  "envelope": {
+    "algorithm": "AES-256-GCM",
+    "ciphertext": "r2zkr1xJCrw1G-kQOphDQByMe0JDl6WGli2xSB__yjY4KXI8adwmtBXZcp_rL08vKruwywwc8HPJHF3EVpBDPxhcPvnPL9XdAsWPECf6tUpaK2uqw_Ng",
+    "encrypted": true,
+    "keyId": "L9eAIOdecYyU77fK",
+    "nonce": "j0mdGaDckw1ZoDb3",
+    "schema": "helto.timeline-director",
+    "version": 1
+  },
+  "expectedNormalized": {
+    "timeline": {
+      "title": "SYNTHETIC_DIRECTOR_LEGACY_TIMELINE",
+      "version": 1
+    }
+  },
+  "fixtureVersion": 1,
+  "producerCommit": "73b7255",
+  "producerFunction": "shared/privacy.py:encrypt_state",
+  "testKeyDerivation": "sha256:helto-director-v1-historical-fixture-key"
+}

@@ -211,13 +211,13 @@ legacy-key import.
 
 **Blocked by:** Track legacy migration and key import.
 
-- [ ] Add the AIO v1 schema reader and JSON-key import for workflow, builder,
+- [x] Add the AIO v1 schema reader and JSON-key import for workflow, builder,
       and private-record locations.
-- [ ] Add the Smart Prompt v1 schema and export-wrapper readers plus JSON-key
+- [x] Add the Smart Prompt v1 schema and export-wrapper readers plus JSON-key
       import for workflow, bare-envelope, and packaged import locations.
-- [ ] Preserve Director current-schema continuity after verified JSON-key import
+- [x] Preserve Director current-schema continuity after verified JSON-key import
       without creating a redundant removable schema reader.
-- [ ] Generate provenance-recorded historical ciphertext from the original
+- [x] Generate provenance-recorded historical ciphertext from the original
       writers using synthetic data/test keys and prove current-only rewrite,
       failure preservation, and reader isolation.
 
