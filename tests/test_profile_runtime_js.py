@@ -68,6 +68,12 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 scopeId: "global",
                 browserAdapter: "timeline-editor",
                 nodeTypes: ["HeltoTimeline"],
+                execution: true,
+              }}],
+              executionProjections: [{{
+                id: "timeline-render",
+                executionResourceId: "render",
+                workflowResourceId: "timeline",
               }}],
               protectedOperations: [
                 {{
@@ -80,7 +86,8 @@ def run_node_module_test(tmp_path, body: str) -> None:
               ...overrides,
             }});
             let serverAttestation = () => attestation();
-            globalThis.fetch = async (url) => {{
+            const executionBodies = [];
+            globalThis.fetch = async (url, options = {{}}) => {{
               const target = String(url);
               let payload = {{ ok: true }};
               if (target.endsWith("/disposition")) {{
@@ -97,6 +104,16 @@ def run_node_module_test(tmp_path, body: str) -> None:
                   floors: [],
                   transitionStatus: "idle",
                 }}] }};
+              }} else if (target.endsWith("/executions/render/prepare")) {{
+                executionBodies.push(JSON.parse(options.body));
+                payload = {{
+                  ok: true,
+                  reference: {{
+                    schema: "helto.private-execution-reference",
+                    version: 1,
+                    grant: "SYNTHETIC_OPAQUE_GRANT",
+                  }},
+                }};
               }} else if (target.includes("/profiles/") && !target.endsWith("/modes")) {{
                 payload = serverAttestation();
               }} else if (target.endsWith("/unlock")) {{
@@ -207,6 +224,29 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         assert(typeof pack.records("library").invoke === "function");
         assert(pack.artifacts("thumbnail") instanceof privacy.BrowserArtifactHandle);
         assert(pack.execution("render") instanceof privacy.BrowserExecutionHandle);
+        assert.throws(
+          () => pack.execution("render").prepare(existingNode),
+          (error) => error.code === "PRIVACY_SNAPSHOT_TRANSACTION_INVALID",
+        );
+        await assert.rejects(
+          timeline.runWithSnapshot(
+            "manual-save",
+            () => pack.execution("render").prepare(existingNode),
+          ),
+          (error) => error.code === "PRIVACY_SNAPSHOT_TRANSACTION_INVALID",
+        );
+        const preparedExecution = await timeline.runWithSnapshot(
+          "direct-queue",
+          () => pack.execution("render").prepare(existingNode),
+        );
+        assert.equal(preparedExecution.reference.grant, "SYNTHETIC_OPAQUE_GRANT");
+        assert.deepEqual(executionBodies, [{
+          projectionId: "timeline-render",
+          fields: [{
+            fieldId: "timeline-state",
+            protectedValue: "SYNTHETIC_CURRENT_ENVELOPE",
+          }],
+        }]);
         assert.deepEqual(
           await pack.records("library").invoke(
             "record.use",

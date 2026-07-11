@@ -442,6 +442,16 @@ export function createPrivacySnapshotCoordinator({
     return true;
   }
 
+  function requireActiveExecutionTransaction() {
+    if (
+      !activeTransaction
+      || !EXECUTION_BARRIER_REASONS.has(activeTransaction.reason)
+    ) {
+      throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_TRANSACTION_INVALID");
+    }
+    return requireActiveTransaction(activeTransaction.reason);
+  }
+
   async function onSessionChange(session) {
     const state = String(session?.state || "unknown");
     if (state === "locked" || state === "unlocked") sessionEpoch += 1;
@@ -524,6 +534,7 @@ export function createPrivacySnapshotCoordinator({
     activateTransaction,
     releaseTransaction,
     requireActiveTransaction,
+    requireActiveExecutionTransaction,
   });
 }
 

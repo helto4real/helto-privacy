@@ -332,3 +332,78 @@ def test_snapshot_transport_uses_only_attested_fixed_field_routes(tmp_path):
         assert.equal(typeof transport.snapshot.request, "undefined");
         """,
     )
+
+
+def test_execution_transport_uses_only_attested_fixed_prepare_route(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        globalThis.localStorage = {
+          getItem: () => "synthetic-token",
+          setItem() {},
+          removeItem() {},
+        };
+        globalThis.document = { cookie: "" };
+        const calls = [];
+        globalThis.fetch = async (url, options = {}) => {
+          const target = String(url);
+          if (target.endsWith("/profiles/helto.test")) return response({
+            ok: true,
+            id: "helto.test",
+            fingerprint: "a".repeat(64),
+            suiteManifestDigest: "b".repeat(64),
+            protectedOperations: [],
+            protectedFields: [{
+              id: "private-state",
+              workflowResourceId: "state",
+              scopeId: "global",
+              browserAdapter: "state-ui",
+              nodeTypes: ["SyntheticNode"],
+              execution: true,
+            }],
+            executionProjections: [{
+              id: "product-execution",
+              executionResourceId: "dispatch",
+              workflowResourceId: "state",
+            }],
+            modeScopes: [],
+          });
+          if (target.endsWith("/suite/browser-attestation")) return response({ ok: true });
+          calls.push({ target, options });
+          return response({
+            ok: true,
+            reference: { schema: "helto.private-execution-reference", version: 1 },
+          });
+        };
+        const transport = await client.connectAttestedPrivacyProfileClient({
+          packId: "helto.test",
+          profileFingerprint: "a".repeat(64),
+          suiteManifestDigest: "b".repeat(64),
+        });
+
+        await transport.execution.prepare(
+          "dispatch",
+          "product-execution",
+          [{ fieldId: "private-state", protectedValue: "SYNTHETIC_CIPHERTEXT" }],
+        );
+
+        assert.equal(calls.length, 1);
+        assert.equal(
+          calls[0].target,
+          "/helto_privacy/profiles/helto.test/executions/dispatch/prepare",
+        );
+        assert.deepEqual(JSON.parse(calls[0].options.body), {
+          projectionId: "product-execution",
+          fields: [{
+            fieldId: "private-state",
+            protectedValue: "SYNTHETIC_CIPHERTEXT",
+          }],
+        });
+        assert(!calls[0].target.includes("SYNTHETIC"));
+        assert.throws(
+          () => transport.execution.prepare("missing", "product-execution", []),
+          (error) => error.code === "PRIVACY_EXECUTION_PROJECTION_INVALID",
+        );
+        assert.equal(typeof transport.execution.request, "undefined");
+        """,
+    )

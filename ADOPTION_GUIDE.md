@@ -379,7 +379,69 @@ both ComfyUI passes. Execution-bearing reasons fail before queue logic when any
 private field is locked or failed. Never catch a `PRIVACY_SNAPSHOT_*` error and
 substitute an old envelope, empty/default state, or plaintext.
 
-## Step 7 — Tests (non-negotiable hygiene)
+## Step 7 — Move private execution behind grants
+
+For every product input that affects a private result, set `execution=True` on
+its `ProtectedField` and declare one `SemanticExecutionProjection`. Bind an
+execution resource to two server adapters:
+
+```python
+SemanticExecutionProjection(
+    "generate-image",
+    "generation",
+    "prompt-state",
+    "generation-projection",
+    "generation-dispatch",
+)
+```
+
+The projection adapter implements `project(fields, declaration)` and returns
+only canonical JSON product semantics. The dispatch adapter implements
+`dispatch(value, context, cancellation)`. It calls
+`cancellation.checkpoint()` before any private effect or result publication and
+at safe boundaries during long work. Do not log, persist, retain, or attach the
+decrypted `fields` or projected `value` outside this call. Mutable values are
+cleared after synchronous completion or after an async dispatcher finishes.
+
+Inside the snapshot boundary, replace private executable inputs with one fresh
+reference:
+
+```js
+const prepared = await privacy.workflow("prompt-state").runWithSnapshot(
+  "direct-queue",
+  () => privacy.execution("generation").prepare(node, "generate-image"),
+);
+queueInput.private_execution = prepared.reference;
+```
+
+`prepare()` rejects calls outside an active execution-bearing transaction. Do
+not call the canonical prepare route directly; it is the fixed internal
+transport for the typed browser handle, not a second queue path.
+
+The backend product boundary calls
+`resolved = privacy.execution("generation").dispatch(reference, context)` and
+uses `resolved.value`. A reference is single-use and current-session-only.
+Preparation remains ciphertext-only; decryption, semantic projection, and the
+opaque identity are created at dispatch immediately before product logic.
+Missing metadata, lock, unsupported state, decrypt failure, tampering, profile
+conflict, or replay must abort product logic. Never catch a
+`PRIVACY_EXECUTION_*` error to run with empty/default, stale, or public plaintext
+state.
+
+Use `cache_store(resolved.cache_identity, resolved.value)` and `cache_load(...)`
+only for private results that may live in process RAM. A later fresh grant for
+the same semantics consumes that RAM entry before product dispatch. The
+identity is opaque and session-keyed; it is not a persistent cache key. Lock,
+key rotation, session replacement, process restart, or profile invalidation
+clears the partition and revokes pending grants. Public-mode execution remains
+on the consumer's normal public path.
+
+Delete the pack's local token resolver, unkeyed semantic hash, persistent
+private cache, decrypt-to-default fallback, and replay reuse. The shared route,
+browser execution handle, resolver, cancellation signal, and RAM cache are the
+only private execution path.
+
+## Step 8 — Tests (non-negotiable hygiene)
 
 A test run once minted a real key file inside a repo's `config/` and it
 nearly got committed. Every adopting pack must add an **autouse** fixture
@@ -416,7 +478,12 @@ Rules:
   manual testing. Stage paths explicitly and check `git log -p` for anything
   resembling `"key"`/`"wrapped_key"` values before pushing.
 
-## Step 8 — Validation checklist
+Execution adoptions also test protected-reference tampering, locked and failed
+decrypt, exact execution-field membership, semantic identity stability across
+randomized envelopes, identity change after unlock/rotation, single-use grants,
+active cancellation, async plaintext cleanup, and RAM-cache invalidation.
+
+## Step 9 — Validation checklist
 
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real
@@ -430,6 +497,13 @@ Rules:
       `keyId` matches `keystore_status()`), decrypts its pre-migration
       envelopes, and returns 401 + `PRIVACY_TOKEN_REQUIRED` on privacy routes
       without the token.
+- [ ] Private queue payloads contain a protected reference but no semantic
+      plaintext or pre-dispatch identity. Successful backend dispatch returns
+      an opaque `hp-exec-v1:` identity; product logic is not invoked for a
+      locked, tampered, failed, or replayed reference.
+- [ ] Locking or rotating during a disposable synthetic private run requests
+      cancellation at the next safe checkpoint and removes the private RAM
+      cache. No external or persistent cache receives the result.
 - [ ] `privacy_key.json` is gone (renamed `.migrated`) and gitignored.
 - [ ] Commit style: single-line imperative subject, matching the pack's
       history.

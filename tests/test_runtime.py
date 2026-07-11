@@ -288,6 +288,13 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 "execution": True,
             },
         ],
+        "executionProjections": [
+            {
+                "id": "test-dispatch",
+                "executionResourceId": "dispatch",
+                "workflowResourceId": "editor-state",
+            },
+        ],
         "protectedOperations": [],
         "suiteStatus": "incomplete",
         "suiteManifestDigest": None,

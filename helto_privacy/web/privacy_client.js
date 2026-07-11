@@ -300,6 +300,9 @@ export async function connectAttestedPrivacyProfileClient({
   const protectedFields = Object.freeze(
     normalizeProtectedFields(attestation.protectedFields),
   );
+  const executionProjections = Object.freeze(
+    normalizeExecutionProjections(attestation.executionProjections),
+  );
   const mode = createAttestedPrivacyModeClient({
     packId: requestClient.identity.packId,
     modeScopes: attestation.modeScopes,
@@ -308,6 +311,12 @@ export async function connectAttestedPrivacyProfileClient({
   const snapshot = createAttestedPrivacySnapshotClient({
     packId: requestClient.identity.packId,
     fields: protectedFields,
+    requestClient,
+  });
+  const execution = createAttestedPrivacyExecutionClient({
+    packId: requestClient.identity.packId,
+    fields: protectedFields,
+    projections: executionProjections,
     requestClient,
   });
 
@@ -332,8 +341,10 @@ export async function connectAttestedPrivacyProfileClient({
     attestation: Object.freeze({ ...attestation }),
     identity: requestClient.identity,
     operations,
+    executionProjections,
     mode,
     snapshot,
+    execution,
     invoke,
   });
 }
@@ -369,6 +380,54 @@ function createAttestedPrivacySnapshotClient({ packId, fields, requestClient }) 
   return Object.freeze({ disposition, protect });
 }
 
+function createAttestedPrivacyExecutionClient({
+  packId,
+  fields,
+  projections,
+  requestClient,
+}) {
+  const prepare = (executionResourceId, projectionId, protectedFields) => {
+    const executionId = String(executionResourceId || "");
+    const projection = projections.find(
+      (item) => item.id === projectionId
+        && item.executionResourceId === executionId,
+    );
+    if (!projection || !Array.isArray(protectedFields)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_EXECUTION_PROJECTION_INVALID");
+    }
+    const expected = fields
+      .filter((field) => (
+        field.execution
+        && field.workflowResourceId === projection.workflowResourceId
+      ))
+      .map((field) => field.id)
+      .sort();
+    const supplied = protectedFields.map((item) => String(item?.fieldId || ""));
+    if (
+      !expected.length
+      || supplied.length !== new Set(supplied).size
+      || JSON.stringify([...supplied].sort()) !== JSON.stringify(expected)
+      || protectedFields.some((item) => !("protectedValue" in (item || {})))
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_EXECUTION_REFERENCE_INVALID");
+    }
+    return requestClient.request(
+      "execution.prepare",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/executions/${encodeURIComponent(executionId)}/prepare`,
+      {
+        body: {
+          projectionId: projection.id,
+          fields: protectedFields.map((item) => ({
+            fieldId: String(item.fieldId),
+            protectedValue: item.protectedValue,
+          })),
+        },
+      },
+    );
+  };
+  return Object.freeze({ prepare });
+}
+
 function normalizeProtectedFields(fields) {
   if (!Array.isArray(fields)) return [];
   const seen = new Set();
@@ -377,6 +436,7 @@ function normalizeProtectedFields(fields) {
     const workflowResourceId = String(field?.workflowResourceId || "");
     const scopeId = String(field?.scopeId || "");
     const browserAdapter = String(field?.browserAdapter || "");
+    const execution = field?.execution === true;
     const nodeTypes = Object.freeze(
       (Array.isArray(field?.nodeTypes) ? field.nodeTypes : [])
         .map((value) => String(value || ""))
@@ -393,7 +453,34 @@ function normalizeProtectedFields(fields) {
       throw new PrivacyBrowserRequestError("PRIVACY_SNAPSHOT_FIELD_INVALID");
     }
     seen.add(id);
-    return Object.freeze({ id, workflowResourceId, scopeId, browserAdapter, nodeTypes });
+    return Object.freeze({
+      id,
+      workflowResourceId,
+      scopeId,
+      browserAdapter,
+      nodeTypes,
+      execution,
+    });
+  });
+}
+
+function normalizeExecutionProjections(projections) {
+  if (!Array.isArray(projections)) return [];
+  const seen = new Set();
+  return projections.map((projection) => {
+    const id = String(projection?.id || "");
+    const executionResourceId = String(projection?.executionResourceId || "");
+    const workflowResourceId = String(projection?.workflowResourceId || "");
+    if (
+      !/^[a-z0-9][a-z0-9._-]*$/.test(id)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(executionResourceId)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(workflowResourceId)
+      || seen.has(id)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_EXECUTION_PROJECTION_INVALID");
+    }
+    seen.add(id);
+    return Object.freeze({ id, executionResourceId, workflowResourceId });
   });
 }
 

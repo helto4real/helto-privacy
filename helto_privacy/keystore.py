@@ -206,6 +206,7 @@ def lock_keystore() -> dict[str, Any]:
         path.unlink(missing_ok=True)
     except OSError:
         pass
+    _invalidate_execution_runtime("lock")
     return keystore_status()
 
 
@@ -456,7 +457,14 @@ def _write_session(primary_key_id: str, keys: dict[str, bytes]) -> str:
         ],
     }
     _write_private_json(session_path(), payload)
+    _invalidate_execution_runtime("session-replaced")
     return token
+
+
+def _invalidate_execution_runtime(reason: str) -> None:
+    from .execution import invalidate_execution_session
+
+    invalidate_execution_session(reason)
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:

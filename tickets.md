@@ -132,15 +132,15 @@ only after resolving the exact protected snapshot at dispatch time.
 **Blocked by:** Resolve privacy mode and transitions; Coordinate snapshots and
 serialization.
 
-- [ ] Produce protected execution references and reject missing metadata,
+- [x] Produce protected execution references and reject missing metadata,
       locked keys, decrypt failure, unsupported data, or reference mismatch
       before product logic runs.
-- [ ] Derive session-keyed, domain-separated identities from consumer semantic
+- [x] Derive session-keyed, domain-separated identities from consumer semantic
       projections; never use plaintext, unkeyed hashes, paths, or ciphertext as
       public cache tokens.
-- [ ] Limit private caches to unlocked-session RAM and clear them on lock,
+- [x] Limit private caches to unlocked-session RAM and clear them on lock,
       restart, rotation, or profile invalidation.
-- [ ] Issue session-bound execution grants, revoke undispatched work on lock,
+- [x] Issue session-bound execution grants, revoke undispatched work on lock,
       request safe cancellation of active work, and require fresh grants for
       replay.
 

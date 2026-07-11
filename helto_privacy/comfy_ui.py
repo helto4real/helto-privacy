@@ -13,6 +13,7 @@ Registered surface (pack-neutral, stable):
 - ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect``
+- ``POST /helto_privacy/profiles/{pack_id}/executions/{execution_id}/prepare``
 - ``POST /helto_privacy/unlock`` / ``/lock``
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
@@ -310,6 +311,79 @@ def register_helto_privacy_ui(
             )
 
     @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/executions/"
+        "{execution_id}/prepare"
+    )
+    async def post_helto_privacy_execution_prepare(request):
+        from .execution import ExecutionError
+        from .guard import PrivacyRouteError
+        from .runtime import (
+            PackBlockedError,
+            UnknownResourceError,
+            bound_privacy_pack,
+        )
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            execution_id = str(request.match_info.get("execution_id") or "")
+            payload = await request.json()
+            if not isinstance(payload, dict):
+                raise ExecutionError("PRIVACY_EXECUTION_REFERENCE_INVALID")
+            projection_id = str(payload.get("projectionId") or "")
+            field_items = payload.get("fields")
+            if not projection_id or not isinstance(field_items, list):
+                raise ExecutionError("PRIVACY_EXECUTION_REFERENCE_INVALID")
+            protected_fields: dict[str, object] = {}
+            for item in field_items:
+                if (
+                    not isinstance(item, dict)
+                    or not isinstance(item.get("fieldId"), str)
+                    or not item["fieldId"]
+                    or "protectedValue" not in item
+                    or item["fieldId"] in protected_fields
+                ):
+                    raise ExecutionError("PRIVACY_EXECUTION_REFERENCE_INVALID")
+                protected_fields[item["fieldId"]] = item["protectedValue"]
+            authorization = pack.authorization.authorize_request(
+                request,
+                "execution.prepare",
+            )
+            prepared = pack.execution(execution_id).prepare(
+                projection_id,
+                protected_fields,
+                authorization,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "reference": prepared.reference,
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except UnknownResourceError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_EXECUTION_RESOURCE_INVALID",
+                400,
+            )
+        except PrivacyRouteError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except ExecutionError as exc:
+            return _privacy_error_response(
+                web,
+                exc.code,
+                _execution_error_status(exc.code),
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_EXECUTION_PREPARATION_FAILED",
+                500,
+            )
+
+    @routes.post(
         f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition"
     )
     async def post_helto_privacy_mode_transition(request):
@@ -603,6 +677,10 @@ def _privacy_error_response(web, code: str, status: int):
 
 def _snapshot_error_status(code: str) -> int:
     return 400 if code == "PRIVACY_SNAPSHOT_FIELD_INVALID" else 409
+
+
+def _execution_error_status(code: str) -> int:
+    return 400 if code.endswith(("_INVALID", "_MISMATCH")) else 409
 
 
 def _mode_resolution_payload(

@@ -375,6 +375,92 @@ failed state before product queue logic receives a projection. A readable
 legacy value is immediately rewritten as a current envelope before
 serialization.
 
+## Private Execution, Grants, and RAM Cache
+
+Private queue payloads carry a protected execution reference, never a product
+plaintext projection. Mark each protected field that affects execution with
+`execution=True` and declare the consumer-owned semantic projection:
+
+```python
+from helto_privacy import SemanticExecutionProjection
+
+profile = PrivacyProfile(
+    # resources, adapters, scopes, and protected fields omitted
+    execution_projections=(
+        SemanticExecutionProjection(
+            "generate-image",
+            "generation",
+            "prompt-state",
+            "generation-projection",
+            "generation-dispatch",
+        ),
+    ),
+)
+
+class GenerationProjection:
+    def project(self, fields, declaration):
+        return normalize_generation(fields["private-prompt"])
+
+class GenerationDispatch:
+    def dispatch(self, value, context, cancellation):
+        cancellation.checkpoint()
+        result = product_generate(value, context)
+        cancellation.checkpoint()
+        return result
+```
+
+`project` receives decrypted field values only in process memory. It returns the
+smallest canonical JSON value that affects the product result. `dispatch`
+receives that value only after the protected reference, current session, grant,
+field set, decryption, and keyed identity have all validated. It must call the
+cooperative cancellation checkpoint before revealing, persisting, or returning
+private output and at safe boundaries during longer work. Both synchronous and
+async dispatch adapters are supported; the shared runtime clears mutable
+plaintext after the returned value or awaitable completes.
+
+The browser creates the reference from the already-settled snapshot:
+
+```js
+const workflow = privacy.workflow("prompt-state");
+const prepared = await workflow.runWithSnapshot("direct-queue", () => (
+  privacy.execution("generation").prepare(node, "generate-image")
+));
+// Put prepared.reference in the private executable input. Preparation stays
+// ciphertext-only and does not derive a semantic identity yet.
+```
+
+`BrowserExecutionHandle.prepare()` rejects calls outside an active
+execution-bearing transaction. The canonical prepare HTTP route is an internal
+transport for that handle, not a consumer API or a substitute for the snapshot
+coordinator.
+
+The product execution boundary consumes the reference once:
+
+```python
+execution = privacy.execution("generation")
+resolved = execution.dispatch(protected_reference, product_context)
+result = resolved.value
+execution.cache_store(resolved.cache_identity, result)  # Optional RAM cache.
+```
+
+Async callers await `resolved` when their dispatch adapter is async. Replays
+need a fresh browser snapshot and prepare request. Preparation validates and
+copies only protected state; decryption, the consumer semantic projection, and
+identity derivation occur together at dispatch immediately before product
+logic. The returned public identity is an opaque, domain-separated HMAC of the
+semantic projection and unlocked session; it is not plaintext, a path, an
+envelope fingerprint, or an unkeyed content hash.
+`execution.cache_store(identity, value)` and `cache_load(identity)` accept only
+identities issued in the current unlocked session, keep isolated copies in
+process RAM, and clear on lock, key rotation/session replacement, process
+restart, or profile conflict. Consumers must not persist private cache entries
+or send them to an external cache. A later fresh grant for the same semantic
+projection returns the shared RAM entry before invoking product logic.
+
+Public-mode product execution continues through the consumer's ordinary public
+path. Do not send plaintext through the protected-reference route and do not
+catch `PRIVACY_EXECUTION_*` failures to execute defaults or stale state.
+
 ## Shared UI and Canonical Routes (ComfyUI)
 
 Inside ComfyUI, packs do not implement their own unlock endpoints or dialogs.
@@ -395,6 +481,7 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 - `POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition`
 - `POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition`
 - `POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect`
+- `POST /helto_privacy/profiles/{pack_id}/executions/{execution_id}/prepare`
 - `POST /helto_privacy/suite/browser-attestation`
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`

@@ -250,7 +250,57 @@ class ArtifactHandle(_ResourceHandle):
 
 @dataclass(frozen=True, slots=True)
 class ExecutionHandle(_ResourceHandle):
-    pass
+    def prepare(
+        self,
+        projection_id: str,
+        protected_fields: Mapping[str, object],
+        authorization,
+    ):
+        self.readiness.require_ready()
+        from .execution import prepare_execution
+
+        return prepare_execution(
+            installation=self._installation,
+            profile=self._installation.profile,
+            execution_resource_id=self.resource_id,
+            projection_id=projection_id,
+            protected_fields=protected_fields,
+            authorization=authorization,
+        )
+
+    def dispatch(self, reference: object, context: object = None):
+        self.readiness.require_ready()
+        from .execution import dispatch_execution
+
+        return dispatch_execution(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            execution_resource_id=self.resource_id,
+            reference=reference,
+            context=context,
+        )
+
+    def cache_store(self, cache_identity: str, value: object) -> None:
+        self.readiness.require_ready()
+        from .execution import cache_execution_result
+
+        cache_execution_result(
+            pack_id=self.pack_id,
+            execution_resource_id=self.resource_id,
+            cache_identity=cache_identity,
+            value=value,
+        )
+
+    def cache_load(self, cache_identity: str) -> object | None:
+        self.readiness.require_ready()
+        from .execution import load_cached_execution_result
+
+        return load_cached_execution_result(
+            pack_id=self.pack_id,
+            execution_resource_id=self.resource_id,
+            cache_identity=cache_identity,
+        )
 
 
 _Handle = TypeVar("_Handle", bound=_ResourceHandle)
@@ -364,6 +414,9 @@ def install(
                 raise ProfileConflictError("profile_installation_blocked")
             if existing.profile.fingerprint != profile.fingerprint:
                 existing.status = InstallationStatus.CONFLICT
+                from .execution import invalidate_execution_profile
+
+                invalidate_execution_profile(profile.id)
                 raise ProfileConflictError("profile_fingerprint_conflict")
             if existing.pack is None:  # Defensive invariant; never expose a partial pack.
                 existing.status = InstallationStatus.CONFLICT
@@ -448,6 +501,14 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "execution": field.execution,
                 }
                 for field in profile.protected_fields
+            ],
+            "executionProjections": [
+                {
+                    "id": projection.id,
+                    "executionResourceId": projection.execution_resource_id,
+                    "workflowResourceId": projection.workflow_resource_id,
+                }
+                for projection in profile.execution_projections
             ],
             "protectedOperations": [
                 {

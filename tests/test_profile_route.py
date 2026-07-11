@@ -182,6 +182,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         {"id": "route-test", "modeResourceId": "privacy-mode"}
     ]
     assert response.data["protectedFields"] == []
+    assert response.data["executionProjections"] == []
     assert response.data["protectedOperations"] == []
     assert "token" not in str(response.data).lower()
     assert "secret" not in str(response.data).lower()
@@ -218,7 +219,11 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             return "synthetic-authorization"
 
         def authorize_request(self, _request, operation):
-            assert operation in {"snapshot.disposition", "snapshot.protect"}
+            assert operation in {
+                "snapshot.disposition",
+                "snapshot.protect",
+                "execution.prepare",
+            }
             return f"synthetic-{operation}"
 
     fake_pack = types.SimpleNamespace(
@@ -306,6 +311,29 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 envelope={"encrypted": True, "ciphertext": "opaque"},
             )
 
+    class Execution:
+        def prepare(self, projection_id, protected_fields, authorization):
+            assert projection_id == "product-execution"
+            assert protected_fields == {"private-state": "SYNTHETIC_CIPHERTEXT"}
+            assert authorization == "synthetic-execution.prepare"
+            return types.SimpleNamespace(
+                reference={
+                    "schema": "helto.private-execution-reference",
+                    "version": 1,
+                    "packId": profile.id,
+                    "executionResourceId": "dispatch",
+                    "projectionId": projection_id,
+                    "workflowResourceId": "state",
+                    "grant": "opaque-grant",
+                    "fields": [
+                        {
+                            "fieldId": "private-state",
+                            "protectedValue": "SYNTHETIC_CIPHERTEXT",
+                        }
+                    ],
+                },
+            )
+
     fake_pack.profile = types.SimpleNamespace(
         id=profile.id,
         scopes=profile.scopes,
@@ -317,6 +345,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         return Workflow(), snapshot_field
 
     fake_pack.snapshot_field = resolve_snapshot_field
+    fake_pack.execution = lambda resource_id: Execution()
 
     async def disposition_payload():
         return {"protectedValue": "SYNTHETIC_CIPHERTEXT"}
@@ -385,6 +414,41 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         "ok": False,
         "error": "PRIVACY_SNAPSHOT_FIELD_INVALID",
     }
+
+    async def execution_payload():
+        return {
+            "projectionId": "product-execution",
+            "fields": [
+                {
+                    "fieldId": "private-state",
+                    "protectedValue": "SYNTHETIC_CIPHERTEXT",
+                }
+            ],
+        }
+
+    execution_handler = prompt_server.routes.handlers[
+        (
+            "POST",
+            f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/executions/"
+            "{execution_id}/prepare",
+        )
+    ]
+    execution_response = asyncio.run(
+        execution_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "execution_id": "dispatch"},
+                headers={},
+                cookies={},
+                json=execution_payload,
+            )
+        )
+    )
+    assert execution_response.status == 200
+    assert execution_response.headers == {"Cache-Control": "no-store"}
+    assert execution_response.data["ok"] is True
+    assert "cacheIdentity" not in execution_response.data
+    assert execution_response.data["reference"]["grant"] == "opaque-grant"
+    assert "SYNTHETIC_PLAINTEXT_CANARY" not in str(execution_response.data)
 
     missing = asyncio.run(
         handler(types.SimpleNamespace(match_info={"pack_id": "helto.missing"}))

@@ -179,7 +179,40 @@ export class BrowserWorkflowHandle extends BrowserResourceHandle {
 }
 export class BrowserRecordHandle extends BrowserResourceHandle {}
 export class BrowserArtifactHandle extends BrowserResourceHandle {}
-export class BrowserExecutionHandle extends BrowserResourceHandle {}
+export class BrowserExecutionHandle extends BrowserResourceHandle {
+  prepare(owner, projectionId = null) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    entry.snapshotCoordinator.requireActiveExecutionTransaction();
+    const candidates = entry.executionProjections.filter(
+      (projection) => projection.executionResourceId === this.resourceId,
+    );
+    const projection = projectionId === null
+      ? (candidates.length === 1 ? candidates[0] : null)
+      : candidates.find((item) => item.id === projectionId);
+    if (!projection) {
+      throw new PrivacyPackConnectionError("unknown_execution_projection");
+    }
+    const fields = entry.protectedFields.filter((field) => (
+      field.execution
+      && field.workflowResourceId === projection.workflowResourceId
+    ));
+    if (!fields.length) {
+      throw new PrivacyPackConnectionError("execution_fields_unavailable");
+    }
+    return entry.transport.execution.prepare(
+      this.resourceId,
+      projection.id,
+      fields.map((field) => ({
+        fieldId: field.id,
+        protectedValue: entry.snapshotCoordinator.executionProjection(
+          owner,
+          field.id,
+        ),
+      })),
+    );
+  }
+}
 
 class BrowserPrivacyPack {
   constructor(entry) {
@@ -314,6 +347,12 @@ export async function connectPrivacyPack({
       scopeId: String(item.scopeId),
       browserAdapter: String(item.browserAdapter),
       nodeTypes: Object.freeze([...item.nodeTypes]),
+      execution: item.execution === true,
+    })),
+    executionProjections: attestation.executionProjections.map((item) => Object.freeze({
+      id: String(item.id),
+      executionResourceId: String(item.executionResourceId),
+      workflowResourceId: String(item.workflowResourceId),
     })),
     protectedOperations: attestation.protectedOperations.map((item) => Object.freeze({
       id: String(item.id),
@@ -458,6 +497,7 @@ function validateServerAttestation({
       || !field?.browserAdapter
       || !Array.isArray(field.nodeTypes)
       || !field.nodeTypes.length
+      || typeof field.execution !== "boolean"
       || fieldIds.has(field.id)
       || !attestation.resources.some(
         (resource) => resource.id === field.workflowResourceId
@@ -471,6 +511,33 @@ function validateServerAttestation({
       throw new PrivacyPackConnectionError("invalid_server_field_declaration");
     }
     fieldIds.add(field.id);
+  }
+  if (!Array.isArray(attestation.executionProjections)) {
+    throw new PrivacyPackConnectionError("invalid_execution_projection_declaration");
+  }
+  const projectionIds = new Set();
+  for (const projection of attestation.executionProjections) {
+    if (
+      !projection?.id
+      || !projection?.executionResourceId
+      || !projection?.workflowResourceId
+      || projectionIds.has(projection.id)
+      || !attestation.resources.some(
+        (resource) => resource.id === projection.executionResourceId
+          && resource.kind === RESOURCE_KIND.EXECUTION,
+      )
+      || !attestation.resources.some(
+        (resource) => resource.id === projection.workflowResourceId
+          && resource.kind === RESOURCE_KIND.WORKFLOW,
+      )
+      || !attestation.protectedFields.some(
+        (field) => field.execution === true
+          && field.workflowResourceId === projection.workflowResourceId,
+      )
+    ) {
+      throw new PrivacyPackConnectionError("invalid_execution_projection_declaration");
+    }
+    projectionIds.add(projection.id);
   }
   if (!Array.isArray(attestation.protectedOperations)) {
     throw new PrivacyPackConnectionError("invalid_server_operation_declaration");
