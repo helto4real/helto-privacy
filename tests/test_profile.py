@@ -150,6 +150,7 @@ def test_profile_fingerprint_is_stable_and_order_independent():
             "commit_mode_transition",
             "normalize",
             "prepare_mode_transition",
+            "read_legacy",
             "rollback_mode_transition",
         ),
     }

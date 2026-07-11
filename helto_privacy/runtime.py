@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .comfy_ui import register_helto_privacy_ui
-from .profile import PrivacyProfile, ProfileResource, ResourceKind
+from .profile import PrivacyProfile, ProfileResource, ProtectedField, ResourceKind
 
 if TYPE_CHECKING:
     from .suite import ProfileIdentity
@@ -195,7 +195,47 @@ class ModeHandle(_ResourceHandle):
 
 @dataclass(frozen=True, slots=True)
 class WorkflowHandle(_ResourceHandle):
-    pass
+    def inspect_disposition(
+        self,
+        field_id: str,
+        protected_value: object,
+        authorization,
+    ):
+        from .snapshot import inspect_field_disposition
+
+        field_declaration, state_adapter = self._snapshot_field(field_id)
+        return inspect_field_disposition(
+            pack_id=self.pack_id,
+            field_declaration=field_declaration,
+            state_adapter=state_adapter,
+            protected_value=protected_value,
+            authorization=authorization,
+        )
+
+    def protect(self, field_id: str, value: object, authorization):
+        from .snapshot import protect_field_value
+
+        field_declaration, state_adapter = self._snapshot_field(field_id)
+        return protect_field_value(
+            pack_id=self.pack_id,
+            field_declaration=field_declaration,
+            state_adapter=state_adapter,
+            value=value,
+            authorization=authorization,
+        )
+
+    def _snapshot_field(self, field_id: str):
+        from .snapshot import SnapshotError
+
+        field_declaration = _declared_snapshot_field(
+            self._installation.profile,
+            field_id,
+            workflow_resource_id=self.resource_id,
+        )
+        state_adapter = self._adapters.get(field_declaration.state_adapter)
+        if state_adapter is None:
+            raise SnapshotError("PRIVACY_SNAPSHOT_ADAPTER_INVALID")
+        return field_declaration, state_adapter
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +284,12 @@ class BoundPrivacyPack:
     def workflow(self, resource_id: str) -> WorkflowHandle:
         return self._resource(resource_id, ResourceKind.WORKFLOW, WorkflowHandle)
 
+    def snapshot_field(self, field_id: str) -> tuple[WorkflowHandle, ProtectedField]:
+        """Resolve one protected field and its declared workflow handle."""
+
+        field_declaration = _declared_snapshot_field(self.profile, field_id)
+        return self.workflow(field_declaration.workflow_resource_id), field_declaration
+
     def records(self, resource_id: str) -> RecordHandle:
         return self._resource(resource_id, ResourceKind.RECORD, RecordHandle)
 
@@ -273,6 +319,31 @@ class BoundPrivacyPack:
             raise UnknownResourceError()
         adapters = _adapters_for_resource(self._installation, resource)
         return handle_type(self.profile.id, resource.id, self._installation, adapters)
+
+
+def _declared_snapshot_field(
+    profile: PrivacyProfile,
+    field_id: str,
+    *,
+    workflow_resource_id: str | None = None,
+) -> ProtectedField:
+    from .snapshot import SnapshotError
+
+    field_declaration = next(
+        (
+            field
+            for field in profile.protected_fields
+            if field.id == field_id
+            and (
+                workflow_resource_id is None
+                or field.workflow_resource_id == workflow_resource_id
+            )
+        ),
+        None,
+    )
+    if field_declaration is None:
+        raise SnapshotError("PRIVACY_SNAPSHOT_FIELD_INVALID")
+    return field_declaration
 
 
 _LOCK = RLock()
@@ -359,6 +430,24 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "modeResourceId": scope.mode_resource_id,
                 }
                 for scope in profile.scopes
+            ],
+            "protectedFields": [
+                {
+                    "id": field.id,
+                    "workflowResourceId": field.workflow_resource_id,
+                    "scopeId": field.scope_id,
+                    "browserAdapter": field.browser_adapter,
+                    "nodeTypes": list(field.node_types),
+                    "location": {
+                        "kind": field.location.kind.value,
+                        "name": field.location.name,
+                    },
+                    "currentSchema": field.current_schema,
+                    "purpose": field.purpose,
+                    "legacyReaderIds": list(field.legacy_reader_ids),
+                    "execution": field.execution,
+                }
+                for field in profile.protected_fields
             ],
             "protectedOperations": [
                 {

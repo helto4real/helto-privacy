@@ -572,6 +572,8 @@ class PrivacyProfile:
                 "clear_plaintext",
                 *_MODE_TRANSITION_METHODS,
             )
+            if field.legacy_reader_ids:
+                _add_contract(contracts, field.state_adapter, "read_legacy")
         for record in self.records:
             _add_contract(
                 contracts,
@@ -619,8 +621,10 @@ class PrivacyProfile:
                 "apply",
                 "clear",
                 "normalize",
+                "readProtected",
                 "reconcileNode",
                 "reconcileNodeDefinition",
+                "writeProtected",
             )
         for adapter_id in tuple(contracts):
             _add_contract(contracts, adapter_id, "onPrivacySessionChange")

@@ -112,15 +112,15 @@ projection.
 **Blocked by:** Compile atomic privacy profiles; Resolve privacy mode and
 transitions; Deliver the shared browser privacy UI.
 
-- [ ] Model verified current, locked current, failed current, readable legacy,
+- [x] Model verified current, locked current, failed current, readable legacy,
       and unsupported dispositions without treating envelope shape as proof of
       usability.
-- [ ] Coordinate canonical generation memoization and concurrent encryption in
+- [x] Coordinate canonical generation memoization and concurrent encryption in
       runtime memory so stale generations cannot overwrite newer state.
-- [ ] Gate manual save, autosave, export, graph-to-prompt, direct queueing,
+- [x] Gate manual save, autosave, export, graph-to-prompt, direct queueing,
       queue-manager capture, partial execution, and subgraphs on one graph-wide
       settlement barrier.
-- [ ] Preserve unchanged locked/failed ciphertext byte-for-byte while blocking
+- [x] Preserve unchanged locked/failed ciphertext byte-for-byte while blocking
       reveal, execution, replacement, stale reuse, default substitution, and
       plaintext fallback.
 

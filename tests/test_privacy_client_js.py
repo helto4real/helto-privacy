@@ -273,3 +273,62 @@ def test_public_mode_transition_cannot_forge_declassification_confirmation(tmp_p
         );
         """,
     )
+
+
+def test_snapshot_transport_uses_only_attested_fixed_field_routes(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        globalThis.localStorage = {
+          getItem: () => "synthetic-token",
+          setItem() {},
+          removeItem() {},
+        };
+        globalThis.document = { cookie: "" };
+        const calls = [];
+        globalThis.fetch = async (url, options = {}) => {
+          const target = String(url);
+          if (target.endsWith("/profiles/helto.test")) return response({
+            ok: true,
+            id: "helto.test",
+            fingerprint: "a".repeat(64),
+            suiteManifestDigest: "b".repeat(64),
+            protectedOperations: [],
+            protectedFields: [{
+              id: "private-state",
+              workflowResourceId: "state",
+              scopeId: "global",
+              browserAdapter: "state-ui",
+              nodeTypes: ["SyntheticNode"],
+            }],
+            modeScopes: [],
+          });
+          if (target.endsWith("/suite/browser-attestation")) return response({ ok: true });
+          calls.push({ target, options });
+          if (target.endsWith("/disposition")) {
+            return response({ ok: true, disposition: "verified-current" });
+          }
+          return response({ ok: true, envelope: { encrypted: true, ciphertext: "opaque" } });
+        };
+        const transport = await client.connectAttestedPrivacyProfileClient({
+          packId: "helto.test",
+          profileFingerprint: "a".repeat(64),
+          suiteManifestDigest: "b".repeat(64),
+        });
+
+        await transport.snapshot.disposition("private-state", "SYNTHETIC_CIPHERTEXT");
+        await transport.snapshot.protect("private-state", { value: "SYNTHETIC_VALUE" });
+
+        assert.deepEqual(calls.map((call) => call.target), [
+          "/helto_privacy/profiles/helto.test/fields/private-state/disposition",
+          "/helto_privacy/profiles/helto.test/fields/private-state/protect",
+        ]);
+        assert(calls.every((call) => !call.target.includes("SYNTHETIC")));
+        assert(calls.every((call) => call.options.credentials === "same-origin"));
+        assert.throws(
+          () => transport.snapshot.protect("unattested-field", {}),
+          (error) => error.code === "PRIVACY_SNAPSHOT_FIELD_INVALID",
+        );
+        assert.equal(typeof transport.snapshot.request, "undefined");
+        """,
+    )

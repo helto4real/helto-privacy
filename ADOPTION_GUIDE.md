@@ -290,7 +290,8 @@ show plaintext field contents. The scanner handles:
 Old legacy values without a pack-supplied migration adapter are reset-only.
 Do not try to decrypt or display them in the browser.
 
-Replace fail-open serialization helpers with the shared fail-closed helper.
+For recovery-only re-encryption, replace fail-open helpers with the shared
+fail-closed helper.
 If privacy is enabled and encryption fails, this helper opens the shared
 unlock/setup dialog, retries once, then throws a privacy error. Do not catch
 that error and write plaintext.
@@ -316,7 +317,69 @@ it accepts only a valid envelope for the registered schema; otherwise it
 blocks with `PRIVACY_ENCRYPTION_FAILED` or
 `PRIVACY_ENCRYPTION_UNAVAILABLE`.
 
-## Step 6 — Tests (non-negotiable hygiene)
+Do not use this recovery helper as the normal save/queue implementation after
+the coordinated cutover. Normal serialization uses the snapshot coordinator
+below so every projection shares one generation and envelope.
+
+## Step 6 — Bind privacy snapshots and serialization
+
+Each protected-field browser adapter implements the full attested contract,
+including these snapshot methods:
+
+```js
+const browserAdapters = {
+  "prompt-state-ui": {
+    normalize(node) {
+      return normalizeProductState(node.runtimeState);
+    },
+    readProtected(node) {
+      return node.widgets.find((widget) => widget.name === "private_state").value;
+    },
+    writeProtected(node, envelope) {
+      writeExactSerializedWidgetValue(node, "private_state", envelope);
+    },
+    // apply, clear, onPrivacySessionChange, and reconciliation methods...
+  },
+};
+```
+
+`readProtected` must return the exact serialized ciphertext. `writeProtected`
+must update the live widget plus every ComfyUI serialized representation used
+by workflow and prompt projections. It must never write plaintext.
+
+After every product edit, mark the declared field generation. Do not encrypt
+inside a widget serializer:
+
+```js
+const workflow = privacy.workflow("prompt-library");
+workflow.markEdited(node, "private-state");
+```
+
+The shared runtime eagerly prepares that generation. Async save, export,
+queue-manager, replay, or direct API entry points wrap the complete operation
+in `await workflow.runWithSnapshot(reason, async ({ graphToPrompt }) => {
+... })`; this pins one transaction across every projection in the callback and
+serializes overlapping operations. Use the callback's scoped `graphToPrompt`
+invoker when that integration needs prompt generation. Do not call the wrapped
+`app.graphToPrompt()` from inside the callback: ordinary app calls intentionally
+queue as separate transactions. `workflow.settle(reason)` prepares a
+transaction for an immediately following synchronous serializer. Synchronous
+serialization calls
+`workflow.requireSettled("serialize")` and aborts if the generation is not
+already settled. Supported reasons include `manual-save`,
+`autosave`, `export`, `graph-to-prompt`, `direct-queue`, `queue-manager`,
+`partial-execution`, `subgraph`, and `replay`.
+
+Use `workflow.workflowProjection(node, fieldId)` only for protected workflow
+storage. `workflow.executionProjection(...)` rejects locked, failed, or
+unsupported state. A successful settlement pins one immutable runtime
+transaction; projections reject if the generation changes outside an active
+barrier, while graph-to-prompt keeps its captured transaction pinned across
+both ComfyUI passes. Execution-bearing reasons fail before queue logic when any
+private field is locked or failed. Never catch a `PRIVACY_SNAPSHOT_*` error and
+substitute an old envelope, empty/default state, or plaintext.
+
+## Step 7 — Tests (non-negotiable hygiene)
 
 A test run once minted a real key file inside a repo's `config/` and it
 nearly got committed. Every adopting pack must add an **autouse** fixture
@@ -353,7 +416,7 @@ Rules:
   manual testing. Stage paths explicitly and check `git log -p` for anything
   resembling `"key"`/`"wrapped_key"` values before pushing.
 
-## Step 7 — Validation checklist
+## Step 8 — Validation checklist
 
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real

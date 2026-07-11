@@ -7,6 +7,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PRIVACY_PROFILE = ROOT / "helto_privacy" / "web" / "privacy_profile.js"
 PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
 PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
+PRIVACY_SNAPSHOT = ROOT / "helto_privacy" / "web" / "privacy_snapshot.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
@@ -14,6 +15,9 @@ def run_node_module_test(tmp_path, body: str) -> None:
     (tmp_path / "privacy.js").write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
     (tmp_path / "privacy_client.js").write_text(
         PRIVACY_CLIENT.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (tmp_path / "privacy_snapshot.js").write_text(
+        PRIVACY_SNAPSHOT.read_text(encoding="utf-8"), encoding="utf-8"
     )
     module_path = tmp_path / "privacy_profile" / "privacy_profile.js"
     module_path.parent.mkdir()
@@ -42,8 +46,10 @@ def run_node_module_test(tmp_path, body: str) -> None:
                   "clear",
                   "normalize",
                   "onPrivacySessionChange",
+                  "readProtected",
                   "reconcileNode",
                   "reconcileNodeDefinition",
+                  "writeProtected",
                 ],
               }}],
               resources: [
@@ -56,6 +62,13 @@ def run_node_module_test(tmp_path, body: str) -> None:
               modeScopes: [
                 {{ id: "global", modeResourceId: "privacy-mode" }},
               ],
+              protectedFields: [{{
+                id: "timeline-state",
+                workflowResourceId: "timeline",
+                scopeId: "global",
+                browserAdapter: "timeline-editor",
+                nodeTypes: ["HeltoTimeline"],
+              }}],
               protectedOperations: [
                 {{
                   id: "record.use",
@@ -70,7 +83,21 @@ def run_node_module_test(tmp_path, body: str) -> None:
             globalThis.fetch = async (url) => {{
               const target = String(url);
               let payload = {{ ok: true }};
-              if (target.includes("/profiles/") && !target.endsWith("/modes")) {{
+              if (target.endsWith("/disposition")) {{
+                payload = {{ ok: true, disposition: "verified-current" }};
+              }} else if (target.endsWith("/protect")) {{
+                payload = {{ ok: true, envelope: "SYNTHETIC_CURRENT_ENVELOPE" }};
+              }} else if (target.endsWith("/modes")) {{
+                payload = {{ ok: true, scopes: [{{
+                  id: "global",
+                  modeResourceId: "privacy-mode",
+                  declared: "private",
+                  effective: "private",
+                  inheritedFrom: "base-private",
+                  floors: [],
+                  transitionStatus: "idle",
+                }}] }};
+              }} else if (target.includes("/profiles/") && !target.endsWith("/modes")) {{
                 payload = serverAttestation();
               }} else if (target.endsWith("/unlock")) {{
                 payload = {{ ok: true, token: "SYNTHETIC_SESSION_TOKEN" }};
@@ -104,11 +131,25 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         """
         const calls = [];
         const sessionCalls = [];
+        const existingNode = {
+          id: 1,
+          type: "HeltoTimeline",
+          live: { value: "initial" },
+          protected: "SYNTHETIC_ENVELOPE",
+        };
+        const nestedNode = {
+          id: 5,
+          type: "HeltoTimeline",
+          live: { value: "nested" },
+          protected: "SYNTHETIC_ENVELOPE",
+        };
         const adapter = {
           secret: "MUST_NOT_ESCAPE",
           apply() {},
           clear() {},
-          normalize() {},
+          normalize(node) { return node.live || {}; },
+          readProtected(node) { return node.protected || "SYNTHETIC_ENVELOPE"; },
+          writeProtected(node, value) { node.protected = value; },
           onPrivacySessionChange(session) { sessionCalls.push(session); },
           reconcileNode(node, context) { calls.push([node.id, context.phase]); },
           reconcileNodeDefinition(_nodeType, nodeData, context) {
@@ -116,7 +157,10 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
           },
         };
         const app = {
-          graph: { _nodes: [{ id: 1, type: "HeltoTimeline" }, { id: 2, type: "Other" }] },
+          rootGraph: {
+            _nodes: [existingNode, { id: 2, type: "Other" }],
+            subgraphs: new Map([["nested", { _nodes: [nestedNode] }]]),
+          },
           registeredNodeTypes: {
             HeltoTimeline: { nodeData: { name: "HeltoTimeline" } },
             Other: { nodeData: { name: "Other" } },
@@ -136,12 +180,29 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         assert.equal(pack.suiteManifestDigest, suiteDigest);
         pack.readiness.requireReady();
         assert.equal(app.registerCount, 1);
-        assert.deepEqual(calls, [["HeltoTimeline", "definition-existing"], [1, "existing"]]);
+        assert.deepEqual(calls, [
+          ["HeltoTimeline", "definition-existing"],
+          [1, "existing"],
+          [5, "existing"],
+        ]);
         assert(pack.authorization instanceof privacy.BrowserAuthorizationHandle);
         assert.equal(typeof pack.authorization.request, "undefined");
         assert(typeof pack.session.subscribe === "function");
         assert(pack.mode("privacy-mode") instanceof privacy.BrowserModeHandle);
-        assert(pack.workflow("timeline") instanceof privacy.BrowserWorkflowHandle);
+        const timeline = pack.workflow("timeline");
+        assert(timeline instanceof privacy.BrowserWorkflowHandle);
+        assert.equal(typeof timeline.runWithSnapshot, "function");
+        existingNode.live = { value: "edited" };
+        timeline.markEdited(existingNode, "timeline-state");
+        await timeline.settle("manual-save");
+        assert.equal(
+          timeline.workflowProjection(existingNode, "timeline-state"),
+          "SYNTHETIC_CURRENT_ENVELOPE",
+        );
+        assert.equal(
+          timeline.executionProjection(existingNode, "timeline-state"),
+          "SYNTHETIC_CURRENT_ENVELOPE",
+        );
         assert(pack.records("library") instanceof privacy.BrowserRecordHandle);
         assert(typeof pack.records("library").invoke === "function");
         assert(pack.artifacts("thumbnail") instanceof privacy.BrowserArtifactHandle);
@@ -166,6 +227,7 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         assert.deepEqual(calls, [
           ["HeltoTimeline", "definition-existing"],
           [1, "existing"],
+          [5, "existing"],
           [3, "created"],
           [4, "loaded"],
           ["HeltoTimeline", "definition"],
@@ -206,7 +268,9 @@ def test_browser_connection_blocks_drift_missing_adapters_and_partial_readiness(
           profileFingerprint: fingerprint,
           suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": {
-                apply() {}, clear() {}, normalize() {},
+                apply() {}, clear() {}, normalize(node) { return node.live || {}; },
+                readProtected(node) { return node.protected || "SYNTHETIC_ENVELOPE"; },
+                writeProtected(node, value) { node.protected = value; },
                 onPrivacySessionChange() {},
                 reconcileNode() {}, reconcileNodeDefinition() {},
           } },
@@ -263,7 +327,9 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
         """
         const app = { graph: { nodes: [] }, registerExtension() {} };
         const adapter = {
-          apply() {}, clear() {}, normalize() {},
+          apply() {}, clear() {}, normalize(node) { return node.live || {}; },
+          readProtected(node) { return node.protected || "SYNTHETIC_ENVELOPE"; },
+          writeProtected(node, value) { node.protected = value; },
           onPrivacySessionChange() {},
           reconcileNode() {}, reconcileNodeDefinition() {},
         };
@@ -281,7 +347,9 @@ def test_browser_same_fingerprint_is_idempotent_but_different_fingerprint_confli
           profileFingerprint: fingerprint,
           suiteManifestDigest: suiteDigest,
           adapters: { "timeline-editor": {
-                apply() {}, clear() {}, normalize() {},
+                    apply() {}, clear() {}, normalize(node) { return node.live || {}; },
+                    readProtected(node) { return node.protected || "SYNTHETIC_ENVELOPE"; },
+                    writeProtected(node, value) { node.protected = value; },
                 onPrivacySessionChange() {},
                 reconcileNode() {}, reconcileNodeDefinition() {},
           } },

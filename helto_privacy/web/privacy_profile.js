@@ -10,6 +10,10 @@ import {
   mountSharedPrivacySurface,
   showPrivacyKeystoreDialog,
 } from "../privacy.js";
+import {
+  createPrivacySnapshotCoordinator,
+  installGraphSerializationBarrier,
+} from "../privacy_snapshot.js";
 
 export const PRIVACY_CONTRACT_V2 = "helto.privacy.v2";
 
@@ -126,7 +130,7 @@ export class BrowserModeHandle extends BrowserResourceHandle {
     return entry.transport.mode.resolve(this.resourceId, scopeId);
   }
 
-  transition(scopeId, target) {
+  async transition(scopeId, target) {
     const entry = HANDLE_ENTRIES.get(this);
     if (!entry.modeScopes.some(
       (scope) => scope.id === scopeId && scope.modeResourceId === this.resourceId,
@@ -134,10 +138,45 @@ export class BrowserModeHandle extends BrowserResourceHandle {
       throw new PrivacyPackConnectionError("unknown_browser_mode_scope");
     }
     entry.pack.authorization.requireReady();
-    return entry.transport.mode.transition(scopeId, target);
+    const result = await entry.transport.mode.transition(scopeId, target);
+    if (result !== null) await entry.snapshotCoordinator.refreshModes();
+    return result;
   }
 }
-export class BrowserWorkflowHandle extends BrowserResourceHandle {}
+export class BrowserWorkflowHandle extends BrowserResourceHandle {
+  markEdited(owner, fieldId) {
+    const entry = HANDLE_ENTRIES.get(this);
+    requireWorkflowField(entry, this.resourceId, fieldId);
+    return entry.snapshotCoordinator.markEdited(owner, fieldId);
+  }
+
+  settle(reason = "manual-save") {
+    const entry = HANDLE_ENTRIES.get(this);
+    return entry.serializationBarrier.settle(reason);
+  }
+
+  runWithSnapshot(reason, operation) {
+    const entry = HANDLE_ENTRIES.get(this);
+    return entry.serializationBarrier.runWithSnapshot(reason, operation);
+  }
+
+  requireSettled(reason = "serialize") {
+    const entry = HANDLE_ENTRIES.get(this);
+    return entry.serializationBarrier.requireSettled(reason);
+  }
+
+  workflowProjection(owner, fieldId) {
+    const entry = HANDLE_ENTRIES.get(this);
+    requireWorkflowField(entry, this.resourceId, fieldId);
+    return entry.snapshotCoordinator.workflowProjection(owner, fieldId);
+  }
+
+  executionProjection(owner, fieldId) {
+    const entry = HANDLE_ENTRIES.get(this);
+    requireWorkflowField(entry, this.resourceId, fieldId);
+    return entry.snapshotCoordinator.executionProjection(owner, fieldId);
+  }
+}
 export class BrowserRecordHandle extends BrowserResourceHandle {}
 export class BrowserArtifactHandle extends BrowserResourceHandle {}
 export class BrowserExecutionHandle extends BrowserResourceHandle {}
@@ -269,6 +308,13 @@ export async function connectPrivacyPack({
       id: String(item.id),
       modeResourceId: String(item.modeResourceId),
     })),
+    protectedFields: attestation.protectedFields.map((item) => Object.freeze({
+      id: String(item.id),
+      workflowResourceId: String(item.workflowResourceId),
+      scopeId: String(item.scopeId),
+      browserAdapter: String(item.browserAdapter),
+      nodeTypes: Object.freeze([...item.nodeTypes]),
+    })),
     protectedOperations: attestation.protectedOperations.map((item) => Object.freeze({
       id: String(item.id),
       resourceId: String(item.resourceId),
@@ -277,15 +323,36 @@ export async function connectPrivacyPack({
     })),
     handles: new Map(),
     transport,
+    snapshotCoordinator: null,
+    serializationBarrier: null,
     sessionState: Object.freeze({ state: "unknown", revision: 0 }),
     sessionUnsubscribe: null,
     surface: null,
     status: STATUS.READY,
     pack: null,
   };
+  entry.snapshotCoordinator = createPrivacySnapshotCoordinator({
+    packId: entry.id,
+    fields: entry.protectedFields,
+    adapters: entry.adapters,
+    transport: entry.transport.snapshot,
+    resolvePrivate: async (field) => {
+      const scope = entry.modeScopes.find((item) => item.id === field.scopeId);
+      if (!scope) return true;
+      const resolution = await entry.transport.mode.resolve(
+        scope.modeResourceId,
+        scope.id,
+      );
+      return resolution.effective !== "public";
+    },
+    blocked: entry.suiteStatus !== STATUS.SUITE_ACTIVE,
+  });
   entry.pack = new BrowserPrivacyPack(entry);
   entry.sessionUnsubscribe = subscribePrivacySession((session) => {
     entry.sessionState = session;
+    entry.snapshotCoordinator.onSessionChange(session).catch(() => {
+      entry.status = STATUS.CONFLICT;
+    });
     for (const adapter of Object.values(entry.adapters)) {
       try {
         adapter.onPrivacySessionChange(session);
@@ -302,6 +369,12 @@ export async function connectPrivacyPack({
   CONNECTED_PRIVACY_PACKS.set(id, entry);
   try {
     registerPrivacyLifecycleExtension(app);
+    entry.serializationBarrier = installGraphSerializationBarrier(
+      app,
+      () => [...CONNECTED_PRIVACY_PACKS.values()].map(
+        (connected) => connected.snapshotCoordinator,
+      ),
+    );
     await reconcileExistingNodeDefinitions(app, entry);
     await reconcileExistingPrivacyNodes(app, entry);
   } catch {
@@ -372,6 +445,32 @@ function validateServerAttestation({
       throw new PrivacyPackConnectionError("invalid_server_mode_scope_declaration");
     }
     modeScopeIds.add(scope.id);
+  }
+  if (!Array.isArray(attestation.protectedFields)) {
+    throw new PrivacyPackConnectionError("invalid_server_field_declaration");
+  }
+  const fieldIds = new Set();
+  for (const field of attestation.protectedFields) {
+    if (
+      !field?.id
+      || !field?.workflowResourceId
+      || !field?.scopeId
+      || !field?.browserAdapter
+      || !Array.isArray(field.nodeTypes)
+      || !field.nodeTypes.length
+      || fieldIds.has(field.id)
+      || !attestation.resources.some(
+        (resource) => resource.id === field.workflowResourceId
+          && resource.kind === RESOURCE_KIND.WORKFLOW,
+      )
+      || !attestation.requiredBrowserAdapters.some(
+        (adapter) => adapter.id === field.browserAdapter,
+      )
+      || !attestation.modeScopes.some((scope) => scope.id === field.scopeId)
+    ) {
+      throw new PrivacyPackConnectionError("invalid_server_field_declaration");
+    }
+    fieldIds.add(field.id);
   }
   if (!Array.isArray(attestation.protectedOperations)) {
     throw new PrivacyPackConnectionError("invalid_server_operation_declaration");
@@ -448,6 +547,15 @@ function browserResource(pack, resourceId, expectedKind, HandleType) {
   return entry.handles.get(cacheKey);
 }
 
+function requireWorkflowField(entry, workflowResourceId, fieldId) {
+  const id = String(fieldId || "");
+  if (!entry.protectedFields.some(
+    (field) => field.id === id && field.workflowResourceId === workflowResourceId,
+  )) {
+    throw new PrivacyPackConnectionError("unknown_browser_field");
+  }
+}
+
 function registerPrivacyLifecycleExtension(app) {
   if (PRIVACY_EXTENSION_REGISTERED) return;
   if (typeof app.registerExtension !== "function") {
@@ -480,8 +588,27 @@ async function reconcileExistingNodeDefinitions(app, entry) {
 }
 
 async function reconcileExistingPrivacyNodes(app, entry) {
-  const nodes = app?.graph?._nodes || app?.graph?.nodes || [];
-  for (const node of nodes) await reconcileEntryNode(entry, node, "existing");
+  for (const node of collectGraphNodes(app?.rootGraph || app?.graph)) {
+    await reconcileEntryNode(entry, node, "existing");
+  }
+}
+
+function collectGraphNodes(rootGraph) {
+  const nodes = [];
+  const visited = new Set();
+  const visit = (graph) => {
+    if (!graph || typeof graph !== "object" || visited.has(graph)) return;
+    visited.add(graph);
+    const graphNodes = graph._nodes || graph.nodes || [];
+    if (Array.isArray(graphNodes)) nodes.push(...graphNodes);
+    const subgraphs = graph.subgraphs;
+    const values = typeof subgraphs?.values === "function"
+      ? subgraphs.values()
+      : (Array.isArray(subgraphs) ? subgraphs : []);
+    for (const subgraph of values) visit(subgraph);
+  };
+  visit(rootGraph);
+  return nodes;
 }
 
 async function reconcilePrivacyNode(node, phase) {
@@ -491,6 +618,7 @@ async function reconcilePrivacyNode(node, phase) {
 }
 
 async function reconcileEntryNode(entry, node, phase) {
+  entry.snapshotCoordinator.reserveNode(node);
   const nodeType = String(node?.comfyClass || node?.type || "");
   for (const requirement of entry.requirements) {
     if (!requirement.nodeTypes.includes(nodeType)) continue;
@@ -499,6 +627,8 @@ async function reconcileEntryNode(entry, node, phase) {
       await reconcile(node, Object.freeze({ packId: entry.id, adapterId: requirement.id, phase }));
     }
   }
+  await entry.snapshotCoordinator.registerNode(node);
+  entry.serializationBarrier?.refreshGraphs();
 }
 
 async function reconcilePrivacyNodeDefinition(nodeType, nodeData, phase) {

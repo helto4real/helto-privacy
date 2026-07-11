@@ -297,9 +297,17 @@ export async function connectAttestedPrivacyProfileClient({
   const operations = Object.freeze(
     normalizeProtectedOperations(attestation.protectedOperations),
   );
+  const protectedFields = Object.freeze(
+    normalizeProtectedFields(attestation.protectedFields),
+  );
   const mode = createAttestedPrivacyModeClient({
     packId: requestClient.identity.packId,
     modeScopes: attestation.modeScopes,
+    requestClient,
+  });
+  const snapshot = createAttestedPrivacySnapshotClient({
+    packId: requestClient.identity.packId,
+    fields: protectedFields,
     requestClient,
   });
 
@@ -325,7 +333,67 @@ export async function connectAttestedPrivacyProfileClient({
     identity: requestClient.identity,
     operations,
     mode,
+    snapshot,
     invoke,
+  });
+}
+
+function createAttestedPrivacySnapshotClient({ packId, fields, requestClient }) {
+  const declaredIds = new Set(fields.map((field) => field.id));
+  const requireField = (fieldId) => {
+    const id = String(fieldId || "");
+    if (!declaredIds.has(id)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_SNAPSHOT_FIELD_INVALID");
+    }
+    return id;
+  };
+  const disposition = (fieldId, protectedValue) => {
+    const id = requireField(fieldId);
+    return requestClient.request(
+      "snapshot.disposition",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/fields/${encodeURIComponent(id)}/disposition`,
+      {
+        body: { protectedValue },
+        retryUnlock: false,
+      },
+    );
+  };
+  const protect = (fieldId, value) => {
+    const id = requireField(fieldId);
+    return requestClient.request(
+      "snapshot.protect",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/fields/${encodeURIComponent(id)}/protect`,
+      { body: { value } },
+    );
+  };
+  return Object.freeze({ disposition, protect });
+}
+
+function normalizeProtectedFields(fields) {
+  if (!Array.isArray(fields)) return [];
+  const seen = new Set();
+  return fields.map((field) => {
+    const id = String(field?.id || "");
+    const workflowResourceId = String(field?.workflowResourceId || "");
+    const scopeId = String(field?.scopeId || "");
+    const browserAdapter = String(field?.browserAdapter || "");
+    const nodeTypes = Object.freeze(
+      (Array.isArray(field?.nodeTypes) ? field.nodeTypes : [])
+        .map((value) => String(value || ""))
+        .filter(Boolean),
+    );
+    if (
+      !/^[a-z0-9][a-z0-9._-]*$/.test(id)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(workflowResourceId)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(scopeId)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(browserAdapter)
+      || !nodeTypes.length
+      || seen.has(id)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_SNAPSHOT_FIELD_INVALID");
+    }
+    seen.add(id);
+    return Object.freeze({ id, workflowResourceId, scopeId, browserAdapter, nodeTypes });
   });
 }
 

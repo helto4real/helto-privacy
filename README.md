@@ -327,6 +327,54 @@ If the shared keystore already exists, that call verifies the password, imports
 the legacy key as decrypt-only via `add_keys_to_keystore`, and renames the
 legacy file to `privacy_key.json.migrated`.
 
+## Privacy Snapshots and Serialization Barriers
+
+Every connected privacy profile compiles its protected workflow fields into a
+runtime-only snapshot coordinator. One edit generation produces one settled
+current envelope, and that exact envelope is reused by workflow metadata and
+every queued projection. Equal concurrent settlement shares one pending
+protection request; an older generation can never overwrite a newer edit. Each
+settlement creates an immutable runtime transaction. Graph-to-prompt pins that
+transaction until both workflow and executable projections finish, so a newer
+edit cannot mix generations inside one operation.
+
+Consumer browser adapters locate product state but do not decide privacy
+policy. Workflow adapters implement `normalize(node, context)`,
+`readProtected(node, context)`, and `writeProtected(node, envelope, context)`.
+After a product edit, notify the typed workflow handle:
+
+```js
+const workflow = privacy.workflow("prompt-library");
+workflow.markEdited(node, "private-state");
+await workflow.settle("manual-save");
+```
+
+`settle()` prepares synchronous serialization. Consumer-owned asynchronous
+save, export, replay, or queue-manager flows use
+`workflow.runWithSnapshot(reason, async ({ graphToPrompt }) => { ... })`; every
+projection made inside that callback is pinned to the same immutable
+transaction. Direct integrations use the scoped `graphToPrompt` invoker when
+they need prompt generation; ordinary `app.graphToPrompt()` calls remain queued
+as separate transactions.
+
+The shared profile runtime gates every `app.queuePrompt()` pass at its
+`app.graphToPrompt()` boundary, plus root-graph serialization and nested
+subgraph serialization. Autosave, manual save/export, queue-manager capture, partial
+execution, and direct integrations either consume an already-settled snapshot
+or abort with a sanitized `PRIVACY_SNAPSHOT_*` error. Consumer-owned direct API
+or queue-manager entry points use the same `runWithSnapshot` boundary; there is
+no second encryption path.
+
+Envelope shape is never treated as proof of usability. The server classifies a
+field as verified current, locked current, failed current, readable legacy, or
+unsupported through real current decryption or an exact declared legacy
+reader. Unedited locked/failed ciphertext can be copied exactly into workflow
+storage, but reveal, execution, editing, default substitution, and plaintext
+fallback remain blocked. Execution-bearing settlement reasons reject locked or
+failed state before product queue logic receives a projection. A readable
+legacy value is immediately rewritten as a current envelope before
+serialization.
+
 ## Shared UI and Canonical Routes (ComfyUI)
 
 Inside ComfyUI, packs do not implement their own unlock endpoints or dialogs.
@@ -345,10 +393,13 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 - `GET  /helto_privacy/profiles/{pack_id}`
 - `GET  /helto_privacy/profiles/{pack_id}/modes`
 - `POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition`
+- `POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition`
+- `POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect`
 - `POST /helto_privacy/suite/browser-attestation`
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`
 - `GET  /helto_privacy/ui/privacy.js` — the shared browser client and UI
+- `GET  /helto_privacy/ui/privacy_snapshot.js` — runtime snapshot coordinator
 - `GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js` — the exact
   browser profile compiler
 

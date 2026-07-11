@@ -11,10 +11,14 @@ Registered surface (pack-neutral, stable):
 - ``GET  /helto_privacy/profiles/{pack_id}`` — safe profile attestation
 - ``GET  /helto_privacy/profiles/{pack_id}/modes`` — safe mode status
 - ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition``
+- ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition``
+- ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect``
 - ``POST /helto_privacy/unlock`` / ``/lock``
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
   module any pack frontend can ``import()``.
+- ``GET  /helto_privacy/ui/privacy_snapshot.js`` — runtime-only snapshot and
+  serialization barrier mechanics.
 - ``GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js`` — exact-suite
   browser profile runtime.
 
@@ -41,6 +45,7 @@ from .suite_runtime import SuiteBlockedError, require_active_process_suite
 ROUTE_PREFIX = "/helto_privacy"
 UI_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy.js"
 CLIENT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_client.js"
+SNAPSHOT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_snapshot.js"
 PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile/{{manifest_digest}}.js"
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -183,6 +188,124 @@ def register_helto_privacy_ui(
             return _privacy_error_response(
                 web,
                 "PRIVACY_MODE_STATUS_FAILED",
+                500,
+            )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/fields/{{field_id}}/disposition"
+    )
+    async def post_helto_privacy_field_disposition(request):
+        from .guard import PrivacyAuthorizationError, PrivacyRouteError
+        from .runtime import PackBlockedError, bound_privacy_pack
+        from .snapshot import SnapshotError
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            field_id = str(request.match_info.get("field_id") or "")
+            workflow, field = pack.snapshot_field(field_id)
+            payload = await request.json()
+            if not isinstance(payload, dict) or "protectedValue" not in payload:
+                return _privacy_error_response(
+                    web,
+                    "PRIVACY_SNAPSHOT_INPUT_INVALID",
+                    400,
+                )
+            try:
+                authorization = pack.authorization.authorize_request(
+                    request,
+                    "snapshot.disposition",
+                )
+            except PrivacyAuthorizationError as exc:
+                if exc.code not in {
+                    "PRIVACY_LOCKED",
+                    "PRIVACY_KEYSTORE_UNINITIALIZED",
+                }:
+                    raise
+                authorization = None
+            result = workflow.inspect_disposition(
+                field.id,
+                payload["protectedValue"],
+                authorization,
+            )
+            response = {
+                "ok": True,
+                "fieldId": field.id,
+                "disposition": result.disposition.value,
+            }
+            if result.replacement_envelope is not None:
+                response["replacementEnvelope"] = result.replacement_envelope
+            return web.json_response(
+                response,
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except PrivacyRouteError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except SnapshotError as exc:
+            return _privacy_error_response(
+                web,
+                exc.code,
+                _snapshot_error_status(exc.code),
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_SNAPSHOT_DISPOSITION_FAILED",
+                500,
+            )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/fields/{{field_id}}/protect"
+    )
+    async def post_helto_privacy_field_protect(request):
+        from .guard import PrivacyRouteError
+        from .runtime import PackBlockedError, bound_privacy_pack
+        from .snapshot import SnapshotError
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            field_id = str(request.match_info.get("field_id") or "")
+            workflow, field = pack.snapshot_field(field_id)
+            payload = await request.json()
+            if not isinstance(payload, dict) or "value" not in payload:
+                return _privacy_error_response(
+                    web,
+                    "PRIVACY_SNAPSHOT_INPUT_INVALID",
+                    400,
+                )
+            authorization = pack.authorization.authorize_request(
+                request,
+                "snapshot.protect",
+            )
+            result = workflow.protect(
+                field.id,
+                payload["value"],
+                authorization,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "fieldId": field.id,
+                    "disposition": result.disposition.value,
+                    "envelope": result.envelope,
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except PrivacyRouteError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except SnapshotError as exc:
+            return _privacy_error_response(
+                web,
+                exc.code,
+                _snapshot_error_status(exc.code),
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_SNAPSHOT_PROTECTION_FAILED",
                 500,
             )
 
@@ -366,6 +489,23 @@ def register_helto_privacy_ui(
             headers={"Cache-Control": "no-cache"},
         )
 
+    @routes.get(SNAPSHOT_MODULE_ROUTE)
+    async def get_helto_privacy_snapshot_module(_request):
+        try:
+            source = (_WEB_DIR / "privacy_snapshot.js").read_text(encoding="utf-8")
+        except OSError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
+                500,
+            )
+        return web.Response(
+            text=source,
+            content_type="application/javascript",
+            charset="utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @routes.get(PROFILE_MODULE_ROUTE)
     async def get_helto_privacy_profile_module(request):
         from .suite_runtime import process_suite_status_payload
@@ -459,6 +599,10 @@ def _privacy_error_response(web, code: str, status: int):
         status=status,
         headers={"Cache-Control": "no-store"},
     )
+
+
+def _snapshot_error_status(code: str) -> int:
+    return 400 if code == "PRIVACY_SNAPSHOT_FIELD_INVALID" else 409
 
 
 def _mode_resolution_payload(

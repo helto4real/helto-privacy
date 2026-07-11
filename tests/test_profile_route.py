@@ -13,6 +13,7 @@ from helto_privacy.profile import (
     ResourceKind,
 )
 from helto_privacy.suite_runtime import SuiteInstallation, register_process_suite
+from helto_privacy.snapshot import SnapshotError
 from test_suite_runtime import _inventory, _release
 
 
@@ -180,6 +181,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     assert response.data["modeScopes"] == [
         {"id": "route-test", "modeResourceId": "privacy-mode"}
     ]
+    assert response.data["protectedFields"] == []
     assert response.data["protectedOperations"] == []
     assert "token" not in str(response.data).lower()
     assert "secret" not in str(response.data).lower()
@@ -214,6 +216,10 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             assert request.headers["X-Helto-Privacy-Declassification"] == "confirmed"
             assert (scope_id, target) == ("route-test", "public")
             return "synthetic-authorization"
+
+        def authorize_request(self, _request, operation):
+            assert operation in {"snapshot.disposition", "snapshot.protect"}
+            return f"synthetic-{operation}"
 
     fake_pack = types.SimpleNamespace(
         profile=profile,
@@ -272,6 +278,114 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     }
     assert transition_response.headers == {"Cache-Control": "no-store"}
 
+    snapshot_field = types.SimpleNamespace(
+        id="private-state",
+        workflow_resource_id="state",
+    )
+
+    class Workflow:
+        def inspect_disposition(self, field_id, protected_value, authorization):
+            assert (field_id, protected_value, authorization) == (
+                "private-state",
+                "SYNTHETIC_CIPHERTEXT",
+                "synthetic-snapshot.disposition",
+            )
+            return types.SimpleNamespace(
+                disposition=types.SimpleNamespace(value="verified-current"),
+                replacement_envelope=None,
+            )
+
+        def protect(self, field_id, value, authorization):
+            assert (field_id, value, authorization) == (
+                "private-state",
+                {"value": "SYNTHETIC_PLAINTEXT_CANARY"},
+                "synthetic-snapshot.protect",
+            )
+            return types.SimpleNamespace(
+                disposition=types.SimpleNamespace(value="verified-current"),
+                envelope={"encrypted": True, "ciphertext": "opaque"},
+            )
+
+    fake_pack.profile = types.SimpleNamespace(
+        id=profile.id,
+        scopes=profile.scopes,
+        protected_fields=(snapshot_field,),
+    )
+    def resolve_snapshot_field(field_id):
+        if field_id != snapshot_field.id:
+            raise SnapshotError("PRIVACY_SNAPSHOT_FIELD_INVALID")
+        return Workflow(), snapshot_field
+
+    fake_pack.snapshot_field = resolve_snapshot_field
+
+    async def disposition_payload():
+        return {"protectedValue": "SYNTHETIC_CIPHERTEXT"}
+
+    disposition_handler = prompt_server.routes.handlers[
+        (
+            "POST",
+            f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/fields/{{field_id}}/disposition",
+        )
+    ]
+    disposition_response = asyncio.run(
+        disposition_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "field_id": "private-state"},
+                headers={},
+                cookies={},
+                json=disposition_payload,
+            )
+        )
+    )
+    assert disposition_response.data == {
+        "ok": True,
+        "fieldId": "private-state",
+        "disposition": "verified-current",
+    }
+
+    async def protect_payload():
+        return {"value": {"value": "SYNTHETIC_PLAINTEXT_CANARY"}}
+
+    protect_handler = prompt_server.routes.handlers[
+        (
+            "POST",
+            f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/fields/{{field_id}}/protect",
+        )
+    ]
+    protect_response = asyncio.run(
+        protect_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "field_id": "private-state"},
+                headers={},
+                cookies={},
+                json=protect_payload,
+            )
+        )
+    )
+    assert protect_response.data == {
+        "ok": True,
+        "fieldId": "private-state",
+        "disposition": "verified-current",
+        "envelope": {"encrypted": True, "ciphertext": "opaque"},
+    }
+    assert "SYNTHETIC_PLAINTEXT_CANARY" not in str(protect_response.data)
+
+    invalid_field_response = asyncio.run(
+        disposition_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "field_id": "missing-field"},
+                headers={},
+                cookies={},
+                json=disposition_payload,
+            )
+        )
+    )
+    assert invalid_field_response.status == 400
+    assert invalid_field_response.data == {
+        "ok": False,
+        "error": "PRIVACY_SNAPSHOT_FIELD_INVALID",
+    }
+
     missing = asyncio.run(
         handler(types.SimpleNamespace(match_info={"pack_id": "helto.missing"}))
     )
@@ -285,11 +399,19 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     client_module_handler = prompt_server.routes.handlers[
         ("GET", comfy_ui.CLIENT_MODULE_ROUTE)
     ]
+    snapshot_module_handler = prompt_server.routes.handlers[
+        ("GET", comfy_ui.SNAPSHOT_MODULE_ROUTE)
+    ]
     client_module_response = asyncio.run(
         client_module_handler(types.SimpleNamespace())
     )
     assert client_module_response.status == 200
     assert "connectAttestedPrivacyProfileClient" in client_module_response.kwargs["text"]
+    snapshot_module_response = asyncio.run(
+        snapshot_module_handler(types.SimpleNamespace())
+    )
+    assert snapshot_module_response.status == 200
+    assert "createPrivacySnapshotCoordinator" in snapshot_module_response.kwargs["text"]
     release = _release(ready=False)
     suite = SuiteInstallation(release)
     suite._verify_inventory(_inventory(release.manifest))

@@ -91,6 +91,12 @@ from .runtime import (
     profile_attestation,
     reconcile_prompt_server,
 )
+from .snapshot import (
+    DispositionResult,
+    EnvelopeDisposition,
+    ProtectedFieldResult,
+    SnapshotError,
+)
 from .suite import (
     PRIVACY_SUITE_MANIFEST_V1,
     AcceptanceEvidence,
@@ -166,6 +172,7 @@ __all__ = [
     "ENVELOPE_VERSION",
     "EncryptedCopyReceipt",
     "EffectivePrivacyMode",
+    "EnvelopeDisposition",
     "EnvironmentTuple",
     "EnvelopeHeader",
     "ExecutionHandle",
@@ -211,6 +218,7 @@ __all__ = [
     "ProfileResource",
     "ProfileValidationError",
     "ProtectedField",
+    "ProtectedFieldResult",
     "ProtectedOperation",
     "ReadinessHandle",
     "RecordDeclaration",
@@ -221,6 +229,7 @@ __all__ = [
     "SignedActivationAuthorization",
     "SignedSuiteManifest",
     "SignedSuitePromotion",
+    "SnapshotError",
     "SourceIdentity",
     "SuiteActivationError",
     "SuiteBlockedError",
@@ -232,6 +241,7 @@ __all__ = [
     "SuiteReadinessReport",
     "SuiteSignatureError",
     "SuiteStatus",
+    "DispositionResult",
     "UnknownResourceError",
     "VerifiedSuiteRelease",
     "WorkflowHandle",
