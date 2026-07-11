@@ -3,6 +3,7 @@
 from .acceptance import *  # noqa: F403 - deliberate public package aggregation.
 from .acceptance import __all__ as _acceptance_exports
 
+from .adapters import PrivateByDefaultModeAdapter
 from .artifacts import (
     ARTIFACT_REFERENCE_SCHEMA,
     ARTIFACT_REFERENCE_VERSION,
@@ -14,6 +15,7 @@ from .artifacts import (
     generate_artifact_owner_id,
 )
 from .comfy_ui import register_helto_privacy_ui, register_legacy_key_dir
+from .concurrency import run_blocking_adapter
 from .envelope import (
     ALGORITHM,
     ENVELOPE_VERSION,
@@ -83,6 +85,10 @@ from .profile import (
     SemanticExecutionProjection,
     SingletonDeclaration,
     SingletonPayloadKind,
+)
+from .protected_operations import (
+    WorkflowRevealOperationContext,
+    WorkflowRevealOperations,
 )
 from .migration import (
     AuditItem,
@@ -189,7 +195,11 @@ from .snapshot import (
     DispositionResult,
     EnvelopeDisposition,
     ProtectedFieldResult,
+    RevealedFieldResult,
     SnapshotError,
+    is_verified_current_disposition,
+    protected_envelope_mapping,
+    protected_envelope_text,
 )
 from .suite import (
     PRIVACY_SUITE_MANIFEST_V1,
@@ -340,12 +350,14 @@ __all__ = [
     "PrivacyRouteError",
     "PrivacyScope",
     "PreparedExecution",
+    "PrivateByDefaultModeAdapter",
     "ProfileConflictError",
     "ProfileIdentity",
     "ProfileResource",
     "ProfileValidationError",
     "ProtectedField",
     "ProtectedFieldResult",
+    "RevealedFieldResult",
     "ProtectedOperation",
     "ReadinessHandle",
     "ReaderMigrationStatus",
@@ -400,6 +412,8 @@ __all__ = [
     "UnknownResourceError",
     "VerifiedSuiteRelease",
     "WorkflowHandle",
+    "WorkflowRevealOperationContext",
+    "WorkflowRevealOperations",
     "add_keys_to_keystore",
     "aiohttp_check_privacy_token",
     "aio_v1_reader_unit",
@@ -414,6 +428,7 @@ __all__ = [
     "initialize_keystore",
     "import_decrypt_only_key_verified",
     "initialize_keystore_with_legacy_migration",
+    "is_verified_current_disposition",
     "install",
     "keystore_exists",
     "keystore_path",
@@ -424,6 +439,8 @@ __all__ = [
     "normalize_declared_mode",
     "primary_session_key",
     "process_suite_status_payload",
+    "protected_envelope_mapping",
+    "protected_envelope_text",
     "profile_attestation",
     "reconcile_prompt_server",
     "record_browser_manifest_attestation",
@@ -435,6 +452,7 @@ __all__ = [
     "require_active_process_suite",
     "resolve_privacy_mode",
     "rotate_primary_key",
+    "run_blocking_adapter",
     "safe_record_diagnostic",
     "session_key_for",
     "session_path",

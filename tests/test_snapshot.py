@@ -5,8 +5,15 @@ import pytest
 import helto_privacy.keystore as keystore
 import helto_privacy.migration as migration
 import helto_privacy.runtime as runtime
+from helto_privacy import (
+    DispositionResult,
+    RevealedFieldResult,
+    is_verified_current_disposition,
+    protected_envelope_mapping,
+    protected_envelope_text,
+)
 from helto_privacy.envelope import PrivacyEnvelopeCodec
-from helto_privacy.guard import authorize_privacy_request
+from helto_privacy.guard import PrivacyAuthorizationError, authorize_privacy_request
 from helto_privacy.profile import (
     AdapterSlot,
     FieldLocation,
@@ -160,7 +167,9 @@ def test_disposition_requires_real_decrypt_and_preserves_failed_identity(
     assert verified.disposition is EnvelopeDisposition.VERIFIED_CURRENT
 
     tampered = json.loads(json.dumps(envelope))
-    tampered["ciphertext"] = ("A" if tampered["ciphertext"][0] != "A" else "B") + tampered["ciphertext"][1:]
+    tampered["ciphertext"] = (
+        "A" if tampered["ciphertext"][0] != "A" else "B"
+    ) + tampered["ciphertext"][1:]
     failed = workflow.inspect_disposition(
         "private-state",
         tampered,
@@ -189,6 +198,69 @@ def test_disposition_requires_real_decrypt_and_preserves_failed_identity(
     )
     assert locked_recheck.disposition is EnvelopeDisposition.FAILED_CURRENT
     assert locked_recheck.identity == failed.identity
+
+
+def test_authorized_workflow_reveal_is_typed_and_plaintext_safe_in_repr(snapshot_pack):
+    pack, _token, request = snapshot_pack
+    workflow = pack.workflow("state")
+    envelope = PrivacyEnvelopeCodec("helto.snapshot-test.v1").encrypt_state(
+        {"normalized": "SYNTHETIC_REVEALED_FIELD_CANARY"}
+    )
+
+    revealed = workflow.reveal(
+        "private-state",
+        envelope,
+        _authorization(pack, request, "snapshot.reveal"),
+    )
+
+    assert isinstance(revealed, RevealedFieldResult)
+    assert revealed.value == {"normalized": "SYNTHETIC_REVEALED_FIELD_CANARY"}
+    assert revealed.correlation_id.startswith("hp-field-")
+    assert "SYNTHETIC_REVEALED_FIELD_CANARY" not in repr(revealed)
+
+    serialized = workflow.reveal(
+        "private-state",
+        json.dumps(envelope),
+        _authorization(pack, request, "snapshot.reveal"),
+    )
+    assert serialized.value == revealed.value
+
+
+def test_workflow_reveal_rejects_wrong_capability_legacy_and_lock(snapshot_pack):
+    pack, _token, request = snapshot_pack
+    workflow = pack.workflow("state")
+    envelope = PrivacyEnvelopeCodec("helto.snapshot-test.v1").encrypt_state(
+        {"normalized": "synthetic current"}
+    )
+
+    with pytest.raises(PrivacyAuthorizationError):
+        workflow.reveal(
+            "private-state",
+            envelope,
+            _authorization(pack, request, "snapshot.disposition"),
+        )
+    with pytest.raises(SnapshotError) as legacy:
+        workflow.reveal(
+            "private-state",
+            "LEGACY_SYNTHETIC",
+            _authorization(pack, request, "snapshot.reveal"),
+        )
+    assert legacy.value.code == "PRIVACY_SNAPSHOT_REVEAL_FAILED"
+
+    wrong_version = dict(envelope)
+    wrong_version["version"] = 0
+    with pytest.raises(SnapshotError) as unsupported:
+        workflow.reveal(
+            "private-state",
+            wrong_version,
+            _authorization(pack, request, "snapshot.reveal"),
+        )
+    assert unsupported.value.code == "PRIVACY_SNAPSHOT_REVEAL_FAILED"
+
+    authorization = _authorization(pack, request, "snapshot.reveal")
+    keystore.lock_keystore()
+    with pytest.raises(PrivacyAuthorizationError):
+        workflow.reveal("private-state", envelope, authorization)
 
 
 def test_locked_current_is_classified_without_decrypting(snapshot_pack):
@@ -247,6 +319,17 @@ def test_protect_normalizes_and_returns_only_current_envelope(snapshot_pack):
     assert PrivacyEnvelopeCodec("helto.snapshot-test.v1").decrypt_state(
         protected.envelope
     ) == {"normalized": "synthetic"}
+    assert protected_envelope_mapping(protected) == protected.envelope
+    assert json.loads(protected_envelope_text(protected)) == protected.envelope
+    assert is_verified_current_disposition(
+        DispositionResult(EnvelopeDisposition.VERIFIED_CURRENT)
+    ) is True
+    with pytest.raises(TypeError):
+        protected_envelope_text({"value": "PLAINTEXT_SYNTHETIC_CANARY"})
+    with pytest.raises(TypeError):
+        is_verified_current_disposition(
+            type("ForgedDisposition", (), {"disposition": "verified-current"})()
+        )
     assert "synthetic" not in repr(protected)
 
 

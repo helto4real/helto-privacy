@@ -195,6 +195,25 @@ class ModeHandle(_ResourceHandle):
 
 @dataclass(frozen=True, slots=True)
 class WorkflowHandle(_ResourceHandle):
+    def reveal(
+        self,
+        field_id: str,
+        protected_value: object,
+        authorization,
+    ):
+        self.readiness.require_ready()
+        from .mode_runtime import require_stable_bound_scope
+        from .snapshot import reveal_field_value
+
+        field_declaration, _state_adapter = self._snapshot_field(field_id)
+        require_stable_bound_scope(self._installation, field_declaration.scope_id)
+        return reveal_field_value(
+            pack_id=self.pack_id,
+            field_declaration=field_declaration,
+            protected_value=protected_value,
+            authorization=authorization,
+        )
+
     def inspect_disposition(
         self,
         field_id: str,
@@ -776,21 +795,7 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                 for scope in profile.scopes
             ],
             "protectedFields": [
-                {
-                    "id": field.id,
-                    "workflowResourceId": field.workflow_resource_id,
-                    "scopeId": field.scope_id,
-                    "browserAdapter": field.browser_adapter,
-                    "nodeTypes": list(field.node_types),
-                    "location": {
-                        "kind": field.location.kind.value,
-                        "name": field.location.name,
-                    },
-                    "currentSchema": field.current_schema,
-                    "purpose": field.purpose,
-                    "legacyReaderIds": list(field.legacy_reader_ids),
-                    "execution": field.execution,
-                }
+                field.contract_payload(browser=True)
                 for field in profile.protected_fields
             ],
             "legacyBindings": [

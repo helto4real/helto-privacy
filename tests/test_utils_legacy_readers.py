@@ -183,6 +183,20 @@ def test_prompt_enhancer_fields_have_genuine_generation_specific_fixtures(genera
         assert reader.read(item["workflow"], _context()) == item["expected"]
 
 
+@pytest.mark.parametrize("generation", ("raw-xor", "priv1", "priv2", "priv3"))
+def test_privacy_show_any_mirrors_have_genuine_generation_specific_fixtures(generation):
+    fixture = _utils_fixture()
+    values = fixture["generations"][generation]["privacyShowAnyMigration"]
+    units = {unit.id: unit for unit in utils_legacy_reader_units()}
+    reader = units[UTILS_WORKFLOW_READER_IDS[generation]].reader
+
+    assert set(values) == {"property", "widget"}
+    assert values["property"]["workflow"] != values["widget"]["workflow"]
+    for item in values.values():
+        assert reader.probe(item["workflow"], _context()) is True
+        assert reader.read(item["workflow"], _context()) == item["expected"]
+
+
 def test_workflow_containers_are_generation_exact_for_all_historical_locations():
     fixture = _utils_fixture()
     units = {unit.id: unit for unit in utils_legacy_reader_units()}

@@ -248,6 +248,44 @@ def test_profile_fingerprint_is_stable_and_order_independent():
     }
 
 
+def test_protected_field_declares_sorted_distinct_mirror_locations():
+    field = ProtectedField(
+        id="display-text",
+        workflow_resource_id="workflow",
+        scope_id="display",
+        state_adapter="workflow-state",
+        browser_adapter="workflow-browser",
+        node_types=("DisplayNode",),
+        location=FieldLocation(FieldLocationKind.PROPERTY, "protected_text"),
+        current_schema="helto.display",
+        purpose="display-text",
+        mirror_locations=(
+            FieldLocation(FieldLocationKind.WIDGET, "encrypted_text_state"),
+        ),
+    )
+
+    assert field.mirror_locations == (
+        FieldLocation(FieldLocationKind.WIDGET, "encrypted_text_state"),
+    )
+
+    with pytest.raises(ProfileValidationError) as duplicate:
+        ProtectedField(
+            id="display-text",
+            workflow_resource_id="workflow",
+            scope_id="display",
+            state_adapter="workflow-state",
+            browser_adapter="workflow-browser",
+            node_types=("DisplayNode",),
+            location=FieldLocation(FieldLocationKind.PROPERTY, "protected_text"),
+            current_schema="helto.display",
+            purpose="display-text",
+            mirror_locations=(
+                FieldLocation(FieldLocationKind.PROPERTY, "protected_text"),
+            ),
+        )
+    assert duplicate.value.code == "duplicate_field_location"
+
+
 @pytest.mark.parametrize(
     ("profile_kwargs", "error_code"),
     [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import secrets
@@ -12,7 +13,7 @@ from threading import RLock
 from typing import Any
 
 from . import keystore
-from .envelope import PrivacyEnvelopeCodec, PrivacyError
+from .envelope import ENVELOPE_VERSION, PrivacyEnvelopeCodec, PrivacyError
 from .guard import AuthorizedPrivacyRequest, require_current_authorization
 from .profile import LegacyLocationKind, PrivacyProfile, ProtectedField
 
@@ -47,6 +48,65 @@ class DispositionResult:
 class ProtectedFieldResult:
     disposition: EnvelopeDisposition
     envelope: dict[str, Any] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RevealedFieldResult:
+    """Authorized current field value kept out of generic representations."""
+
+    value: Mapping[str, Any] = field(repr=False, compare=False)
+    correlation_id: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value", copy.deepcopy(dict(self.value)))
+
+
+def protected_envelope_mapping(result: object) -> dict[str, Any]:
+    """Return a detached current envelope from a typed protection result."""
+
+    if (
+        not isinstance(result, ProtectedFieldResult)
+        or result.disposition is not EnvelopeDisposition.VERIFIED_CURRENT
+    ):
+        raise TypeError("A verified protected field result is required.")
+    candidate = result.envelope
+    expected_keys = {
+        "version",
+        "schema",
+        "encrypted",
+        "algorithm",
+        "keyId",
+        "nonce",
+        "ciphertext",
+    }
+    schema = candidate.get("schema") if isinstance(candidate, Mapping) else None
+    if (
+        not isinstance(candidate, Mapping)
+        or set(candidate) != expected_keys
+        or candidate.get("version") != ENVELOPE_VERSION
+        or not isinstance(schema, str)
+        or not PrivacyEnvelopeCodec(schema).is_encrypted_payload(candidate)
+    ):
+        raise TypeError("Protected field result does not contain an envelope.")
+    return copy.deepcopy(dict(candidate))
+
+
+def protected_envelope_text(result: object) -> str:
+    """Return the canonical workflow-text representation of an envelope."""
+
+    return json.dumps(
+        protected_envelope_mapping(result),
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def is_verified_current_disposition(result: object) -> bool:
+    """Test the typed disposition without consumer-owned string extraction."""
+
+    if not isinstance(result, DispositionResult):
+        raise TypeError("A typed field disposition result is required.")
+    return result.disposition is EnvelopeDisposition.VERIFIED_CURRENT
 
 
 _FAILED_LOCK = RLock()
@@ -170,6 +230,41 @@ def protect_field_value(
     return ProtectedFieldResult(
         EnvelopeDisposition.VERIFIED_CURRENT,
         envelope,
+    )
+
+
+def reveal_field_value(
+    *,
+    pack_id: str,
+    field_declaration: ProtectedField,
+    protected_value: object,
+    authorization: AuthorizedPrivacyRequest,
+) -> RevealedFieldResult:
+    """Reveal one verified current field only through a fresh capability."""
+
+    _require_snapshot_authorization(authorization, "snapshot.reveal", pack_id)
+    candidate = protected_value
+    if isinstance(candidate, str):
+        try:
+            candidate = json.loads(candidate)
+        except Exception:
+            raise SnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED") from None
+    codec = PrivacyEnvelopeCodec(field_declaration.current_schema)
+    if (
+        not isinstance(candidate, Mapping)
+        or candidate.get("version") != ENVELOPE_VERSION
+        or not codec.is_encrypted_payload(candidate)
+    ):
+        raise SnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED")
+    try:
+        value = codec.decrypt_state(candidate)
+    except Exception:  # noqa: BLE001 - no crypto or product detail escapes.
+        raise SnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED") from None
+    if not isinstance(value, Mapping):
+        raise SnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED")
+    return RevealedFieldResult(
+        value,
+        "hp-field-" + secrets.token_urlsafe(12),
     )
 
 

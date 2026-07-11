@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -11,14 +10,17 @@ import re
 import secrets
 import stat
 import time
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from weakref import WeakKeyDictionary
 
 from . import keystore
 from ._atomic_file import atomic_write_private_bytes
+from .concurrency import (
+    BLOCKING_ADAPTER_MAX_PENDING,
+    reset_blocking_adapter_runtime_for_tests,
+    run_blocking_adapter,
+)
 from .envelope import PrivacyEnvelopeCodec, PrivacyError
 from .guard import (
     AuthorizedPrivacyRequest,
@@ -40,7 +42,7 @@ ARTIFACT_LEDGER_SCHEMA = "helto.private-artifact-ledger"
 ARTIFACT_LEDGER_VERSION = 1
 ARTIFACT_FILE_SCHEMA = "helto.private-artifact-file"
 ARTIFACT_FILE_VERSION = 1
-ARTIFACT_MAX_PENDING = 4
+ARTIFACT_MAX_PENDING = BLOCKING_ADAPTER_MAX_PENDING
 ARTIFACT_STREAM_CHUNK_BYTES = 1024 * 1024
 ARTIFACT_MAX_LINE_BYTES = 2 * 1024 * 1024
 ARTIFACT_MAX_CHUNKS = 65_536
@@ -73,11 +75,6 @@ _ERROR_CODES = frozenset(
 )
 _PROCESS_EPOCH = secrets.token_urlsafe(18)
 _LOCK = RLock()
-_EXECUTOR = ThreadPoolExecutor(
-    max_workers=ARTIFACT_MAX_PENDING,
-    thread_name_prefix="helto-privacy-artifact",
-)
-_LOOP_GATES: WeakKeyDictionary = WeakKeyDictionary()
 _LEASES: dict[str, _LeaseRecord] = {}
 _STREAM_END = object()
 
@@ -646,7 +643,7 @@ def reset_artifact_runtime_for_tests() -> None:
     global _PROCESS_EPOCH
     with _LOCK:
         _PROCESS_EPOCH = secrets.token_urlsafe(18)
-        _LOOP_GATES.clear()
+        reset_blocking_adapter_runtime_for_tests()
         _LEASES.clear()
 
 
@@ -1271,12 +1268,4 @@ def _sweep_temp_variants(*, strict: bool = False) -> int:
     return temp_variants
 
 
-async def _run_blocking(operation, *args):
-    loop = asyncio.get_running_loop()
-    with _LOCK:
-        gate = _LOOP_GATES.get(loop)
-        if gate is None:
-            gate = asyncio.Semaphore(ARTIFACT_MAX_PENDING)
-            _LOOP_GATES[loop] = gate
-    async with gate:
-        return await loop.run_in_executor(_EXECUTOR, operation, *args)
+_run_blocking = run_blocking_adapter

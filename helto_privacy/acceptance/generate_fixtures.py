@@ -393,6 +393,21 @@ def _utils_formats() -> dict[str, Any]:
                 "workflowSha256": _sha(workflow_value.encode()),
             }
 
+    privacy_show_any_text = "Synthetic private display text"
+    for generation, (encrypt, _nonces) in specifications.items():
+        generations[generation]["privacyShowAnyMigration"] = {}
+        for projection in ("widget", "property"):
+            nonce = hashlib.sha256(
+                f"privacy-show-any-{generation}-{projection}".encode("ascii")
+            ).digest()[: nonce_lengths[generation]]
+            encrypted = encrypt(privacy_show_any_text.encode(), nonce)
+            workflow_value = "__HELTO_ENC__:" + base64.b64encode(encrypted).decode()
+            generations[generation]["privacyShowAnyMigration"][projection] = {
+                "expected": privacy_show_any_text,
+                "workflow": workflow_value,
+                "workflowSha256": _sha(workflow_value.encode()),
+            }
+
     return {
         "fixtureVersion": 1,
         "producerCommit": _UTILS_COMMIT,

@@ -342,13 +342,13 @@ display operation.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare the scope, mirrored workflow locations, fixed normalization, and
+- [x] Declare the scope, mirrored workflow locations, fixed normalization, and
       protected display operation as one receipt-bearing resource.
-- [ ] Bind value-to-text, locate/mirror, live-display apply/clear, and product
+- [x] Bind value-to-text, locate/mirror, live-display apply/clear, and product
       invocation adapters without duplicating encryption or lifecycle policy.
-- [ ] Replace backend direct encryption and per-node serialization patches
+- [x] Replace backend direct encryption and per-node serialization patches
       behind the inactive shared workflow handle.
-- [ ] Prove one settled envelope is reused across both projections, legacy
+- [x] Prove one settled envelope is reused across both projections, legacy
       migration produces one receipt, and reveal/save failures remain blocked.
 
 ## Replace private-media tokens with leases

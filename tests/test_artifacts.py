@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import helto_privacy.artifacts as artifacts
+import helto_privacy.concurrency as concurrency
 import helto_privacy.keystore as keystore
 import helto_privacy.runtime as runtime
 from helto_privacy import (
@@ -204,6 +205,70 @@ def test_durable_artifact_write_is_atomic_encrypted_and_purpose_bound(
 
     assert wrong_kind.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
     assert "durable-mask" not in str(wrong_kind)
+
+
+def test_blocking_executor_recovers_when_asyncio_completion_signal_is_missed(
+    monkeypatch,
+):
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        missed_completion = loop.create_future()
+        monkeypatch.setattr(
+            concurrency.asyncio,
+            "wrap_future",
+            lambda _future, *, loop: missed_completion,
+        )
+        return await asyncio.wait_for(
+            concurrency.run_blocking_adapter(lambda: "synthetic-result"),
+            timeout=1,
+        )
+
+    assert asyncio.run(exercise()) == "synthetic-result"
+
+
+def test_blocking_executor_keeps_cancelled_workers_inside_process_admission_bound():
+    release = threading.Event()
+    all_started = threading.Event()
+    fifth_started = threading.Event()
+    started = 0
+    started_lock = threading.Lock()
+
+    def blocking_operation():
+        nonlocal started
+        with started_lock:
+            started += 1
+            if started == artifacts.ARTIFACT_MAX_PENDING:
+                all_started.set()
+        release.wait(timeout=2)
+
+    async def cancel_first_loop():
+        tasks = [
+            asyncio.create_task(concurrency.run_blocking_adapter(blocking_operation))
+            for _ in range(artifacts.ARTIFACT_MAX_PENDING)
+        ]
+        deadline = asyncio.get_running_loop().time() + 2
+        while not all_started.is_set():
+            if asyncio.get_running_loop().time() >= deadline:
+                raise AssertionError("Blocking adapter workers did not start.")
+            await asyncio.sleep(0.01)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    asyncio.run(cancel_first_loop())
+
+    async def enter_from_new_loop():
+        fifth = asyncio.create_task(
+            concurrency.run_blocking_adapter(
+                lambda: fifth_started.set() or "fifth-result"
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert fifth_started.is_set() is False
+        release.set()
+        assert await asyncio.wait_for(fifth, timeout=2) == "fifth-result"
+
+    asyncio.run(enter_from_new_loop())
 
 
 def test_artifact_write_rejects_locked_session_before_encoding(

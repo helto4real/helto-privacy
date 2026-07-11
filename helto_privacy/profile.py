@@ -144,6 +144,7 @@ class ProtectedField:
     purpose: str
     legacy_reader_ids: tuple[str, ...] = ()
     execution: bool = False
+    mirror_locations: tuple[FieldLocation, ...] = ()
 
     def __post_init__(self) -> None:
         for value in (
@@ -158,6 +159,28 @@ class ProtectedField:
             _validate_stable_id(value)
         if not isinstance(self.location, FieldLocation):
             raise ProfileValidationError("unknown_field_location")
+        try:
+            mirror_locations = tuple(self.mirror_locations)
+        except TypeError:
+            raise ProfileValidationError("unknown_field_location") from None
+        if any(not isinstance(item, FieldLocation) for item in mirror_locations):
+            raise ProfileValidationError("unknown_field_location")
+        location_keys = (
+            (self.location.kind, self.location.name),
+            *((item.kind, item.name) for item in mirror_locations),
+        )
+        if len(location_keys) != len(set(location_keys)):
+            raise ProfileValidationError("duplicate_field_location")
+        object.__setattr__(
+            self,
+            "mirror_locations",
+            tuple(
+                sorted(
+                    mirror_locations,
+                    key=lambda item: (item.kind.value, item.name),
+                )
+            ),
+        )
         object.__setattr__(self, "node_types", _normalized_node_types(self.node_types))
         object.__setattr__(
             self,
@@ -166,6 +189,33 @@ class ProtectedField:
         )
         if not isinstance(self.execution, bool):
             raise ProfileValidationError("invalid_execution_declaration")
+
+    def contract_payload(self, *, browser: bool = False) -> dict[str, object]:
+        """Project this declaration without duplicating contract field lists."""
+
+        declaration: dict[str, object] = {
+            "id": self.id,
+            "workflowResourceId": self.workflow_resource_id,
+            "scopeId": self.scope_id,
+            "browserAdapter": self.browser_adapter,
+            "nodeTypes": list(self.node_types),
+            "location": {
+                "kind": self.location.kind.value,
+                "name": self.location.name,
+            },
+            "currentSchema": self.current_schema,
+            "purpose": self.purpose,
+            "legacyReaderIds": list(self.legacy_reader_ids),
+            "execution": self.execution,
+        }
+        if not browser:
+            declaration["stateAdapter"] = self.state_adapter
+        if self.mirror_locations:
+            declaration["mirrorLocations"] = [
+                {"kind": location.kind.value, "name": location.name}
+                for location in self.mirror_locations
+            ]
+        return declaration
 
 
 @dataclass(frozen=True, slots=True)
@@ -981,19 +1031,7 @@ class PrivacyProfile:
                 for scope in self.scopes
             ],
             "protectedFields": [
-                {
-                    "id": field.id,
-                    "workflowResourceId": field.workflow_resource_id,
-                    "scopeId": field.scope_id,
-                    "stateAdapter": field.state_adapter,
-                    "browserAdapter": field.browser_adapter,
-                    "nodeTypes": list(field.node_types),
-                    "location": {"kind": field.location.kind.value, "name": field.location.name},
-                    "currentSchema": field.current_schema,
-                    "purpose": field.purpose,
-                    "legacyReaderIds": list(field.legacy_reader_ids),
-                    "execution": field.execution,
-                }
+                field.contract_payload()
                 for field in self.protected_fields
             ],
             "legacyBindings": [
