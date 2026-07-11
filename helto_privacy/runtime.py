@@ -240,7 +240,78 @@ class WorkflowHandle(_ResourceHandle):
 
 @dataclass(frozen=True, slots=True)
 class RecordHandle(_ResourceHandle):
-    pass
+    def _require_active(self) -> None:
+        self.readiness.require_ready()
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
+
+    def list_shells(self, record_kind: str):
+        self._require_active()
+        from .records import list_record_shells
+
+        return list_record_shells(
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+        )
+
+    def reveal(
+        self,
+        record_kind: str,
+        record_id: str,
+        operation: str,
+        authorization,
+    ):
+        self._require_active()
+        from .records import reveal_record
+
+        return reveal_record(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            record_id=record_id,
+            operation=operation,
+            authorization=authorization,
+        )
+
+    def delete(self, record_kind: str, record_id: str, confirmation):
+        self._require_active()
+        from .records import delete_record
+
+        return delete_record(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            record_id=record_id,
+            confirmation=confirmation,
+        )
+
+    def replace(
+        self,
+        record_kind: str,
+        record_id: str,
+        protected_value: object,
+        confirmation,
+    ):
+        self._require_active()
+        from .records import replace_record
+
+        return replace_record(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            record_id=record_id,
+            protected_value=protected_value,
+            confirmation=confirmation,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -509,6 +580,15 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "workflowResourceId": projection.workflow_resource_id,
                 }
                 for projection in profile.execution_projections
+            ],
+            "records": [
+                {
+                    "id": record.id,
+                    "resourceId": record.resource_id,
+                    "scopeId": record.scope_id,
+                    "revealOperations": list(record.reveal_operations),
+                }
+                for record in profile.records
             ],
             "protectedOperations": [
                 {

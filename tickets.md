@@ -153,13 +153,13 @@ validated product projections.
 **Blocked by:** Compile atomic privacy profiles; Resolve privacy mode and
 transitions.
 
-- [ ] Restrict locked shells to opaque generated ID, record kind, private flag,
+- [x] Restrict locked shells to opaque generated ID, record kind, private flag,
       and fixed generic label; listing must never decrypt.
-- [ ] Treat every consumer field as sensitive unless an explicit safe-field
+- [x] Treat every consumer field as sensitive unless an explicit safe-field
       allowlist passes shared validation for the authorized operation.
-- [ ] Permit deletion and confirmed destructive replacement while locked, but
+- [x] Permit deletion and confirmed destructive replacement while locked, but
       fail closed for use, preview, duplicate, merge, edit, or metadata reveal.
-- [ ] Standardize stable error codes, fresh correlation IDs, generic filenames,
+- [x] Standardize stable error codes, fresh correlation IDs, generic filenames,
       safe response headers, and path/value-free logs and diagnostics.
 
 ## Manage encrypted artifacts and leases

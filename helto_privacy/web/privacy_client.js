@@ -1,6 +1,8 @@
 // Internal browser transport for the attested profile runtime and shared UI.
 // Consumer packs receive compiled resource handles, never this transport.
 
+import { isOpaquePrivateRecordId } from "./privacy_records.js";
+
 const ROUTE_PREFIX = "/helto_privacy";
 const PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token";
 const PRIVACY_PACK_HEADER = "X-Helto-Privacy-Pack";
@@ -8,6 +10,7 @@ const PRIVACY_PROFILE_HEADER = "X-Helto-Privacy-Profile";
 const PRIVACY_SUITE_HEADER = "X-Helto-Privacy-Suite";
 const PRIVACY_OPERATION_HEADER = "X-Helto-Privacy-Operation";
 const PRIVACY_DECLASSIFICATION_HEADER = "X-Helto-Privacy-Declassification";
+const PRIVACY_DESTRUCTIVE_HEADER = "X-Helto-Privacy-Destructive";
 const PRIVACY_TOKEN_STORAGE_KEY = "helto_privacy_token";
 const PRIVACY_LOCKED_CODES = ["PRIVACY_LOCKED", "PRIVACY_TOKEN_REQUIRED"];
 const PRIVACY_SETUP_CODES = ["PRIVACY_KEYSTORE_UNINITIALIZED"];
@@ -157,6 +160,9 @@ function createAttestedPrivacyRequestClient({
       if (options.declassificationConfirmed === true) {
         headers[PRIVACY_DECLASSIFICATION_HEADER] = "confirmed";
       }
+      if (options.destructiveConfirmed === true) {
+        headers[PRIVACY_DESTRUCTIVE_HEADER] = "confirmed";
+      }
       if (options.body !== undefined) headers["Content-Type"] = "application/json";
 
       let response;
@@ -303,6 +309,9 @@ export async function connectAttestedPrivacyProfileClient({
   const executionProjections = Object.freeze(
     normalizeExecutionProjections(attestation.executionProjections),
   );
+  const recordDeclarations = Object.freeze(
+    normalizeRecordDeclarations(attestation.records),
+  );
   const mode = createAttestedPrivacyModeClient({
     packId: requestClient.identity.packId,
     modeScopes: attestation.modeScopes,
@@ -317,6 +326,11 @@ export async function connectAttestedPrivacyProfileClient({
     packId: requestClient.identity.packId,
     fields: protectedFields,
     projections: executionProjections,
+    requestClient,
+  });
+  const records = createAttestedPrivacyRecordClient({
+    packId: requestClient.identity.packId,
+    declarations: recordDeclarations,
     requestClient,
   });
 
@@ -342,9 +356,11 @@ export async function connectAttestedPrivacyProfileClient({
     identity: requestClient.identity,
     operations,
     executionProjections,
+    recordDeclarations,
     mode,
     snapshot,
     execution,
+    records,
     invoke,
   });
 }
@@ -428,6 +444,75 @@ function createAttestedPrivacyExecutionClient({
   return Object.freeze({ prepare });
 }
 
+function createAttestedPrivacyRecordClient({ packId, declarations, requestClient }) {
+  const declaration = (resourceId, recordKind) => {
+    const resource = String(resourceId || "");
+    const kind = String(recordKind || "");
+    const match = declarations.find(
+      (item) => item.resourceId === resource && item.id === kind,
+    );
+    if (!match) throw new PrivacyBrowserRequestError("PRIVACY_RECORD_DECLARATION_INVALID");
+    return match;
+  };
+  const base = (item) => (
+    `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/records/`
+    + `${encodeURIComponent(item.resourceId)}/${encodeURIComponent(item.id)}`
+  );
+  const recordTarget = (item, recordId) => {
+    const id = String(recordId || "");
+    if (!isOpaquePrivateRecordId(id)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_ID_INVALID");
+    }
+    return `${base(item)}/${encodeURIComponent(id)}`;
+  };
+  const list = (resourceId, recordKind) => {
+    const item = declaration(resourceId, recordKind);
+    return requestClient.request(
+      "record.list",
+      base(item),
+      { method: "GET", retryUnlock: false },
+    );
+  };
+  const reveal = (resourceId, recordKind, recordId, operation) => {
+    const item = declaration(resourceId, recordKind);
+    const safeOperation = String(operation || "");
+    if (!item.revealOperations.includes(safeOperation)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_OPERATION_INVALID");
+    }
+    return requestClient.request(
+      `record.${safeOperation}`,
+      `${recordTarget(item, recordId)}/reveal/${encodeURIComponent(safeOperation)}`,
+    );
+  };
+  const remove = (resourceId, recordKind, recordId, confirmed) => {
+    if (confirmed !== true) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_CONFIRMATION_REQUIRED");
+    }
+    const item = declaration(resourceId, recordKind);
+    return requestClient.request(
+      "record.delete",
+      `${recordTarget(item, recordId)}/delete`,
+      { retryUnlock: false, destructiveConfirmed: true },
+    );
+  };
+  const replace = (resourceId, recordKind, recordId, protectedValue, confirmed) => {
+    if (confirmed !== true) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_CONFIRMATION_REQUIRED");
+    }
+    const item = declaration(resourceId, recordKind);
+    return requestClient.request(
+      "record.replace",
+      `${recordTarget(item, recordId)}/replace`,
+      {
+        body: { protectedValue },
+        retryUnlock: false,
+        destructiveConfirmed: true,
+      },
+    );
+  };
+  return Object.freeze({ list, reveal, delete: remove, replace });
+}
+
 function normalizeProtectedFields(fields) {
   if (!Array.isArray(fields)) return [];
   const seen = new Set();
@@ -481,6 +566,34 @@ function normalizeExecutionProjections(projections) {
     }
     seen.add(id);
     return Object.freeze({ id, executionResourceId, workflowResourceId });
+  });
+}
+
+function normalizeRecordDeclarations(records) {
+  if (!Array.isArray(records)) return [];
+  const seen = new Set();
+  return records.map((record) => {
+    const id = String(record?.id || "");
+    const resourceId = String(record?.resourceId || "");
+    const scopeId = String(record?.scopeId || "");
+    const revealOperations = Object.freeze(
+      (Array.isArray(record?.revealOperations) ? record.revealOperations : [])
+        .map((value) => String(value || "")),
+    );
+    if (
+      !/^[a-z0-9][a-z0-9._-]*$/.test(id)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(resourceId)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(scopeId)
+      || revealOperations.some(
+        (operation) => !["use", "preview", "details"].includes(operation),
+      )
+      || revealOperations.length !== new Set(revealOperations).size
+      || seen.has(id)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_DECLARATION_INVALID");
+    }
+    seen.add(id);
+    return Object.freeze({ id, resourceId, scopeId, revealOperations });
   });
 }
 

@@ -15,6 +15,7 @@ from enum import Enum
 from threading import RLock
 from typing import Any
 
+from ._plaintext import clear_mutable_plaintext
 from . import keystore
 from .envelope import PrivacyEnvelopeCodec, PrivacyError
 from .guard import AuthorizedPrivacyRequest, require_current_authorization
@@ -293,8 +294,8 @@ def _finish_dispatch(
     semantic: object,
     values: dict[str, object],
 ) -> None:
-    _clear_plaintext(semantic)
-    _clear_plaintext(values)
+    clear_mutable_plaintext(semantic)
+    clear_mutable_plaintext(values)
     with _LOCK:
         _GRANTS.pop(grant_id, None)
 
@@ -674,28 +675,3 @@ def _execution_session_material() -> tuple[bytes, bytes]:
     if not confirmation or not hmac.compare_digest(token, confirmation):
         raise ExecutionError("PRIVACY_EXECUTION_GRANT_INVALID")
     return hashlib.sha256(token.encode("utf-8")).digest(), key
-
-
-def _clear_plaintext(value: object, seen: set[int] | None = None) -> None:
-    if value is None:
-        return
-    seen = seen or set()
-    identity = id(value)
-    if identity in seen:
-        return
-    seen.add(identity)
-    if isinstance(value, dict):
-        for item in tuple(value.values()):
-            _clear_plaintext(item, seen)
-        value.clear()
-    elif isinstance(value, list):
-        for item in value:
-            _clear_plaintext(item, seen)
-        value.clear()
-    elif isinstance(value, tuple):
-        for item in value:
-            _clear_plaintext(item, seen)
-    elif isinstance(value, set):
-        for item in tuple(value):
-            _clear_plaintext(item, seen)
-        value.clear()

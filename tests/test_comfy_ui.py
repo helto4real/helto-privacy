@@ -156,6 +156,12 @@ def test_ui_module_ships_in_package():
     assert "helto_privacy_token" in client_source
     assert "X-Helto-Privacy-Token" in client_source
 
+    records_source = (comfy_ui._WEB_DIR / "privacy_records.js").read_text(
+        encoding="utf-8"
+    )
+    assert "isOpaquePrivateRecordId" in records_source
+    assert "redactPrivateRecordShell" in records_source
+
     profile_source = (comfy_ui._WEB_DIR / "privacy_profile.js").read_text(encoding="utf-8")
     assert "export async function connectPrivacyPack" in profile_source
     assert 'export const PRIVACY_CONTRACT_V2 = "helto.privacy.v2"' in profile_source

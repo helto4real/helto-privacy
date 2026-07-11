@@ -5,6 +5,12 @@ import types
 import helto_privacy.comfy_ui as comfy_ui
 import helto_privacy.runtime as runtime
 import helto_privacy.suite_runtime as suite_runtime
+from helto_privacy.records import (
+    ConfirmedRecordMutation,
+    LockedRecordShell,
+    RecordMutationReceipt,
+    RevealedRecord,
+)
 from helto_privacy.profile import (
     AdapterSlot,
     PrivacyProfile,
@@ -183,6 +189,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     ]
     assert response.data["protectedFields"] == []
     assert response.data["executionProjections"] == []
+    assert response.data["records"] == []
     assert response.data["protectedOperations"] == []
     assert "token" not in str(response.data).lower()
     assert "secret" not in str(response.data).lower()
@@ -223,6 +230,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 "snapshot.disposition",
                 "snapshot.protect",
                 "execution.prepare",
+                "record.use",
             }
             return f"synthetic-{operation}"
 
@@ -334,6 +342,46 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 },
             )
 
+    record_id = "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+
+    class Records:
+        def list_shells(self, record_kind):
+            assert record_kind == "prompt-record"
+            return (LockedRecordShell(record_id, record_kind),)
+
+        def reveal(self, record_kind, supplied_id, operation, authorization):
+            assert (record_kind, supplied_id, operation, authorization) == (
+                "prompt-record",
+                record_id,
+                "use",
+                "synthetic-record.use",
+            )
+            return RevealedRecord(
+                {"prompt": "SYNTHETIC_AUTHORIZED_VALUE"},
+                "hp-record-abcdefghijklmnop",
+            )
+
+        def delete(self, record_kind, supplied_id, confirmation):
+            assert (record_kind, supplied_id) == ("prompt-record", record_id)
+            assert isinstance(confirmation, ConfirmedRecordMutation)
+            return RecordMutationReceipt(
+                record_id,
+                record_kind,
+                "delete",
+                "hp-record-bcdefghijklmnopq",
+            )
+
+        def replace(self, record_kind, supplied_id, protected_value, confirmation):
+            assert (record_kind, supplied_id) == ("prompt-record", record_id)
+            assert protected_value == "SYNTHETIC_PROTECTED_VALUE"
+            assert isinstance(confirmation, ConfirmedRecordMutation)
+            return RecordMutationReceipt(
+                record_id,
+                record_kind,
+                "replace",
+                "hp-record-cdefghijklmnopqr",
+            )
+
     fake_pack.profile = types.SimpleNamespace(
         id=profile.id,
         scopes=profile.scopes,
@@ -346,6 +394,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
 
     fake_pack.snapshot_field = resolve_snapshot_field
     fake_pack.execution = lambda resource_id: Execution()
+    fake_pack.records = lambda resource_id: Records()
 
     async def disposition_payload():
         return {"protectedValue": "SYNTHETIC_CIPHERTEXT"}
@@ -449,6 +498,123 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     assert "cacheIdentity" not in execution_response.data
     assert execution_response.data["reference"]["grant"] == "opaque-grant"
     assert "SYNTHETIC_PLAINTEXT_CANARY" not in str(execution_response.data)
+
+    record_base = (
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/records/"
+        "{resource_id}/{record_kind}"
+    )
+    list_records = prompt_server.routes.handlers[("GET", record_base)]
+    list_response = asyncio.run(
+        list_records(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "library",
+                    "record_kind": "prompt-record",
+                }
+            )
+        )
+    )
+    assert list_response.data["records"] == [
+        {
+            "id": record_id,
+            "kind": "prompt-record",
+            "private": True,
+            "label": "Private record",
+        }
+    ]
+    assert list_response.headers["Cache-Control"] == "private, no-store"
+    assert list_response.data["correlationId"].startswith("hp-record-")
+
+    reveal_records = prompt_server.routes.handlers[
+        ("POST", record_base + "/{record_id}/reveal/{operation}")
+    ]
+    reveal_response = asyncio.run(
+        reveal_records(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "library",
+                    "record_kind": "prompt-record",
+                    "record_id": record_id,
+                    "operation": "use",
+                },
+                headers={},
+                cookies={},
+            )
+        )
+    )
+    assert reveal_response.data == {
+        "ok": True,
+        "value": {"prompt": "SYNTHETIC_AUTHORIZED_VALUE"},
+        "correlationId": "hp-record-abcdefghijklmnop",
+    }
+    assert reveal_response.headers["Cache-Control"] == "private, no-store"
+
+    delete_records = prompt_server.routes.handlers[
+        ("POST", record_base + "/{record_id}/delete")
+    ]
+    delete_response = asyncio.run(
+        delete_records(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "library",
+                    "record_kind": "prompt-record",
+                    "record_id": record_id,
+                },
+                headers={"X-Helto-Privacy-Destructive": "confirmed"},
+            )
+        )
+    )
+    assert delete_response.data == {
+        "ok": True,
+        "operation": "delete",
+        "correlationId": "hp-record-bcdefghijklmnopq",
+    }
+    denied_delete = asyncio.run(
+        delete_records(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "library",
+                    "record_kind": "prompt-record",
+                    "record_id": record_id,
+                },
+                headers={},
+            )
+        )
+    )
+    assert denied_delete.status == 400
+    assert denied_delete.data["error"] == "PRIVACY_RECORD_CONFIRMATION_REQUIRED"
+    assert denied_delete.data["correlationId"].startswith("hp-record-")
+    assert denied_delete.headers["Cache-Control"] == "private, no-store"
+
+    async def replacement_payload():
+        return {"protectedValue": "SYNTHETIC_PROTECTED_VALUE"}
+
+    replace_records = prompt_server.routes.handlers[
+        ("POST", record_base + "/{record_id}/replace")
+    ]
+    replace_response = asyncio.run(
+        replace_records(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "library",
+                    "record_kind": "prompt-record",
+                    "record_id": record_id,
+                },
+                headers={"X-Helto-Privacy-Destructive": "confirmed"},
+                json=replacement_payload,
+            )
+        )
+    )
+    assert replace_response.data == {
+        "ok": True,
+        "operation": "replace",
+        "correlationId": "hp-record-cdefghijklmnopqr",
+    }
 
     missing = asyncio.run(
         handler(types.SimpleNamespace(match_info={"pack_id": "helto.missing"}))

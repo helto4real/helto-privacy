@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
 PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
+PRIVACY_RECORDS = ROOT / "helto_privacy" / "web" / "privacy_records.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
@@ -14,6 +15,9 @@ def run_node_module_test(tmp_path, body: str) -> None:
     module_path.write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
     client_path = tmp_path / "privacy_client.js"
     client_path.write_text(PRIVACY_CLIENT.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "privacy_records.js").write_text(
+        PRIVACY_RECORDS.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     script_path = tmp_path / "test.mjs"
     script_path.write_text(
         textwrap.dedent(
@@ -405,5 +409,95 @@ def test_execution_transport_uses_only_attested_fixed_prepare_route(tmp_path):
           (error) => error.code === "PRIVACY_EXECUTION_PROJECTION_INVALID",
         );
         assert.equal(typeof transport.execution.request, "undefined");
+        """,
+    )
+
+
+def test_record_transport_uses_only_attested_fixed_routes_and_confirmation(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        globalThis.localStorage = {
+          getItem: () => "",
+          setItem() {},
+          removeItem() {},
+        };
+        globalThis.document = { cookie: "" };
+        const calls = [];
+        globalThis.fetch = async (url, options = {}) => {
+          const target = String(url);
+          if (target.endsWith("/profiles/helto.test")) return response({
+            ok: true,
+            id: "helto.test",
+            fingerprint: "a".repeat(64),
+            suiteManifestDigest: "b".repeat(64),
+            protectedOperations: [],
+            protectedFields: [],
+            executionProjections: [],
+            records: [{
+              id: "prompt-record",
+              resourceId: "library",
+              scopeId: "global",
+              revealOperations: ["use", "details"],
+            }],
+            modeScopes: [],
+          });
+          if (target.endsWith("/suite/browser-attestation")) return response({ ok: true });
+          calls.push({ target, options });
+          if (options.method === "GET") return response({ ok: true, records: [] });
+          return response({ ok: true, operation: target.split("/").at(-1) });
+        };
+        const transport = await client.connectAttestedPrivacyProfileClient({
+          packId: "helto.test",
+          profileFingerprint: "a".repeat(64),
+          suiteManifestDigest: "b".repeat(64),
+          promptUnlock: async () => null,
+        });
+        const id = "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6";
+
+        await transport.records.list("library", "prompt-record");
+        await transport.records.reveal("library", "prompt-record", id, "use");
+        await transport.records.delete("library", "prompt-record", id, true);
+        await transport.records.replace(
+          "library",
+          "prompt-record",
+          id,
+          "SYNTHETIC_PROTECTED_VALUE",
+          true,
+        );
+
+        assert.deepEqual(calls.map((call) => call.target), [
+          "/helto_privacy/profiles/helto.test/records/library/prompt-record",
+          `/helto_privacy/profiles/helto.test/records/library/prompt-record/${id}/reveal/use`,
+          `/helto_privacy/profiles/helto.test/records/library/prompt-record/${id}/delete`,
+          `/helto_privacy/profiles/helto.test/records/library/prompt-record/${id}/replace`,
+        ]);
+        assert.equal(calls[0].options.method, "GET");
+        assert.equal(calls[0].options.headers["X-Helto-Privacy-Token"], undefined);
+        assert.equal(
+          calls[2].options.headers["X-Helto-Privacy-Destructive"],
+          "confirmed",
+        );
+        assert.equal(
+          calls[3].options.headers["X-Helto-Privacy-Destructive"],
+          "confirmed",
+        );
+        assert.deepEqual(JSON.parse(calls[3].options.body), {
+          protectedValue: "SYNTHETIC_PROTECTED_VALUE",
+        });
+        assert.throws(
+          () => transport.records.reveal("library", "prompt-record", id, "merge"),
+          (error) => error.code === "PRIVACY_RECORD_OPERATION_INVALID",
+        );
+        assert.throws(
+          () => transport.records.reveal(
+            "library",
+            "prompt-record",
+            "0123456789abcdef0123456789abcdef",
+            "use",
+          ),
+          (error) => error.code === "PRIVACY_RECORD_ID_INVALID",
+        );
+        assert.equal(typeof transport.records.request, "undefined");
         """,
     )

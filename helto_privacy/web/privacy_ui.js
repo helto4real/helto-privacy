@@ -24,6 +24,8 @@ import {
   unlockPrivacyKeystore,
 } from "./privacy_client.js";
 
+export { redactPrivateRecordShell } from "./privacy_records.js";
+
 export {
   PrivacyBrowserRequestError,
   changePrivacyKeystorePassword,
@@ -42,6 +44,7 @@ const PRIVACY_ENVELOPE_ALGORITHM = "AES-256-GCM";
 const LEGACY_ENCRYPTED_PREFIX = "__HELTO_ENC__:";
 const DIALOG_CLASS = "helto-privacy-keystore-dialog";
 const RECOVERY_DIALOG_CLASS = "helto-privacy-recovery-dialog";
+const RECORD_MUTATION_DIALOG_CLASS = "helto-privacy-record-mutation-dialog";
 const STYLE_ID = "helto-privacy-keystore-ui-style";
 const SHARED_SURFACE_ID = "helto-privacy-surface";
 const RECOVERY_ISSUE_TYPES = Object.freeze({
@@ -57,6 +60,7 @@ const RECOVERY_DESCRIPTORS = new Map();
 const OWNER_MEMOS = new WeakMap();
 const FALLBACK_OWNER = {};
 const SHARED_PRIVACY_SURFACES = new WeakMap();
+const OPEN_MODAL_CLOSERS = new WeakMap();
 
 // Destructively remove concealed content from the DOM. The caller must fetch
 // and render it again only after an authorized reveal; this module never keeps
@@ -1328,8 +1332,82 @@ const MODES = {
   },
 };
 
+function closePrivacyModal(documentRef, dialogClass) {
+  const closers = documentRef && OPEN_MODAL_CLOSERS.get(documentRef);
+  const close = closers?.get(dialogClass);
+  if (close) {
+    close();
+    return;
+  }
+  for (const dialog of documentRef?.querySelectorAll?.(`.${dialogClass}`) ?? []) {
+    dialog.remove();
+  }
+}
+
+function createPrivacyModalScaffold({
+  documentRef,
+  dialogClass,
+  ariaLabel,
+  panelClass,
+  cancelResult,
+  resolve,
+}) {
+  installStyles(documentRef);
+  closePrivacyModal(documentRef, dialogClass);
+
+  const overlay = documentRef.createElement("div");
+  overlay.className = `${dialogClass} helto-root helto-overlay`;
+  overlay.setAttribute("role", "dialog");
+  overlay.setAttribute("aria-modal", "true");
+  overlay.setAttribute("aria-label", ariaLabel);
+  overlay.tabIndex = -1;
+  const panel = documentRef.createElement("div");
+  panel.className = `${panelClass} helto-modal`;
+  overlay.append(panel);
+  const previousFocus = documentRef.activeElement;
+  let settled = false;
+  let close;
+  const finish = (result) => {
+    if (settled) return;
+    settled = true;
+    const closers = OPEN_MODAL_CLOSERS.get(documentRef);
+    if (closers?.get(dialogClass) === close) closers.delete(dialogClass);
+    overlay.remove();
+    previousFocus?.focus?.();
+    resolve(result);
+  };
+  close = () => finish(cancelResult);
+  let closers = OPEN_MODAL_CLOSERS.get(documentRef);
+  if (!closers) {
+    closers = new Map();
+    OPEN_MODAL_CLOSERS.set(documentRef, closers);
+  }
+  closers.set(dialogClass, close);
+
+  const activate = ({ initialFocus = overlay, onKeydown = null } = {}) => {
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) finish(cancelResult);
+    });
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(cancelResult);
+      } else if (event.key === "Tab") {
+        trapFocus(event, overlay, documentRef);
+      } else {
+        onKeydown?.(event);
+      }
+      event.stopPropagation();
+    });
+    documentRef.body.append(overlay);
+    (initialFocus ?? overlay).focus?.();
+  };
+
+  return { panel, finish, activate };
+}
+
 export function closePrivacyKeystoreDialog(documentRef = globalThis.document) {
-  for (const dialog of documentRef?.querySelectorAll?.(`.${DIALOG_CLASS}`) ?? []) dialog.remove();
+  closePrivacyModal(documentRef, DIALOG_CLASS);
 }
 
 export function isPrivacyKeystoreDialogOpen(documentRef = globalThis.document) {
@@ -1337,11 +1415,62 @@ export function isPrivacyKeystoreDialogOpen(documentRef = globalThis.document) {
 }
 
 export function closePrivacyRecoveryDialog(documentRef = globalThis.document) {
-  for (const dialog of documentRef?.querySelectorAll?.(`.${RECOVERY_DIALOG_CLASS}`) ?? []) dialog.remove();
+  closePrivacyModal(documentRef, RECOVERY_DIALOG_CLASS);
 }
 
 export function isPrivacyRecoveryDialogOpen(documentRef = globalThis.document) {
   return Boolean(documentRef?.querySelector?.(`.${RECOVERY_DIALOG_CLASS}`));
+}
+
+export function showPrivateRecordMutationDialog(
+  operation,
+  { documentRef = globalThis.document } = {},
+) {
+  const action = operation === "delete"
+    ? { title: "Delete private record", button: "Delete" }
+    : operation === "replace"
+      ? { title: "Replace private record", button: "Replace" }
+      : null;
+  if (!action || !documentRef?.createElement || !documentRef.body) {
+    return Promise.resolve(false);
+  }
+
+  return new Promise((resolve) => {
+    const modal = createPrivacyModalScaffold({
+      documentRef,
+      dialogClass: RECORD_MUTATION_DIALOG_CLASS,
+      ariaLabel: action.title,
+      panelClass: "helto-privacy-record-mutation-panel",
+      cancelResult: false,
+      resolve,
+    });
+    const { panel, finish, activate } = modal;
+    const header = documentRef.createElement("header");
+    const title = documentRef.createElement("h3");
+    title.textContent = action.title;
+    header.append(title);
+    const body = documentRef.createElement("div");
+    body.className = "helto-privacy-record-mutation-body";
+    const message = documentRef.createElement("p");
+    message.textContent = "This destructive action cannot reveal or recover the record contents.";
+    body.append(message);
+    const footer = documentRef.createElement("footer");
+    footer.className = "helto-privacy-record-mutation-actions";
+    const cancelButton = documentRef.createElement("button");
+    cancelButton.type = "button";
+    cancelButton.className = "helto-button";
+    cancelButton.textContent = "Cancel";
+    const confirmButton = documentRef.createElement("button");
+    confirmButton.type = "button";
+    confirmButton.className = "helto-button is-danger";
+    confirmButton.textContent = action.button;
+    footer.append(cancelButton, confirmButton);
+    panel.append(header, body, footer);
+
+    cancelButton.addEventListener("click", () => finish(false));
+    confirmButton.addEventListener("click", () => finish(true));
+    activate({ initialFocus: cancelButton });
+  });
 }
 
 // Shows the dialog for `mode` ("unlock" | "setup" | "change"). Resolves with
@@ -1357,25 +1486,17 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
   }
   const spec = MODES[mode] ?? MODES.unlock;
   if (!documentRef?.createElement || !documentRef.body) return null;
-  installStyles(documentRef);
-  closePrivacyKeystoreDialog(documentRef);
 
   return new Promise((resolve) => {
-    const overlay = documentRef.createElement("div");
-    overlay.className = `${DIALOG_CLASS} helto-root helto-overlay`;
-    overlay.setAttribute("role", "dialog");
-    overlay.setAttribute("aria-modal", "true");
-    overlay.setAttribute("aria-label", spec.title);
-    overlay.tabIndex = -1;
-    const previousFocus = documentRef.activeElement;
-    const finish = (result) => {
-      overlay.remove();
-      previousFocus?.focus?.();
-      resolve(result);
-    };
-
-    const panel = documentRef.createElement("div");
-    panel.className = "helto-privacy-keystore-panel helto-modal";
+    const modal = createPrivacyModalScaffold({
+      documentRef,
+      dialogClass: DIALOG_CLASS,
+      ariaLabel: spec.title,
+      panelClass: "helto-privacy-keystore-panel",
+      cancelResult: null,
+      resolve,
+    });
+    const { panel, finish, activate } = modal;
 
     const title = documentRef.createElement("h3");
     title.textContent = spec.title;
@@ -1414,7 +1535,6 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
     submitButton.textContent = spec.action;
     actions.append(cancelButton, submitButton);
     panel.append(status, actions);
-    overlay.append(panel);
 
     const submit = async () => {
       const values = {};
@@ -1435,26 +1555,15 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
 
     submitButton.addEventListener("click", submit);
     cancelButton.addEventListener("click", () => finish(null));
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) finish(null);
+    activate({
+      initialFocus: inputs.values().next().value,
+      onKeydown: (event) => {
+        if (event.key === "Enter" && event.target?.tagName === "INPUT") {
+          event.preventDefault();
+          submit();
+        }
+      },
     });
-    overlay.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        finish(null);
-        return;
-      }
-      if (event.key === "Enter" && event.target?.tagName === "INPUT") {
-        event.preventDefault();
-        submit();
-      }
-      if (event.key === "Tab") trapFocus(event, overlay, documentRef);
-      event.stopPropagation();
-    });
-
-    documentRef.body.append(overlay);
-    (inputs.values().next().value ?? overlay).focus?.();
   });
 }
 
@@ -1468,26 +1577,18 @@ export async function showPrivacyRecoveryDialog(options = {}) {
   const model = buildPrivacyRecoveryDialogModel(issues);
   if (mode === "auto" && !issues.length) return { model, result: null };
   if (!documentRef?.createElement || !documentRef.body) return { model, result: null };
-  installStyles(documentRef);
-  closePrivacyRecoveryDialog(documentRef);
 
   return new Promise((resolve) => {
-    const overlay = documentRef.createElement("div");
-    overlay.className = `${RECOVERY_DIALOG_CLASS} helto-root helto-overlay`;
-    overlay.setAttribute("role", "dialog");
-    overlay.setAttribute("aria-modal", "true");
-    overlay.setAttribute("aria-label", "Privacy Recovery");
-    overlay.tabIndex = -1;
-    const previousFocus = documentRef.activeElement;
-    const finish = (payload) => {
-      overlay.remove();
-      previousFocus?.focus?.();
-      resolve(payload);
-    };
-
-    const panel = documentRef.createElement("div");
-    panel.className = "helto-privacy-recovery-panel helto-modal";
-    overlay.append(panel);
+    const cancelled = { model, result: null };
+    const modal = createPrivacyModalScaffold({
+      documentRef,
+      dialogClass: RECOVERY_DIALOG_CLASS,
+      ariaLabel: "Privacy Recovery",
+      panelClass: "helto-privacy-recovery-panel",
+      cancelResult: cancelled,
+      resolve,
+    });
+    const { panel, finish, activate } = modal;
     renderRecoveryDialogPanel(panel, model, documentRef);
 
     const status = documentRef.createElement("div");
@@ -1532,26 +1633,11 @@ export async function showPrivacyRecoveryDialog(options = {}) {
     closeButton.type = "button";
     closeButton.className = "helto-button";
     closeButton.textContent = issues.length ? "Cancel" : "Close";
-    closeButton.addEventListener("click", () => finish({ model, result: null }));
+    closeButton.addEventListener("click", () => finish(cancelled));
     actions.prepend(closeButton);
     buttons.push(closeButton);
 
-    overlay.addEventListener("click", (event) => {
-      if (event.target === overlay) finish({ model, result: null });
-    });
-    overlay.addEventListener("keydown", (event) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        finish({ model, result: null });
-        return;
-      }
-      if (event.key === "Tab") trapFocus(event, overlay, documentRef);
-      event.stopPropagation();
-    });
-
-    documentRef.body.append(overlay);
-    (actions.querySelector("button.primary") ?? closeButton).focus?.();
+    activate({ initialFocus: actions.querySelector("button.primary") ?? closeButton });
   });
 }
 
@@ -1657,6 +1743,8 @@ function installStyles(documentRef) {
     .helto-button:hover:not(:disabled) { background: linear-gradient(180deg, var(--helto-surface-hover), var(--helto-surface-3)); border-color: var(--helto-border-hover); color: #e6ebf9; }
     .helto-button:disabled { opacity: .4; cursor: not-allowed; }
     .helto-button.is-primary, .helto-button.is-active { border-color: var(--helto-accent-border); background: linear-gradient(180deg, #4f3a2a, #3d2d20); color: var(--helto-accent-strong); }
+    .helto-button.is-danger { border-color: var(--helto-danger-border); background: linear-gradient(180deg, #51293a, #3a2130); color: #f6cadb; }
+    .helto-button.is-danger:hover:not(:disabled) { border-color: #b5627f; background: linear-gradient(180deg, #653247, #4a2637); color: #ffe4ee; }
     .helto-button:focus-visible, .helto-field:focus, .helto-select:focus { outline: none; border-color: var(--helto-focus); box-shadow: var(--helto-focus-ring); }
     .helto-field { height: 26px; padding: 0 8px; border: 1px solid var(--helto-border-strong); border-radius: var(--helto-radius-sm); background: var(--helto-surface-2); color: var(--helto-text); font: inherit; }
     .helto-select { height: 24px; min-width: 72px; padding: 0 8px; border: 1px solid var(--helto-border-strong); border-radius: var(--helto-radius-sm); background: var(--helto-surface-2); color: var(--helto-text); font: inherit; cursor: pointer; }
@@ -1665,11 +1753,16 @@ function installStyles(documentRef) {
     .helto-pill.is-warn { border-color: #7d7147; background: #363019; color: var(--helto-warn); }
     .helto-pill.is-blocked { border-color: var(--helto-danger-border); background: #3a2130; color: #f6cadb; }
     .helto-pill.is-active { border-color: var(--helto-accent-border); color: var(--helto-accent-strong); }
-    .helto-overlay, .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS} { position: fixed; inset: 0; z-index: 10090; display: flex; align-items: center; justify-content: center; padding: 12px; background: rgba(17, 17, 27, .72); backdrop-filter: blur(4px); }
+    .helto-overlay, .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS}, .${RECORD_MUTATION_DIALOG_CLASS} { position: fixed; inset: 0; z-index: 10090; display: flex; align-items: center; justify-content: center; padding: 12px; background: rgba(17, 17, 27, .72); backdrop-filter: blur(4px); }
     .helto-modal { display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--helto-border-strong); border-radius: var(--helto-radius-lg); background: linear-gradient(135deg, rgba(49, 50, 68, .92), rgba(24, 24, 37, .96)); box-shadow: var(--helto-shadow-pop); padding: 16px; }
     .helto-privacy-keystore-panel { width: min(380px, calc(100vw - 28px)); gap: 10px; }
     .helto-privacy-recovery-panel { width: min(520px, calc(100vw - 28px)); max-height: min(620px, calc(100vh - 32px)); gap: 10px; }
-    .helto-privacy-keystore-panel h3, .helto-privacy-recovery-panel h3 { margin: 0; font-size: 15px; color: var(--helto-text); }
+    .helto-privacy-record-mutation-panel { width: min(420px, calc(100vw - 28px)); padding: 0; }
+    .helto-privacy-keystore-panel h3, .helto-privacy-recovery-panel h3, .helto-privacy-record-mutation-panel h3 { margin: 0; font-size: 15px; color: var(--helto-text); }
+    .helto-privacy-record-mutation-panel header, .helto-privacy-record-mutation-body, .helto-privacy-record-mutation-actions { padding: 14px 16px; }
+    .helto-privacy-record-mutation-body { color: var(--helto-text-dim); }
+    .helto-privacy-record-mutation-body p { margin: 0; }
+    .helto-privacy-record-mutation-actions { display: flex; justify-content: flex-end; gap: 8px; border-top: 1px solid var(--helto-border); background: var(--helto-bg); }
     .helto-privacy-keystore-hint { margin: 0; color: var(--helto-text-dim); }
     .helto-privacy-keystore-field { display: grid; gap: 4px; color: var(--helto-text-faint); }
     .helto-privacy-keystore-status, .helto-privacy-recovery-status { min-height: 16px; color: var(--helto-danger); }

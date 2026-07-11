@@ -461,6 +461,97 @@ Public-mode product execution continues through the consumer's ordinary public
 path. Do not send plaintext through the protected-reference route and do not
 catch `PRIVACY_EXECUTION_*` failures to execute defaults or stale state.
 
+## Private Records and Redaction
+
+Private record libraries declare their protected schema, fixed reveal
+operations, and exact projection-field allowlist. Every undeclared field is
+sensitive:
+
+```python
+from helto_privacy import (
+    RecordDeclaration,
+    RecordRevealProjection,
+    confirm_record_mutation,
+    generate_private_record_id,
+)
+
+profile = PrivacyProfile(
+    # resources, adapters, and scopes omitted
+    records=(
+        RecordDeclaration(
+            "prompt-record",
+            "library",
+            "main",
+            "helto.example.prompt-record.v1",
+            "prompt-store",
+            projections=(
+                RecordRevealProjection("use", ("prompt",)),
+                RecordRevealProjection("details", ("summary",)),
+            ),
+        ),
+    ),
+)
+
+class PromptStore:
+    def list_ids(self): ...                  # Opaque generated IDs only.
+    def read_protected(self, record_id): ... # Current encrypted envelope.
+    def write_protected(self, record_id, value): ...
+    def delete(self, record_id): ...
+
+    def project(self, value, operation):
+        if operation == "use":
+            return {"prompt": value["prompt"]}
+        return {"summary": value["summary"]}
+
+record_id = generate_private_record_id()
+```
+
+`records.list_shells("prompt-record")` never calls `read_protected`. It returns
+only opaque ID, record kind, `private: true`, and the fixed label
+`Private record`. Names, descriptions, tags, timestamps, counts, paths,
+filenames, hashes, media details, and diagnostics cannot enter a locked shell.
+
+An authorized reveal decrypts only after the current session and stable mode
+scope validate, runs the consumer projection, rejects every non-allowlisted
+field, returns an isolated JSON value, and clears mutable plaintext:
+
+```python
+authorization = privacy.authorization.authorize_request(request, "record.use")
+revealed = privacy.records("library").reveal(
+    "prompt-record", record_id, "use", authorization
+)
+use_prompt(revealed.value["prompt"])
+```
+
+Delete and protected replacement remain available while locked, but require a
+one-use confirmation bound to the exact pack, resource, kind, ID, and action.
+Replacement accepts only a current protected envelope—never plaintext:
+
+```python
+confirmation = confirm_record_mutation(
+    pack_id=privacy.profile.id,
+    resource_id="library",
+    record_kind="prompt-record",
+    record_id=record_id,
+    operation="delete",
+    confirmed=user_confirmed,
+)
+privacy.records("library").delete("prompt-record", record_id, confirmation)
+```
+
+The attested browser handle exposes `list`, `reveal`, `delete`, and `replace`.
+It owns a generic Helto-styled destructive confirmation modal and rebuilds every shell with
+`redactPrivateRecordShell()`, discarding extra server/consumer metadata rather
+than masking or retaining it. Generic protected operations cannot target a
+record resource, so duplicate, merge, edit, or metadata-reveal escape hatches
+cannot be registered.
+
+Record responses use `Cache-Control: private, no-store`, `nosniff`,
+`no-referrer`, a fresh opaque correlation ID, and generic download names from
+`private_record_response_headers()`. `safe_record_diagnostic()` accepts only a
+fixed stage plus coarse integer count and boolean flag. Raw exceptions, paths,
+record values, and original filenames are never response or diagnostic fields.
+
 ## Shared UI and Canonical Routes (ComfyUI)
 
 Inside ComfyUI, packs do not implement their own unlock endpoints or dialogs.
@@ -482,10 +573,14 @@ records the pack's legacy `privacy_key.json` directory. It registers:
 - `POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition`
 - `POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect`
 - `POST /helto_privacy/profiles/{pack_id}/executions/{execution_id}/prepare`
+- `GET  /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}`
+- `POST /helto_privacy/profiles/{pack_id}/records/.../reveal/{operation}`
+- `POST /helto_privacy/profiles/{pack_id}/records/.../delete`, `/replace`
 - `POST /helto_privacy/suite/browser-attestation`
 - `POST /helto_privacy/unlock`, `/lock`
 - `POST /helto_privacy/keystore/init`, `/keystore/change_password`
 - `GET  /helto_privacy/ui/privacy.js` — the shared browser client and UI
+- `GET  /helto_privacy/ui/privacy_records.js` — opaque-ID validation and shell redaction
 - `GET  /helto_privacy/ui/privacy_snapshot.js` — runtime snapshot coordinator
 - `GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js` — the exact
   browser profile compiler
@@ -526,9 +621,9 @@ For each Helto node pack:
 4. Dispatch protected routes through the installed pack's bound
    `privacy.authorization.dispatch(...)` handle.
 5. Connect the exact browser profile, implement `onPrivacySessionChange`, and
-   invoke only the compiled typed resource handles such as
-   `privacy.records("library").invoke("record.use", payload)`; never read the
-   browser token or vendor a second privacy UI.
+   invoke only compiled typed methods such as
+   `privacy.records("library").reveal("prompt-record", id, "use")`; never read
+   the browser token or vendor a second privacy UI.
 
 ## Threat Model
 

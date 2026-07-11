@@ -295,6 +295,14 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 "workflowResourceId": "editor-state",
             },
         ],
+        "records": [
+            {
+                "id": "test-record",
+                "resourceId": "library",
+                "scopeId": "test-scope",
+                "revealOperations": [],
+            },
+        ],
         "protectedOperations": [],
         "suiteStatus": "incomplete",
         "suiteManifestDigest": None,

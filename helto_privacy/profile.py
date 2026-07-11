@@ -143,6 +143,27 @@ class ProtectedField:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordRevealProjection:
+    """One authorized record reveal operation and its safe result fields."""
+
+    operation: str
+    safe_fields: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.operation)
+        if self.operation not in {"use", "preview", "details"}:
+            raise ProfileValidationError("invalid_record_reveal_operation")
+        fields = _normalized_text_values(
+            self.safe_fields,
+            "invalid_safe_projection_field",
+            "duplicate_safe_projection_field",
+        )
+        if not fields or any(not _is_stable_id(field_name) for field_name in fields):
+            raise ProfileValidationError("invalid_safe_projection_field")
+        object.__setattr__(self, "safe_fields", fields)
+
+
+@dataclass(frozen=True, slots=True)
 class RecordDeclaration:
     """Product facts for one private record kind."""
 
@@ -151,7 +172,7 @@ class RecordDeclaration:
     scope_id: str
     current_schema: str
     store_adapter: str
-    safe_projection_fields: tuple[str, ...] = ()
+    projections: tuple[RecordRevealProjection, ...] = ()
 
     def __post_init__(self) -> None:
         for value in (
@@ -162,12 +183,31 @@ class RecordDeclaration:
             self.store_adapter,
         ):
             _validate_stable_id(value)
-        fields = _normalized_text_values(
-            self.safe_projection_fields,
-            "invalid_safe_projection_field",
-            "duplicate_safe_projection_field",
+        projections = tuple(self.projections)
+        if any(not isinstance(item, RecordRevealProjection) for item in projections):
+            raise ProfileValidationError("invalid_record_projection_contract")
+        operations = tuple(item.operation for item in projections)
+        if len(operations) != len(set(operations)):
+            raise ProfileValidationError("duplicate_record_reveal_operation")
+        object.__setattr__(
+            self,
+            "projections",
+            tuple(sorted(projections, key=lambda item: item.operation)),
         )
-        object.__setattr__(self, "safe_projection_fields", fields)
+
+    @property
+    def reveal_operations(self) -> tuple[str, ...]:
+        return tuple(projection.operation for projection in self.projections)
+
+    def projection_for(self, operation: str) -> RecordRevealProjection | None:
+        return next(
+            (
+                projection
+                for projection in self.projections
+                if projection.operation == operation
+            ),
+            None,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -501,6 +541,8 @@ class PrivacyProfile:
             resource = resources.get(operation.resource_id)
             if resource is None:
                 raise ProfileValidationError("unknown_operation_resource")
+            if resource.kind is ResourceKind.RECORD:
+                raise ProfileValidationError("record_operation_must_use_typed_contract")
             _require_adapter_side(resource, operation.adapter_slot, server_adapter_ids)
             used_server_adapters.add(operation.adapter_slot)
 
@@ -584,6 +626,8 @@ class PrivacyProfile:
                 "delete",
                 *_MODE_TRANSITION_METHODS,
             )
+            if record.projections:
+                _add_contract(contracts, record.store_adapter, "project")
         for artifact in self.artifacts:
             _add_contract(
                 contracts,
@@ -691,7 +735,13 @@ class PrivacyProfile:
                     "scopeId": record.scope_id,
                     "currentSchema": record.current_schema,
                     "storeAdapter": record.store_adapter,
-                    "safeProjectionFields": list(record.safe_projection_fields),
+                    "revealProjections": [
+                        {
+                            "operation": projection.operation,
+                            "safeFields": list(projection.safe_fields),
+                        }
+                        for projection in record.projections
+                    ],
                 }
                 for record in self.records
             ],

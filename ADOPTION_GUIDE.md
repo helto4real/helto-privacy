@@ -441,7 +441,60 @@ private cache, decrypt-to-default fallback, and replay reuse. The shared route,
 browser execution handle, resolver, cancellation signal, and RAM cache are the
 only private execution path.
 
-## Step 8 — Tests (non-negotiable hygiene)
+## Step 8 — Move private record libraries behind minimal shells
+
+Declare each private record kind on its typed record resource. Mint IDs with
+`generate_private_record_id()`—never names, UUIDs from consumer data, paths,
+timestamps, or content-derived hashes. A reveal-capable declaration gives each
+fixed operation its own explicit output-field allowlist:
+
+```python
+RecordDeclaration(
+    "prompt-record",
+    "library",
+    "main",
+    "helto.example.prompt-record.v1",
+    "prompt-store",
+    projections=(
+        RecordRevealProjection("use", ("prompt",)),
+        RecordRevealProjection("details", ("summary",)),
+    ),
+)
+```
+
+The store implements `list_ids`, `read_protected`, `write_protected`, and
+`delete`, plus the mode-transition methods. Reveal-capable stores also
+implement `project(value, operation)`. `list_ids` must not read or decrypt a
+record. `project` returns canonical JSON and every returned top-level field must
+appear in that operation's `RecordRevealProjection.safe_fields`; omission means
+sensitive. Do not put names,
+descriptions, tags, timestamps, counts, paths, filenames, hashes, media facts,
+or debug values into a locked listing.
+
+Replace the pack's record routes with the typed browser handle:
+
+```js
+const records = privacy.records("library");
+const shells = await records.list("prompt-record");
+const revealed = await records.reveal("prompt-record", opaqueId, "use");
+await records.delete("prompt-record", opaqueId); // Shared Helto confirmation modal.
+```
+
+The shared handle rebuilds locked shells as `{ id, kind, private: true,
+label: "Private record" }` and discards every extra field. It supports only
+declared `use`, `preview`, or `details` reveals. Delete and replacement work
+while locked after shared confirmation; replacement accepts a protected current
+envelope only. Do not register a generic `ProtectedOperation` on a record
+resource or retain local duplicate, merge, edit, preview-metadata, record-token,
+or decrypt-to-default routes.
+
+Use `private_record_response_headers()` for private media/record responses and
+`safe_record_diagnostic()` for coarse diagnostics. Never include an original
+filename, path, prompt, name, tag, exception string, token, workflow value, or
+record payload in logs, errors, filenames, or diagnostics. Errors expose only a
+stable `PRIVACY_RECORD_*` code and fresh `hp-record-*` correlation ID.
+
+## Step 9 — Tests (non-negotiable hygiene)
 
 A test run once minted a real key file inside a repo's `config/` and it
 nearly got committed. Every adopting pack must add an **autouse** fixture
@@ -483,7 +536,13 @@ decrypt, exact execution-field membership, semantic identity stability across
 randomized envelopes, identity change after unlock/rotation, single-use grants,
 active cancellation, async plaintext cleanup, and RAM-cache invalidation.
 
-## Step 9 — Validation checklist
+Record adoptions also test non-decrypting locked lists, four-field shells,
+opaque-ID rejection, authorization before read, allowlist rejection, decrypt
+failure, mutable plaintext cleanup, locked confirmed delete/replacement,
+one-use confirmation, generic filenames/headers, correlation-only errors, and
+browser-side removal of injected names, paths, timestamps, and labels.
+
+## Step 10 — Validation checklist
 
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real
@@ -504,6 +563,11 @@ active cancellation, async plaintext cleanup, and RAM-cache invalidation.
 - [ ] Locking or rotating during a disposable synthetic private run requests
       cancellation at the next safe checkpoint and removes the private RAM
       cache. No external or persistent cache receives the result.
+- [ ] Locked record listings call only `list_ids` and expose exactly opaque ID,
+      kind, `private: true`, and `Private record`; reveal failures do not invoke
+      product projection, while confirmed delete/replacement remain usable.
+- [ ] Record responses and rendered shells contain none of the synthetic name,
+      path, filename, timestamp, tag, hash, diagnostic, or exception canaries.
 - [ ] `privacy_key.json` is gone (renamed `.migrated`) and gitignored.
 - [ ] Commit style: single-line imperative subject, matching the pack's
       history.

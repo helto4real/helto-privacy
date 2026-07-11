@@ -6,6 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
 PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
+PRIVACY_RECORDS = ROOT / "helto_privacy" / "web" / "privacy_records.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
@@ -14,6 +15,9 @@ def run_node_module_test(tmp_path, body: str) -> None:
     module_path.write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
     client_path = tmp_path / "privacy_client.js"
     client_path.write_text(PRIVACY_CLIENT.read_text(encoding="utf-8"), encoding="utf-8")
+    (tmp_path / "privacy_records.js").write_text(
+        PRIVACY_RECORDS.read_text(encoding="utf-8"), encoding="utf-8"
+    )
     script_path = tmp_path / "test.mjs"
     script_path.write_text(
         textwrap.dedent(
@@ -220,6 +224,30 @@ def test_shared_surface_mounts_once_and_exposes_complete_accessible_controls(tmp
         assert.equal(secret.inert, false);
         assert(!String(secret.className).includes("helto-text-masked"));
         assert.equal(secret.value, "");
+
+        const shell = privacy.redactPrivateRecordShell({
+          id: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          kind: "prompt-record",
+          private: true,
+          label: "SYNTHETIC_LABEL_CANARY",
+          name: "SYNTHETIC_NAME_CANARY",
+          path: "/SYNTHETIC/PRIVATE/PATH",
+          timestamp: "SYNTHETIC_TIMESTAMP_CANARY",
+        });
+        assert.deepEqual(shell, {
+          id: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          kind: "prompt-record",
+          private: true,
+          label: "Private record",
+        });
+        assert(Object.isFrozen(shell));
+        assert(!JSON.stringify(shell).includes("SYNTHETIC"));
+        assert.equal(privacy.redactPrivateRecordShell({ id: "user-authored-name" }), null);
+        assert.equal(privacy.redactPrivateRecordShell({
+          id: "0123456789abcdef0123456789abcdef",
+          kind: "prompt-record",
+          private: true,
+        }), null);
         """,
     )
 
@@ -260,6 +288,72 @@ def test_surface_rechecks_missing_routes_and_applies_public_transition(tmp_path)
         await surface.transition("helto.test", "global", "public");
         assert.equal(transitions.length, 1);
         assert.equal(transitions[0].target, "public");
+        """,
+    )
+
+
+def test_private_record_mutation_dialog_is_generic_styled_and_cancel_first(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const documentRef = new FakeDocument();
+        const pendingDelete = privacy.showPrivateRecordMutationDialog(
+          "delete",
+          { documentRef },
+        );
+        const dialog = documentRef.querySelector(".helto-privacy-record-mutation-dialog");
+        assert(dialog);
+        assert.equal(dialog.getAttribute("role"), "dialog");
+        assert.equal(dialog.getAttribute("aria-modal"), "true");
+        assert.equal(documentRef.activeElement.textContent, "Cancel");
+        const text = treeText(dialog);
+        assert(text.includes("Delete private record"));
+        assert(!text.includes("hp-rec-"));
+        assert(!text.includes("prompt-record"));
+        assert(!text.includes("SYNTHETIC"));
+        const buttons = dialog.querySelectorAll("button");
+        const destructive = buttons.find((button) => button.textContent === "Delete");
+        assert(String(destructive.className).includes("is-danger"));
+        destructive.listeners.click[0]();
+        assert.equal(await pendingDelete, true);
+        assert.equal(documentRef.querySelector(".helto-privacy-record-mutation-dialog"), null);
+
+        const pendingReplace = privacy.showPrivateRecordMutationDialog(
+          "replace",
+          { documentRef },
+        );
+        const replaceDialog = documentRef.querySelector(
+          ".helto-privacy-record-mutation-dialog",
+        );
+        const cancel = replaceDialog.querySelectorAll("button")
+          .find((button) => button.textContent === "Cancel");
+        cancel.listeners.click[0]();
+        assert.equal(await pendingReplace, false);
+        assert.equal(await privacy.showPrivateRecordMutationDialog(
+          "merge",
+          { documentRef },
+        ), false);
+
+        const first = privacy.showPrivateRecordMutationDialog(
+          "delete",
+          { documentRef },
+        );
+        const second = privacy.showPrivateRecordMutationDialog(
+          "replace",
+          { documentRef },
+        );
+        assert.equal(await first, false);
+        assert.equal(documentRef.querySelectorAll(
+          ".helto-privacy-record-mutation-dialog",
+        ).length, 1);
+        const current = documentRef.querySelector(
+          ".helto-privacy-record-mutation-dialog",
+        );
+        assert(treeText(current).includes("Replace private record"));
+        current.querySelectorAll("button")
+          .find((button) => button.textContent === "Cancel")
+          .listeners.click[0]();
+        assert.equal(await second, false);
         """,
     )
 

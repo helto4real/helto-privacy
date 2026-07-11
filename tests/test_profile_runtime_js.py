@@ -8,6 +8,7 @@ PRIVACY_PROFILE = ROOT / "helto_privacy" / "web" / "privacy_profile.js"
 PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
 PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
 PRIVACY_SNAPSHOT = ROOT / "helto_privacy" / "web" / "privacy_snapshot.js"
+PRIVACY_RECORDS = ROOT / "helto_privacy" / "web" / "privacy_records.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
@@ -18,6 +19,9 @@ def run_node_module_test(tmp_path, body: str) -> None:
     )
     (tmp_path / "privacy_snapshot.js").write_text(
         PRIVACY_SNAPSHOT.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    (tmp_path / "privacy_records.js").write_text(
+        PRIVACY_RECORDS.read_text(encoding="utf-8"), encoding="utf-8"
     )
     module_path = tmp_path / "privacy_profile" / "privacy_profile.js"
     module_path.parent.mkdir()
@@ -75,18 +79,18 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 executionResourceId: "render",
                 workflowResourceId: "timeline",
               }}],
-              protectedOperations: [
-                {{
-                  id: "record.use",
-                  resourceId: "library",
-                  route: "/helto-test/records/use",
-                  method: "POST",
-                }},
-              ],
+              records: [{{
+                id: "prompt-record",
+                resourceId: "library",
+                scopeId: "global",
+                revealOperations: ["use", "details"],
+              }}],
+              protectedOperations: [],
               ...overrides,
             }});
             let serverAttestation = () => attestation();
             const executionBodies = [];
+            const recordCalls = [];
             globalThis.fetch = async (url, options = {{}}) => {{
               const target = String(url);
               let payload = {{ ok: true }};
@@ -114,6 +118,22 @@ def run_node_module_test(tmp_path, body: str) -> None:
                     grant: "SYNTHETIC_OPAQUE_GRANT",
                   }},
                 }};
+              }} else if (target.includes("/records/library/prompt-record")) {{
+                recordCalls.push({{ target, options }});
+                if (options.method === "GET") payload = {{ ok: true, records: [{{
+                  id: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+                  kind: "prompt-record",
+                  private: true,
+                  label: "SYNTHETIC_LABEL_CANARY",
+                  name: "SYNTHETIC_NAME_CANARY",
+                  path: "/SYNTHETIC/PRIVATE/PATH",
+                }}] }};
+                else if (target.endsWith("/reveal/use")) payload = {{
+                  ok: true,
+                  value: {{ prompt: "SYNTHETIC_AUTHORIZED_PROMPT" }},
+                  correlationId: "hp-record-abcdefghijklmnop",
+                }};
+                else payload = {{ ok: true, operation: target.split("/").at(-1) }};
               }} else if (target.includes("/profiles/") && !target.endsWith("/modes")) {{
                 payload = serverAttestation();
               }} else if (target.endsWith("/unlock")) {{
@@ -221,7 +241,108 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
           "SYNTHETIC_CURRENT_ENVELOPE",
         );
         assert(pack.records("library") instanceof privacy.BrowserRecordHandle);
-        assert(typeof pack.records("library").invoke === "function");
+        const records = pack.records("library");
+        assert.equal(typeof records.invoke, "undefined");
+        const shells = await records.list("prompt-record");
+        assert.deepEqual(shells, [{
+          id: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          kind: "prompt-record",
+          private: true,
+          label: "Private record",
+        }]);
+        assert(!JSON.stringify(shells).includes("SYNTHETIC"));
+        assert.deepEqual(
+          await records.reveal(
+            "prompt-record",
+            "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+            "use",
+          ),
+          {
+            ok: true,
+            value: { prompt: "SYNTHETIC_AUTHORIZED_PROMPT" },
+            correlationId: "hp-record-abcdefghijklmnop",
+          },
+        );
+        class ConfirmationElement {
+          constructor(tag, ownerDocument) {
+            this.tagName = tag.toUpperCase(); this.ownerDocument = ownerDocument;
+            this.children = []; this.listeners = {}; this.attributes = {};
+            this.className = ""; this.textContent = "";
+          }
+          append(...items) { for (const item of items) { item.parentNode = this; this.children.push(item); } }
+          remove() { const index = this.parentNode?.children.indexOf(this) ?? -1; if (index >= 0) this.parentNode.children.splice(index, 1); }
+          setAttribute(name, value) { this.attributes[name] = String(value); }
+          addEventListener(type, listener) { (this.listeners[type] ??= []).push(listener); }
+          focus() { this.ownerDocument.activeElement = this; }
+          querySelectorAll(selector) {
+            const matches = [];
+            const visit = (element) => {
+              const match = selector.startsWith(".")
+                ? String(element.className).split(/\\s+/).includes(selector.slice(1))
+                : element.tagName === selector.toUpperCase();
+              if (match) matches.push(element);
+              for (const child of element.children) visit(child);
+            };
+            visit(this);
+            return matches;
+          }
+        }
+        class ConfirmationDocument {
+          constructor() {
+            this.head = new ConfirmationElement("head", this);
+            this.body = new ConfirmationElement("body", this);
+            this.activeElement = null;
+            this.cookie = "";
+          }
+          createElement(tag) { return new ConfirmationElement(tag, this); }
+          querySelectorAll(selector) { return this.body.querySelectorAll(selector); }
+          querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+          getElementById(id) {
+            return [...this.head.children, ...this.body.children]
+              .find((element) => element.id === id) || null;
+          }
+        }
+        globalThis.document = new ConfirmationDocument();
+        const confirmationMessages = [];
+        const finishRecordConfirmation = async (pending, buttonLabel) => {
+          const dialog = document.querySelector(".helto-privacy-record-mutation-dialog");
+          const text = (element) => [
+            element.textContent,
+            ...element.children.map(text),
+          ].join(" ");
+          confirmationMessages.push(text(dialog));
+          const button = dialog.querySelectorAll("button")
+            .find((candidate) => candidate.textContent === buttonLabel);
+          button.listeners.click[0]();
+          return pending;
+        };
+        await finishRecordConfirmation(records.delete(
+          "prompt-record",
+          "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        ), "Delete");
+        await finishRecordConfirmation(records.replace(
+          "prompt-record",
+          "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          "SYNTHETIC_PROTECTED_VALUE",
+        ), "Replace");
+        assert.equal(confirmationMessages.length, 2);
+        assert(confirmationMessages.every(
+          (message) => !message.includes("hp-rec-") && !message.includes("prompt-record"),
+        ));
+        const recordCallCount = recordCalls.length;
+        const cancelled = records.delete(
+          "prompt-record",
+          "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        );
+        const cancelDialog = document.querySelector(".helto-privacy-record-mutation-dialog");
+        cancelDialog.querySelectorAll("button")
+          .find((button) => button.textContent === "Cancel")
+          .listeners.click[0]();
+        assert.equal(
+          await cancelled,
+          null,
+        );
+        assert.equal(recordCalls.length, recordCallCount);
         assert(pack.artifacts("thumbnail") instanceof privacy.BrowserArtifactHandle);
         assert(pack.execution("render") instanceof privacy.BrowserExecutionHandle);
         assert.throws(
@@ -247,18 +368,13 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
             protectedValue: "SYNTHETIC_CURRENT_ENVELOPE",
           }],
         }]);
-        assert.deepEqual(
-          await pack.records("library").invoke(
-            "record.use",
-            { recordId: "synthetic-record" },
-          ),
-          { ok: true },
-        );
         assert.throws(
-          () => pack.records("library").invoke(
-            "record.delete",
+          () => records.reveal(
+            "prompt-record",
+            "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+            "merge",
           ),
-          (error) => error.code === "unknown_browser_operation",
+          (error) => error.code === "unknown_browser_record_operation",
         );
 
         await app.extension.nodeCreated({ id: 3, type: "HeltoTimeline" });

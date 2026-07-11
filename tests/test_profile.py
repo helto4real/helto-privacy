@@ -11,8 +11,47 @@ from helto_privacy.profile import (
     ProtectedOperation,
     ProfileValidationError,
     ProfileResource,
+    RecordDeclaration,
+    RecordRevealProjection,
     ResourceKind,
 )
+
+
+def test_record_reveal_contract_requires_explicit_fields_and_fixed_operations():
+    with pytest.raises(ProfileValidationError) as missing_fields:
+        RecordRevealProjection("use", ())
+    assert missing_fields.value.code == "invalid_safe_projection_field"
+
+    with pytest.raises(ProfileValidationError) as unsupported_operation:
+        RecordRevealProjection("merge", ("prompt",))
+    assert unsupported_operation.value.code == "invalid_record_reveal_operation"
+
+    with pytest.raises(ProfileValidationError) as duplicate_operation:
+        RecordDeclaration(
+            "prompt-record",
+            "library",
+            "main",
+            "helto.record.v1",
+            "records",
+            projections=(
+                RecordRevealProjection("use", ("prompt",)),
+                RecordRevealProjection("use", ("summary",)),
+            ),
+        )
+    assert duplicate_operation.value.code == "duplicate_record_reveal_operation"
+
+    declaration = RecordDeclaration(
+        "prompt-record",
+        "library",
+        "main",
+        "helto.record.v1",
+        "records",
+        projections=(
+            RecordRevealProjection("use", ("prompt",)),
+            RecordRevealProjection("details", ("summary",)),
+        ),
+    )
+    assert declaration.reveal_operations == ("details", "use")
 
 
 def test_protected_operation_compiles_a_fixed_same_origin_route_contract():

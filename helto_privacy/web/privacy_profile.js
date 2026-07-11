@@ -8,8 +8,10 @@ import {
 } from "../privacy_client.js";
 import {
   mountSharedPrivacySurface,
+  showPrivateRecordMutationDialog,
   showPrivacyKeystoreDialog,
 } from "../privacy.js";
+import { redactPrivateRecordShell } from "../privacy_records.js";
 import {
   createPrivacySnapshotCoordinator,
   installGraphSerializationBarrier,
@@ -112,7 +114,9 @@ class BrowserResourceHandle {
   get readiness() {
     return new BrowserReadinessHandle(HANDLE_ENTRIES.get(this));
   }
+}
 
+class BrowserInvokableResourceHandle extends BrowserResourceHandle {
   invoke(operationId, body = undefined) {
     const entry = HANDLE_ENTRIES.get(this);
     entry.pack.authorization.requireReady();
@@ -124,7 +128,7 @@ class BrowserResourceHandle {
   }
 }
 
-export class BrowserModeHandle extends BrowserResourceHandle {
+export class BrowserModeHandle extends BrowserInvokableResourceHandle {
   resolve(scopeId) {
     const entry = HANDLE_ENTRIES.get(this);
     return entry.transport.mode.resolve(this.resourceId, scopeId);
@@ -143,7 +147,7 @@ export class BrowserModeHandle extends BrowserResourceHandle {
     return result;
   }
 }
-export class BrowserWorkflowHandle extends BrowserResourceHandle {
+export class BrowserWorkflowHandle extends BrowserInvokableResourceHandle {
   markEdited(owner, fieldId) {
     const entry = HANDLE_ENTRIES.get(this);
     requireWorkflowField(entry, this.resourceId, fieldId);
@@ -177,9 +181,66 @@ export class BrowserWorkflowHandle extends BrowserResourceHandle {
     return entry.snapshotCoordinator.executionProjection(owner, fieldId);
   }
 }
-export class BrowserRecordHandle extends BrowserResourceHandle {}
-export class BrowserArtifactHandle extends BrowserResourceHandle {}
-export class BrowserExecutionHandle extends BrowserResourceHandle {
+export class BrowserRecordHandle extends BrowserResourceHandle {
+  async list(recordKind) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    const declaration = requireRecordDeclaration(entry, this.resourceId, recordKind);
+    const result = await entry.transport.records.list(this.resourceId, declaration.id);
+    if (!Array.isArray(result?.records)) {
+      throw new PrivacyPackConnectionError("invalid_private_record_shell");
+    }
+    const shells = result.records.map(redactPrivateRecordShell);
+    if (shells.some((shell) => !shell || shell.kind !== declaration.id)) {
+      throw new PrivacyPackConnectionError("invalid_private_record_shell");
+    }
+    return Object.freeze(shells);
+  }
+
+  reveal(recordKind, recordId, operation) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    const declaration = requireRecordDeclaration(entry, this.resourceId, recordKind);
+    if (!declaration.revealOperations.includes(operation)) {
+      throw new PrivacyPackConnectionError("unknown_browser_record_operation");
+    }
+    return entry.transport.records.reveal(
+      this.resourceId,
+      declaration.id,
+      recordId,
+      operation,
+    );
+  }
+
+  async delete(recordKind, recordId) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    const declaration = requireRecordDeclaration(entry, this.resourceId, recordKind);
+    if (!await showPrivateRecordMutationDialog("delete")) return null;
+    return entry.transport.records.delete(
+      this.resourceId,
+      declaration.id,
+      recordId,
+      true,
+    );
+  }
+
+  async replace(recordKind, recordId, protectedValue) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    const declaration = requireRecordDeclaration(entry, this.resourceId, recordKind);
+    if (!await showPrivateRecordMutationDialog("replace")) return null;
+    return entry.transport.records.replace(
+      this.resourceId,
+      declaration.id,
+      recordId,
+      protectedValue,
+      true,
+    );
+  }
+}
+export class BrowserArtifactHandle extends BrowserInvokableResourceHandle {}
+export class BrowserExecutionHandle extends BrowserInvokableResourceHandle {
   prepare(owner, projectionId = null) {
     const entry = HANDLE_ENTRIES.get(this);
     entry.pack.authorization.requireReady();
@@ -354,6 +415,12 @@ export async function connectPrivacyPack({
       executionResourceId: String(item.executionResourceId),
       workflowResourceId: String(item.workflowResourceId),
     })),
+    recordDeclarations: attestation.records.map((item) => Object.freeze({
+      id: String(item.id),
+      resourceId: String(item.resourceId),
+      scopeId: String(item.scopeId),
+      revealOperations: Object.freeze([...item.revealOperations]),
+    })),
     protectedOperations: attestation.protectedOperations.map((item) => Object.freeze({
       id: String(item.id),
       resourceId: String(item.resourceId),
@@ -515,6 +582,31 @@ function validateServerAttestation({
   if (!Array.isArray(attestation.executionProjections)) {
     throw new PrivacyPackConnectionError("invalid_execution_projection_declaration");
   }
+  if (!Array.isArray(attestation.records)) {
+    throw new PrivacyPackConnectionError("invalid_record_declaration");
+  }
+  const recordIds = new Set();
+  for (const record of attestation.records) {
+    if (
+      !record?.id
+      || !record?.resourceId
+      || !record?.scopeId
+      || !Array.isArray(record.revealOperations)
+      || record.revealOperations.some(
+        (operation) => !["use", "preview", "details"].includes(operation),
+      )
+      || record.revealOperations.length !== new Set(record.revealOperations).size
+      || recordIds.has(record.id)
+      || !attestation.resources.some(
+        (resource) => resource.id === record.resourceId
+          && resource.kind === RESOURCE_KIND.RECORD,
+      )
+      || !attestation.modeScopes.some((scope) => scope.id === record.scopeId)
+    ) {
+      throw new PrivacyPackConnectionError("invalid_record_declaration");
+    }
+    recordIds.add(record.id);
+  }
   const projectionIds = new Set();
   for (const projection of attestation.executionProjections) {
     if (
@@ -544,13 +636,17 @@ function validateServerAttestation({
   }
   const operationIds = new Set();
   for (const operation of attestation.protectedOperations) {
+    const operationResource = attestation.resources.find(
+      (resource) => resource.id === operation?.resourceId,
+    );
     if (
       !operation?.id
       || !operation?.resourceId
       || !isSafeBrowserOperationRoute(operation.route)
       || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(operation.method)
       || operationIds.has(operation.id)
-      || !attestation.resources.some((resource) => resource.id === operation.resourceId)
+      || !operationResource
+      || operationResource.kind === RESOURCE_KIND.RECORD
     ) {
       throw new PrivacyPackConnectionError("invalid_server_operation_declaration");
     }
@@ -621,6 +717,16 @@ function requireWorkflowField(entry, workflowResourceId, fieldId) {
   )) {
     throw new PrivacyPackConnectionError("unknown_browser_field");
   }
+}
+
+function requireRecordDeclaration(entry, resourceId, recordKind) {
+  const declaration = entry.recordDeclarations.find(
+    (item) => item.resourceId === resourceId && item.id === recordKind,
+  );
+  if (!declaration) {
+    throw new PrivacyPackConnectionError("unknown_browser_record_declaration");
+  }
+  return declaration;
 }
 
 function registerPrivacyLifecycleExtension(app) {

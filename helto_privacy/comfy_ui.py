@@ -14,10 +14,16 @@ Registered surface (pack-neutral, stable):
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect``
 - ``POST /helto_privacy/profiles/{pack_id}/executions/{execution_id}/prepare``
+- ``GET  /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}``
+- ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/reveal/{operation}``
+- ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/delete``
+- ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/replace``
 - ``POST /helto_privacy/unlock`` / ``/lock``
 - ``POST /helto_privacy/keystore/init`` / ``/keystore/change_password``
 - ``GET  /helto_privacy/ui/privacy.js`` — the shared unlock dialog as an ES
   module any pack frontend can ``import()``.
+- ``GET  /helto_privacy/ui/privacy_records.js`` — record-ID validation and
+  locked-shell redaction.
 - ``GET  /helto_privacy/ui/privacy_snapshot.js`` — runtime-only snapshot and
   serialization barrier mechanics.
 - ``GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js`` — exact-suite
@@ -46,6 +52,7 @@ from .suite_runtime import SuiteBlockedError, require_active_process_suite
 ROUTE_PREFIX = "/helto_privacy"
 UI_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy.js"
 CLIENT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_client.js"
+RECORDS_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_records.js"
 SNAPSHOT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_snapshot.js"
 PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile/{{manifest_digest}}.js"
 _WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -383,6 +390,125 @@ def register_helto_privacy_ui(
                 500,
             )
 
+    record_base = (
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/records/"
+        "{resource_id}/{record_kind}"
+    )
+
+    @routes.get(record_base)
+    async def get_helto_privacy_record_shells(request):
+        from .records import RecordError, safe_record_diagnostic
+        from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            resource_id = str(request.match_info.get("resource_id") or "")
+            record_kind = str(request.match_info.get("record_kind") or "")
+            shells = pack.records(resource_id).list_shells(record_kind)
+            diagnostic = safe_record_diagnostic(stage="list", count=len(shells))
+            correlation = str(diagnostic["correlationId"])
+            return web.json_response(
+                {
+                    "ok": True,
+                    "records": [shell.to_payload() for shell in shells],
+                    "correlationId": correlation,
+                },
+                headers=_record_response_headers(correlation),
+            )
+        except PackBlockedError:
+            return _record_route_error_response(
+                web,
+                "PRIVACY_PROFILE_UNAVAILABLE",
+                404,
+            )
+        except UnknownResourceError:
+            return _record_route_error_response(
+                web,
+                "PRIVACY_RECORD_RESOURCE_INVALID",
+                400,
+            )
+        except SuiteBlockedError:
+            return _record_route_error_response(web, "PRIVACY_SUITE_BLOCKED", 409)
+        except RecordError as exc:
+            return _record_route_error_response(
+                web,
+                exc.code,
+                _record_error_status(exc.code),
+                exc.correlation_id,
+            )
+        except Exception:  # noqa: BLE001
+            return _record_route_error_response(
+                web,
+                "PRIVACY_RECORD_LIST_FAILED",
+                500,
+            )
+
+    @routes.post(record_base + "/{record_id}/reveal/{operation}")
+    async def post_helto_privacy_record_reveal(request):
+        from .guard import PrivacyRouteError
+        from .records import RecordError
+        from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            resource_id = str(request.match_info.get("resource_id") or "")
+            record_kind = str(request.match_info.get("record_kind") or "")
+            record_id = str(request.match_info.get("record_id") or "")
+            operation = str(request.match_info.get("operation") or "")
+            authorization = pack.authorization.authorize_request(
+                request,
+                f"record.{operation}",
+            )
+            revealed = pack.records(resource_id).reveal(
+                record_kind,
+                record_id,
+                operation,
+                authorization,
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "value": revealed.value,
+                    "correlationId": revealed.correlation_id,
+                },
+                headers=_record_response_headers(revealed.correlation_id),
+            )
+        except PackBlockedError:
+            return _record_route_error_response(
+                web,
+                "PRIVACY_PROFILE_UNAVAILABLE",
+                404,
+            )
+        except UnknownResourceError:
+            return _record_route_error_response(
+                web,
+                "PRIVACY_RECORD_RESOURCE_INVALID",
+                400,
+            )
+        except PrivacyRouteError as exc:
+            return _record_route_error_response(web, exc.code, exc.http_status)
+        except RecordError as exc:
+            return _record_route_error_response(
+                web,
+                exc.code,
+                _record_error_status(exc.code),
+                exc.correlation_id,
+            )
+        except Exception:  # noqa: BLE001
+            return _record_route_error_response(
+                web,
+                "PRIVACY_RECORD_REVEAL_FAILED",
+                500,
+            )
+
+    @routes.post(record_base + "/{record_id}/delete")
+    async def post_helto_privacy_record_delete(request):
+        return await _destructive_record_route(request, web, operation="delete")
+
+    @routes.post(record_base + "/{record_id}/replace")
+    async def post_helto_privacy_record_replace(request):
+        return await _destructive_record_route(request, web, operation="replace")
+
     @routes.post(
         f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition"
     )
@@ -563,6 +689,23 @@ def register_helto_privacy_ui(
             headers={"Cache-Control": "no-cache"},
         )
 
+    @routes.get(RECORDS_MODULE_ROUTE)
+    async def get_helto_privacy_records_module(_request):
+        try:
+            source = (_WEB_DIR / "privacy_records.js").read_text(encoding="utf-8")
+        except OSError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
+                500,
+            )
+        return web.Response(
+            text=source,
+            content_type="application/javascript",
+            charset="utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @routes.get(SNAPSHOT_MODULE_ROUTE)
     async def get_helto_privacy_snapshot_module(_request):
         try:
@@ -681,6 +824,114 @@ def _snapshot_error_status(code: str) -> int:
 
 def _execution_error_status(code: str) -> int:
     return 400 if code.endswith(("_INVALID", "_MISMATCH")) else 409
+
+
+async def _destructive_record_route(request, web, *, operation: str):
+    from .records import (
+        PRIVACY_DESTRUCTIVE_CONFIRMATION_HEADER,
+        RecordError,
+        confirm_record_mutation,
+    )
+    from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+
+    try:
+        pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+        resource_id = str(request.match_info.get("resource_id") or "")
+        record_kind = str(request.match_info.get("record_kind") or "")
+        record_id = str(request.match_info.get("record_id") or "")
+        confirmed = (
+            str(getattr(request, "headers", {}).get(
+                PRIVACY_DESTRUCTIVE_CONFIRMATION_HEADER,
+                "",
+            )).strip().lower()
+            == "confirmed"
+        )
+        confirmation = confirm_record_mutation(
+            pack_id=pack.profile.id,
+            resource_id=resource_id,
+            record_kind=record_kind,
+            record_id=record_id,
+            operation=operation,
+            confirmed=confirmed,
+        )
+        records = pack.records(resource_id)
+        if operation == "delete":
+            receipt = records.delete(record_kind, record_id, confirmation)
+        else:
+            payload = await request.json()
+            if not isinstance(payload, dict) or "protectedValue" not in payload:
+                raise RecordError("PRIVACY_RECORD_REPLACEMENT_INVALID")
+            receipt = records.replace(
+                record_kind,
+                record_id,
+                payload["protectedValue"],
+                confirmation,
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "operation": receipt.operation,
+                "correlationId": receipt.correlation_id,
+            },
+            headers=_record_response_headers(receipt.correlation_id),
+        )
+    except PackBlockedError:
+        return _record_route_error_response(
+            web,
+            "PRIVACY_PROFILE_UNAVAILABLE",
+            404,
+        )
+    except UnknownResourceError:
+        return _record_route_error_response(
+            web,
+            "PRIVACY_RECORD_RESOURCE_INVALID",
+            400,
+        )
+    except SuiteBlockedError:
+        return _record_route_error_response(web, "PRIVACY_SUITE_BLOCKED", 409)
+    except RecordError as exc:
+        return _record_route_error_response(
+            web,
+            exc.code,
+            _record_error_status(exc.code),
+            exc.correlation_id,
+        )
+    except Exception:  # noqa: BLE001
+        return _record_route_error_response(
+            web,
+            f"PRIVACY_RECORD_{operation.upper()}_FAILED",
+            500,
+        )
+
+
+def _record_error_status(code: str) -> int:
+    if code.endswith(("_INVALID", "_REQUIRED")):
+        return 400
+    return 409
+
+
+def _record_response_headers(correlation_id: str) -> dict[str, str]:
+    from .records import private_record_response_headers
+
+    return private_record_response_headers(correlation_id=correlation_id)
+
+
+def _record_route_error_response(
+    web,
+    code: str,
+    status: int,
+    correlation_id: str | None = None,
+):
+    from .records import private_record_response_headers, safe_record_diagnostic
+
+    correlation = correlation_id or str(
+        safe_record_diagnostic(stage="route")["correlationId"]
+    )
+    return web.json_response(
+        {"ok": False, "error": code, "correlationId": correlation},
+        status=status,
+        headers=private_record_response_headers(correlation_id=correlation),
+    )
 
 
 def _mode_resolution_payload(
