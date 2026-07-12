@@ -418,16 +418,16 @@ credentials; Move Privacy Show Any; Replace private-media tokens with leases;
 Move media-node previews, caches and replay spills; Move queue persistence,
 capture and replay.
 
-- [ ] Assemble the complete server/browser profile and adapters, verify one
+- [x] Assemble the complete server/browser profile and adapters, verify one
       fingerprint, switch every call site to bound handles, and activate only
       when no slot is missing.
-- [ ] Delete obsolete Utils privacy wrappers, local encrypt/decrypt routes,
+- [x] Delete obsolete Utils privacy wrappers, local encrypt/decrypt routes,
       recovery catalog, path-token serving, duplicated lifecycle patches, and
       misleading legacy writers/constants.
-- [ ] Align project, requirements, manager, documentation, and packaged browser
+- [x] Align project, requirements, manager, documentation, and packaged browser
       metadata to the candidate suite without committing local-path
       dependencies.
-- [ ] Run the complete Utils suite plus shared adapter, missing-package,
+- [x] Run the complete Utils suite plus shared adapter, missing-package,
       mismatch, private-default, legacy, and static-duplication evidence.
 
 ## Move Generate and Krea prompts
