@@ -491,14 +491,14 @@ released.
 **Blocked by:** Move Generate and Krea prompts; Move the Ideogram prompt
 builder.
 
-- [ ] Declare the protected run-info operation, sensitive field classes, and
+- [x] Declare the protected run-info operation, sensitive field classes, and
       explicit coarse safe projection.
-- [ ] Bind existing structure/performance calculations to server-resolved mode
+- [x] Bind existing structure/performance calculations to server-resolved mode
       and shared projection/redaction rather than request authority or ad-hoc
       encryption.
-- [ ] Remove direct encryption and one-off debug omission policy behind the
+- [x] Remove direct encryption and one-off debug omission policy behind the
       inactive integration.
-- [ ] Prove private canaries never reach UI payloads, logs, metadata, or unsafe
+- [x] Prove private canaries never reach UI payloads, logs, metadata, or unsafe
       diagnostics while public/product schema behavior stays stable.
 
 ## Activate the AIO profile and remove its local privacy core

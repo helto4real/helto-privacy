@@ -318,7 +318,10 @@ export async function connectAttestedPrivacyProfileClient({
     promptUnlock,
   });
   const operations = Object.freeze(
-    normalizeProtectedOperations(attestation.protectedOperations),
+    normalizeProtectedOperations(
+      attestation.protectedOperations,
+      attestation.modeScopes,
+    ),
   );
   const protectedFields = Object.freeze(
     normalizeProtectedFields(attestation.protectedFields),
@@ -802,7 +805,7 @@ async function attestFixedBrowserManifest(manifestDigest) {
   }
 }
 
-function normalizeProtectedOperations(operations) {
+function normalizeProtectedOperations(operations, modeScopes) {
   if (!Array.isArray(operations)) {
     throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
   }
@@ -812,18 +815,63 @@ function normalizeProtectedOperations(operations) {
     const resourceId = String(operation?.resourceId || "");
     const route = String(operation?.route || "");
     const method = String(operation?.method || "").toUpperCase();
+    const scopeId = operation?.scopeId == null ? null : String(operation.scopeId);
+    const sensitiveFields = Array.isArray(operation?.sensitiveFields)
+      ? operation.sensitiveFields.map((field) => Object.freeze({
+        path: String(field?.path || ""),
+        class: String(field?.class || ""),
+      }))
+      : null;
+    const safeProjection = Array.isArray(operation?.safeProjection)
+      ? operation.safeProjection.map((field) => Object.freeze({
+        path: String(field?.path || ""),
+        kind: String(field?.kind || ""),
+      }))
+      : null;
     if (
       !/^[a-z0-9][a-z0-9._-]*$/.test(id)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(resourceId)
       || !isSafePrivacyBrowserTarget(route)
       || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)
+      || sensitiveFields === null
+      || safeProjection === null
+      || (scopeId !== null && !/^[a-z0-9][a-z0-9._-]*$/.test(scopeId))
+      || sensitiveFields.some((field) => (
+        (field.path !== "*" && !isProjectionPath(field.path))
+        || !["user-authored", "path-or-name", "debug", "consumer-derived"]
+          .includes(field.class)
+      ))
+      || safeProjection.some((field) => (
+        !isProjectionPath(field.path) || !["boolean", "count"].includes(field.kind)
+      ))
+      || new Set(sensitiveFields.map((field) => field.path)).size !== sensitiveFields.length
+      || new Set(safeProjection.map((field) => field.path)).size !== safeProjection.length
+      || ((sensitiveFields.length || safeProjection.length) && scopeId === null)
+      || (scopeId !== null && !modeScopes?.some((scope) => scope?.id === scopeId))
+      || ((sensitiveFields.length || safeProjection.length) && !sensitiveFields.some(
+        (field) => field.path === "*" && field.class === "consumer-derived",
+      ))
       || seen.has(id)
     ) {
       throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
     }
     seen.add(id);
-    return Object.freeze({ id, resourceId, route, method });
+    return Object.freeze({
+      id,
+      resourceId,
+      route,
+      method,
+      scopeId,
+      sensitiveFields: Object.freeze(sensitiveFields),
+      safeProjection: Object.freeze(safeProjection),
+    });
   });
+}
+
+function isProjectionPath(value) {
+  return String(value || "").split(".").every(
+    (segment) => /^[a-z0-9][a-z0-9._-]*$/.test(segment),
+  );
 }
 
 async function fetchPrivacyJson(endpoint, payload = null) {

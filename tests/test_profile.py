@@ -18,6 +18,10 @@ from helto_privacy.profile import (
     RecordDeclaration,
     RecordRevealProjection,
     ResourceKind,
+    SafeDiagnosticField,
+    SafeDiagnosticKind,
+    SensitiveFieldClass,
+    SensitiveFieldDeclaration,
 )
 
 
@@ -188,6 +192,67 @@ def test_protected_operation_compiles_a_fixed_same_origin_route_contract():
             "/records/{record_id}",
         )
     assert templated.value.code == "invalid_protected_operation_route"
+
+
+def test_protected_operation_private_projection_requires_default_sensitive_rule():
+    safe = SafeDiagnosticField(
+        "performance.configured",
+        SafeDiagnosticKind.BOOLEAN,
+    )
+    with pytest.raises(ProfileValidationError) as missing_scope:
+        ProtectedOperation(
+            "emit-run-info",
+            "run-info",
+            "run-info-adapter",
+            "/run-info",
+            safe_projection=(safe,),
+        )
+    assert missing_scope.value.code == "missing_protected_operation_scope"
+
+    with pytest.raises(ProfileValidationError) as missing_default:
+        ProtectedOperation(
+            "emit-run-info",
+            "run-info",
+            "run-info-adapter",
+            "/run-info",
+            scope_id="generate",
+            sensitive_fields=(
+                SensitiveFieldDeclaration("debug", SensitiveFieldClass.DEBUG),
+            ),
+            safe_projection=(safe,),
+        )
+    assert missing_default.value.code == "missing_sensitive_default"
+
+    declaration = ProtectedOperation(
+        "emit-run-info",
+        "run-info",
+        "run-info-adapter",
+        "/run-info",
+        scope_id="generate",
+        sensitive_fields=(
+            SensitiveFieldDeclaration(
+                "*",
+                SensitiveFieldClass.CONSUMER_DERIVED,
+            ),
+            SensitiveFieldDeclaration("debug", SensitiveFieldClass.DEBUG),
+        ),
+        safe_projection=(safe,),
+    )
+    assert declaration.safe_projection == (safe,)
+
+
+def test_backend_only_protected_operation_requires_a_safe_projection():
+    with pytest.raises(ProfileValidationError) as missing_projection:
+        ProtectedOperation(
+            "emit-run-info",
+            "run-info",
+            "run-info-adapter",
+            None,
+        )
+    assert (
+        missing_projection.value.code
+        == "missing_protected_operation_projection"
+    )
 
 
 def test_profile_fingerprint_is_stable_and_order_independent():

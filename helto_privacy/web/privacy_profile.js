@@ -484,6 +484,15 @@ export async function connectPrivacyPack({
       resourceId: String(item.resourceId),
       route: String(item.route),
       method: String(item.method),
+      scopeId: item.scopeId == null ? null : String(item.scopeId),
+      sensitiveFields: Object.freeze(item.sensitiveFields.map((field) => Object.freeze({
+        path: String(field.path),
+        class: String(field.class),
+      }))),
+      safeProjection: Object.freeze(item.safeProjection.map((field) => Object.freeze({
+        path: String(field.path),
+        kind: String(field.kind),
+      }))),
     })),
     handles: new Map(),
     transport,
@@ -792,9 +801,34 @@ function validateServerAttestation({
       || !operation?.resourceId
       || !isSafeBrowserOperationRoute(operation.route)
       || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(operation.method)
+      || !Array.isArray(operation.sensitiveFields)
+      || !Array.isArray(operation.safeProjection)
+      || (operation.scopeId != null && !/^[a-z0-9][a-z0-9._-]*$/.test(operation.scopeId))
+      || operation.sensitiveFields.some((field) => (
+        (field?.path !== "*" && !isProjectionPath(field?.path))
+        || !["user-authored", "path-or-name", "debug", "consumer-derived"]
+          .includes(field?.class)
+      ))
+      || operation.safeProjection.some((field) => (
+        !isProjectionPath(field?.path) || !["boolean", "count"].includes(field?.kind)
+      ))
+      || new Set(operation.sensitiveFields.map((field) => field?.path)).size
+        !== operation.sensitiveFields.length
+      || new Set(operation.safeProjection.map((field) => field?.path)).size
+        !== operation.safeProjection.length
+      || ((operation.sensitiveFields.length || operation.safeProjection.length)
+        && operation.scopeId == null)
+      || ((operation.sensitiveFields.length || operation.safeProjection.length)
+        && !operation.sensitiveFields.some(
+          (field) => field?.path === "*" && field?.class === "consumer-derived",
+        ))
       || operationIds.has(operation.id)
       || !operationResource
-      || [RESOURCE_KIND.RECORD, RESOURCE_KIND.ARTIFACT].includes(operationResource.kind)
+      || [RESOURCE_KIND.RECORD, RESOURCE_KIND.ARTIFACT, RESOURCE_KIND.SINGLETON]
+        .includes(operationResource.kind)
+      || (operation.scopeId != null && !attestation.modeScopes.some(
+        (scope) => scope?.id === operation.scopeId,
+      ))
     ) {
       throw new PrivacyPackConnectionError("invalid_server_operation_declaration");
     }
@@ -816,6 +850,12 @@ function isSafeBrowserOperationRoute(route) {
     && !value.includes("\\")
     && !value.includes("{")
     && !value.includes("}");
+}
+
+function isProjectionPath(value) {
+  return String(value || "").split(".").every(
+    (segment) => /^[a-z0-9][a-z0-9._-]*$/.test(segment),
+  );
 }
 
 function validateBrowserAdapterBindings(requirements, adapters) {

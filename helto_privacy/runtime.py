@@ -162,6 +162,26 @@ class _ResourceHandle:
 
 
 @dataclass(frozen=True, slots=True)
+class ProtectedOperationHandle(_ResourceHandle):
+    """Typed backend projection seam for a declared protected operation."""
+
+    def project(self, operation_id: str, value: object):
+        self.readiness.require_ready()
+        from .protected_operations import project_protected_operation
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
+        return project_protected_operation(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            operation_id=operation_id,
+            value=value,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ModeHandle(_ResourceHandle):
     def resolve(self, scope_id: str, facts=None):
         from .mode_runtime import resolve_bound_mode
@@ -764,6 +784,32 @@ class BoundPrivacyPack:
     def execution(self, resource_id: str) -> ExecutionHandle:
         return self._resource(resource_id, ResourceKind.EXECUTION, ExecutionHandle)
 
+    def operations(self, resource_id: str) -> ProtectedOperationHandle:
+        if self._installation.status is InstallationStatus.CONFLICT:
+            raise PackBlockedError()
+        resource = next(
+            (item for item in self.profile.resources if item.id == resource_id),
+            None,
+        )
+        if (
+            resource is None
+            or resource.kind
+            in {ResourceKind.RECORD, ResourceKind.SINGLETON, ResourceKind.ARTIFACT}
+        ):
+            raise UnknownResourceError()
+        if not any(
+            operation.resource_id == resource_id
+            for operation in self.profile.protected_operations
+        ):
+            raise UnknownResourceError()
+        adapters = _adapters_for_resource(self._installation, resource)
+        return ProtectedOperationHandle(
+            self.profile.id,
+            resource.id,
+            self._installation,
+            adapters,
+        )
+
     def _resource(
         self,
         resource_id: str,
@@ -981,8 +1027,21 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "resourceId": operation.resource_id,
                     "route": operation.route,
                     "method": operation.method,
+                    "scopeId": operation.scope_id,
+                    "sensitiveFields": [
+                        {
+                            "path": field.path,
+                            "class": field.field_class.value,
+                        }
+                        for field in operation.sensitive_fields
+                    ],
+                    "safeProjection": [
+                        {"path": field.path, "kind": field.kind.value}
+                        for field in operation.safe_projection
+                    ],
                 }
                 for operation in profile.protected_operations
+                if operation.route is not None
             ],
         }
     from .suite_runtime import process_suite_status_payload

@@ -80,6 +80,9 @@ def test_attested_client_retries_once_without_leaking_token_to_url_or_events(tmp
               resourceId: "library",
               route: "/helto-test/records/use",
               method: "POST",
+              scopeId: null,
+              sensitiveFields: [],
+              safeProjection: [],
             }],
             modeScopes: [],
           });
@@ -168,6 +171,9 @@ def test_temporary_missing_route_is_retried_on_the_next_request(tmp_path):
               resourceId: "library",
               route: "/temporary-route",
               method: "POST",
+              scopeId: null,
+              sensitiveFields: [],
+              safeProjection: [],
             }],
             modeScopes: [],
           });

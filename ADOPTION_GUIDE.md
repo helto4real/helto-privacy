@@ -440,6 +440,30 @@ private cache, decrypt-to-default fallback, and replay reuse. The shared route,
 browser execution handle, resolver, cancellation signal, and RAM cache are the
 only private execution path.
 
+## Step 7a — Project private diagnostics through server mode
+
+For run information, debug summaries, and other backend-produced diagnostic
+objects, keep product structure and calculations in the consumer. Declare one
+`ProtectedOperation` with `scope_id`, a required root
+`SensitiveFieldDeclaration("*", CONSUMER_DERIVED)`, specific sensitive classes,
+and `SafeDiagnosticField` leaves for the few coarse private facts that may be
+released. Safe leaves support only `BOOLEAN` and non-negative `COUNT`.
+
+The operation adapter implements `project(value, declaration)` without reading
+request flags, tokens, or mode. Call the typed backend handle only after the
+normal product value is built:
+
+```python
+projected = privacy.operations("generation").project("emit-run-info", run_info)
+return projected.value
+```
+
+The handle resolves mode from the bound server mode source. Public mode keeps
+the product schema unchanged; private mode is allowlist-only and rejects an
+extra or wrongly typed diagnostic. Remove consumer encryption, request-derived
+privacy authority, debug omission, and one-off redaction only after this handle
+is active in the coordinated profile.
+
 ## Step 8 — Move private record libraries behind minimal shells
 
 Declare each private record kind on its typed record resource. Mint IDs with

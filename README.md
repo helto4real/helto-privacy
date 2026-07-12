@@ -459,6 +459,43 @@ Public-mode product execution continues through the consumer's ordinary public
 path. Do not send plaintext through the protected-reference route and do not
 catch `PRIVACY_EXECUTION_*` failures to execute defaults or stale state.
 
+## Sensitive-by-default operation projections
+
+Backend-produced diagnostics and similar product outputs use a declared
+`ProtectedOperation` with a server mode scope, sensitive-field classifications,
+and an explicit coarse allowlist. A root `*` / `consumer-derived` rule is
+required, so future fields remain private without consumer code changes:
+
+```python
+ProtectedOperation(
+    "emit-run-info",
+    "generation",
+    "run-info-projection",
+    None,  # Backend-only projection; routed actions keep a same-origin path.
+    scope_id="generate",
+    sensitive_fields=(
+        SensitiveFieldDeclaration("*", SensitiveFieldClass.CONSUMER_DERIVED),
+        SensitiveFieldDeclaration("debug", SensitiveFieldClass.DEBUG),
+    ),
+    safe_projection=(
+        SafeDiagnosticField(
+            "performance.configured",
+            SafeDiagnosticKind.BOOLEAN,
+        ),
+        SafeDiagnosticField("performance.warning_count", SafeDiagnosticKind.COUNT),
+    ),
+)
+```
+
+The product adapter implements `project(value, declaration)` and returns only
+candidate coarse facts. `privacy.operations("generation").project(...)`
+resolves effective mode from the bound server adapter. Public mode returns an
+isolated copy of the unchanged product schema. Private mode validates every
+projected leaf against the declaration, accepting only exact booleans and
+non-negative integer counts; missing declarations, extra fields, strings,
+lists, paths, names, warnings, debug values, and malformed counts fail closed.
+The adapter never receives or decides a privacy-mode flag.
+
 ## Private Records and Redaction
 
 Private record libraries declare their protected schema, fixed reveal

@@ -82,6 +82,22 @@ class ArtifactRetention(str, Enum):
     SERVED_TRANSIENT = "served-transient"
 
 
+class SensitiveFieldClass(str, Enum):
+    """Closed reasons why protected-operation output is private by default."""
+
+    USER_AUTHORED = "user-authored"
+    PATH_OR_NAME = "path-or-name"
+    DEBUG = "debug"
+    CONSUMER_DERIVED = "consumer-derived"
+
+
+class SafeDiagnosticKind(str, Enum):
+    """Coarse primitive kinds allowed in a private diagnostic projection."""
+
+    BOOLEAN = "boolean"
+    COUNT = "count"
+
+
 class SingletonPayloadKind(str, Enum):
     """Opaque payload families supported by the singleton service."""
 
@@ -426,30 +442,102 @@ class ArtifactDeclaration:
 
 
 @dataclass(frozen=True, slots=True)
+class SensitiveFieldDeclaration:
+    """One classified sensitive path; ``*`` is the required default rule."""
+
+    path: str
+    field_class: SensitiveFieldClass
+
+    def __post_init__(self) -> None:
+        if self.path != "*":
+            _validate_projection_path(self.path)
+        if not isinstance(self.field_class, SensitiveFieldClass):
+            raise ProfileValidationError("invalid_sensitive_field_class")
+
+
+@dataclass(frozen=True, slots=True)
+class SafeDiagnosticField:
+    """One explicitly safe coarse leaf in a private operation projection."""
+
+    path: str
+    kind: SafeDiagnosticKind
+
+    def __post_init__(self) -> None:
+        _validate_projection_path(self.path)
+        if not isinstance(self.kind, SafeDiagnosticKind):
+            raise ProfileValidationError("invalid_safe_diagnostic_kind")
+
+
+@dataclass(frozen=True, slots=True)
 class ProtectedOperation:
-    """A product operation dispatched only after shared authorization."""
+    """A routed product action or backend output protected by shared policy."""
 
     id: str
     resource_id: str
     adapter_slot: str
-    route: str
+    route: str | None
     method: str = "POST"
+    scope_id: str | None = None
+    sensitive_fields: tuple[SensitiveFieldDeclaration, ...] = ()
+    safe_projection: tuple[SafeDiagnosticField, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
         _validate_stable_id(self.resource_id)
         _validate_stable_id(self.adapter_slot)
-        if (
-            not isinstance(self.route, str)
-            or not self.route.startswith("/")
-            or self.route.startswith("//")
-            or any(character in self.route for character in ("?", "#", "\\", "{", "}"))
-        ):
-            raise ProfileValidationError("invalid_protected_operation_route")
+        if self.route is not None:
+            if (
+                not isinstance(self.route, str)
+                or not self.route.startswith("/")
+                or self.route.startswith("//")
+                or any(
+                    character in self.route
+                    for character in ("?", "#", "\\", "{", "}")
+                )
+            ):
+                raise ProfileValidationError("invalid_protected_operation_route")
         normalized_method = str(self.method or "").strip().upper()
         if normalized_method not in {"GET", "POST", "PUT", "PATCH", "DELETE"}:
             raise ProfileValidationError("invalid_protected_operation_method")
         object.__setattr__(self, "method", normalized_method)
+        if self.scope_id is not None:
+            _validate_stable_id(self.scope_id)
+        sensitive_fields = tuple(self.sensitive_fields)
+        safe_projection = tuple(self.safe_projection)
+        if any(
+            not isinstance(item, SensitiveFieldDeclaration)
+            for item in sensitive_fields
+        ):
+            raise ProfileValidationError("invalid_sensitive_field_declaration")
+        if any(not isinstance(item, SafeDiagnosticField) for item in safe_projection):
+            raise ProfileValidationError("invalid_safe_diagnostic_declaration")
+        sensitive_paths = tuple(item.path for item in sensitive_fields)
+        safe_paths = tuple(item.path for item in safe_projection)
+        if len(sensitive_paths) != len(set(sensitive_paths)):
+            raise ProfileValidationError("duplicate_sensitive_field")
+        if len(safe_paths) != len(set(safe_paths)):
+            raise ProfileValidationError("duplicate_safe_diagnostic_field")
+        if sensitive_fields or safe_projection:
+            if self.scope_id is None:
+                raise ProfileValidationError("missing_protected_operation_scope")
+            if not any(
+                item.path == "*"
+                and item.field_class is SensitiveFieldClass.CONSUMER_DERIVED
+                for item in sensitive_fields
+            ):
+                raise ProfileValidationError("missing_sensitive_default")
+        if self.route is None and not safe_projection:
+            raise ProfileValidationError("missing_protected_operation_projection")
+        object.__setattr__(
+            self,
+            "sensitive_fields",
+            tuple(sorted(sensitive_fields, key=lambda item: item.path)),
+        )
+        object.__setattr__(
+            self,
+            "safe_projection",
+            tuple(sorted(safe_projection, key=lambda item: item.path)),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -881,6 +969,8 @@ class PrivacyProfile:
                 raise ProfileValidationError("artifact_operation_must_use_typed_contract")
             _require_adapter_side(resource, operation.adapter_slot, server_adapter_ids)
             used_server_adapters.add(operation.adapter_slot)
+            if operation.scope_id is not None and operation.scope_id not in scopes:
+                raise ProfileValidationError("unknown_scope_reference")
 
         for projection in projections.values():
             resource = _require_resource_kind(
@@ -989,7 +1079,10 @@ class PrivacyProfile:
                 *_MODE_TRANSITION_METHODS,
             )
         for operation in self.protected_operations:
-            _add_contract(contracts, operation.adapter_slot, "invoke")
+            if operation.route is not None:
+                _add_contract(contracts, operation.adapter_slot, "invoke")
+            if operation.safe_projection:
+                _add_contract(contracts, operation.adapter_slot, "project")
         for projection in self.execution_projections:
             _add_contract(contracts, projection.projection_adapter, "project")
             _add_contract(contracts, projection.dispatch_adapter, "dispatch")
@@ -1143,6 +1236,18 @@ class PrivacyProfile:
                     "adapterSlot": operation.adapter_slot,
                     "route": operation.route,
                     "method": operation.method,
+                    "scopeId": operation.scope_id,
+                    "sensitiveFields": [
+                        {
+                            "path": field.path,
+                            "class": field.field_class.value,
+                        }
+                        for field in operation.sensitive_fields
+                    ],
+                    "safeProjection": [
+                        {"path": field.path, "kind": field.kind.value}
+                        for field in operation.safe_projection
+                    ],
                 }
                 for operation in self.protected_operations
             ],
@@ -1176,6 +1281,15 @@ def _is_stable_id(value: object) -> bool:
 def _validate_stable_id(value: object) -> None:
     if not _is_stable_id(value):
         raise ProfileValidationError("invalid_stable_id")
+
+
+def _validate_projection_path(value: object) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or any(not _is_stable_id(segment) for segment in value.split("."))
+    ):
+        raise ProfileValidationError("invalid_projection_path")
 
 
 def _normalized_stable_ids(values: object, duplicate_code: str) -> tuple[str, ...]:
