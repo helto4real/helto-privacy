@@ -6,6 +6,7 @@ import base64
 import copy
 from collections.abc import Mapping
 
+from ..envelope import PrivacyEnvelopeCodec
 from ..migration import LegacyReaderUnit
 
 
@@ -85,10 +86,24 @@ class _UtilsProviderSettingsWrapperReader:
             and _exact_current_envelope(source.get("hf_token_encrypted"))
         )
 
-    def read(self, source: object, context: object) -> object:
+    def read(self, source: object, context: object) -> dict[str, str]:
         if not self.probe(source, context):
             raise ValueError("Historical Utils provider wrapper is invalid.")
-        return copy.deepcopy(source["hf_token_encrypted"])
+        try:
+            value = PrivacyEnvelopeCodec(_UTILS_SCHEMA).decrypt_state(
+                copy.deepcopy(source["hf_token_encrypted"])
+            )
+        except Exception:
+            raise ValueError("Historical Utils provider wrapper is invalid.") from None
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"hf_token"}
+            or not isinstance(value.get("hf_token"), str)
+            or not value["hf_token"].strip()
+            or value["hf_token"] != value["hf_token"].strip()
+        ):
+            raise ValueError("Historical Utils provider wrapper is invalid.")
+        return {"hf_token": value["hf_token"]}
 
 
 def utils_provider_settings_reader_units() -> tuple[LegacyReaderUnit, ...]:

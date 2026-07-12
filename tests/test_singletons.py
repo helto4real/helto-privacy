@@ -18,6 +18,7 @@ from helto_privacy import (
     PrivacyEnvelopeCodec,
     PrivacyAuthorizationError,
     PrivacyProfile,
+    ProtectedSingletonValue,
     PrivacyScope,
     ProfileResource,
     ResourceKind,
@@ -339,6 +340,114 @@ def test_blob_singleton_round_trips_only_through_blob_methods(singleton_pack):
             _authorization(pack, token, "singleton.reveal"),
         )
     assert wrong_kind.value.code == "PRIVACY_SINGLETON_OPERATION_INVALID"
+
+
+def test_singleton_handle_prepares_typed_current_values_without_committing(
+    singleton_pack,
+):
+    pack, store, token = singleton_pack
+    handle = pack.singletons("pack-state")
+
+    field = handle.protect_field(
+        "provider-settings",
+        {"token": "SYNTHETIC_STAGED_FIELD"},
+        _authorization(pack, token, "singleton.replace"),
+    )
+    blob = handle.protect_blob(
+        "queue-state",
+        b"SYNTHETIC_STAGED_BLOB",
+        _authorization(pack, token, "singleton.replace"),
+    )
+
+    assert isinstance(field, ProtectedSingletonValue)
+    assert field.payload_kind is SingletonPayloadKind.FIELD
+    assert blob.payload_kind is SingletonPayloadKind.BLOB
+    assert "SYNTHETIC" not in repr(field)
+    assert "SYNTHETIC" not in repr(blob)
+    assert PrivacyEnvelopeCodec(
+        "helto.singleton.provider-settings"
+    ).decrypt_state(field.protected) == {"token": "SYNTHETIC_STAGED_FIELD"}
+    assert PrivacyEnvelopeCodec("helto.singleton.queue-state").decrypt_bytes(
+        blob.protected,
+        "queue-state",
+    ) == b"SYNTHETIC_STAGED_BLOB"
+    assert store.snapshots["provider-settings"].revision == 0
+    assert store.snapshots["queue-state"].revision == 0
+
+
+def test_singleton_protection_boundary_rejects_invalid_or_unavailable_requests(
+    singleton_pack,
+    monkeypatch,
+):
+    pack, store, token = singleton_pack
+    handle = pack.singletons("pack-state")
+
+    with pytest.raises(PrivacyAuthorizationError) as wrong_capability:
+        handle.protect_field(
+            "provider-settings",
+            {"token": "SYNTHETIC_WRONG_CAPABILITY"},
+            _authorization(pack, token, "singleton.reveal"),
+        )
+    assert wrong_capability.value.code == "PRIVACY_AUTHORIZATION_INVALID"
+
+    with pytest.raises(SingletonError) as wrong_field_kind:
+        handle.protect_field(
+            "queue-state",
+            {"value": "SYNTHETIC_WRONG_KIND"},
+            _authorization(pack, token, "singleton.replace"),
+        )
+    assert wrong_field_kind.value.code == "PRIVACY_SINGLETON_OPERATION_INVALID"
+    with pytest.raises(SingletonError) as wrong_blob_kind:
+        handle.protect_blob(
+            "provider-settings",
+            b"SYNTHETIC_WRONG_KIND",
+            _authorization(pack, token, "singleton.replace"),
+        )
+    assert wrong_blob_kind.value.code == "PRIVACY_SINGLETON_OPERATION_INVALID"
+
+    with pytest.raises(SingletonError) as invalid_field:
+        handle.protect_field(
+            "provider-settings",
+            ["SYNTHETIC_INVALID_FIELD"],
+            _authorization(pack, token, "singleton.replace"),
+        )
+    assert invalid_field.value.code == "PRIVACY_SINGLETON_PAYLOAD_INVALID"
+    with pytest.raises(SingletonError) as invalid_blob:
+        handle.protect_blob(
+            "queue-state",
+            "SYNTHETIC_INVALID_BLOB",
+            _authorization(pack, token, "singleton.replace"),
+        )
+    assert invalid_blob.value.code == "PRIVACY_SINGLETON_PAYLOAD_INVALID"
+
+    authorization = _authorization(pack, token, "singleton.replace")
+    lock_keystore()
+    with pytest.raises(PrivacyAuthorizationError) as locked:
+        handle.protect_field(
+            "provider-settings",
+            {"token": "SYNTHETIC_LOCKED"},
+            authorization,
+        )
+    assert locked.value.code == "PRIVACY_AUTHORIZATION_EXPIRED"
+
+    keystore.unlock_keystore(PASSWORD)
+    monkeypatch.setattr(
+        PrivacyEnvelopeCodec,
+        "encrypt_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("SYNTHETIC_PRIVATE_DIAGNOSTIC")
+        ),
+    )
+    with pytest.raises(SingletonError) as encryption:
+        handle.protect_field(
+            "provider-settings",
+            {"token": "SYNTHETIC_ENCRYPT_FAILURE"},
+            _authorization(pack, keystore.session_token(), "singleton.replace"),
+        )
+    assert encryption.value.code == "PRIVACY_SINGLETON_ENCRYPT_FAILED"
+    assert "SYNTHETIC" not in str(encryption.value)
+    assert store.snapshots["provider-settings"].revision == 0
+    assert store.snapshots["queue-state"].revision == 0
 
 
 def test_stale_revision_never_overwrites_current_singleton(singleton_pack):

@@ -108,15 +108,10 @@ def test_utils_provider_settings_readers_are_exact_and_read_only():
     units = {unit.id: unit for unit in utils_legacy_reader_units()}
     plaintext = units[UTILS_PROVIDER_SETTINGS_PLAINTEXT_READER_ID]
     wrapper = units[UTILS_PROVIDER_SETTINGS_WRAPPER_READER_ID]
-    envelope = {
-        "version": 1,
-        "schema": "helto.comfyui-utils",
-        "encrypted": True,
-        "algorithm": "AES-256-GCM",
-        "keyId": "c3ludGhldGljLWlk",
-        "nonce": "bm9uY2UtMTIzNDU2",
-        "ciphertext": "c3ludGhldGljLXRhZy0xNg",
-    }
+    keystore.initialize_keystore("synthetic provider reader password")
+    envelope = PrivacyEnvelopeCodec("helto.comfyui-utils").encrypt_state(
+        {"hf_token": "SYNTHETIC_PROVIDER_TOKEN"}
+    )
 
     source = {"version": 1, "hf_token": "SYNTHETIC_PROVIDER_TOKEN"}
     assert plaintext.reader.probe(source, _context()) is True
@@ -127,7 +122,9 @@ def test_utils_provider_settings_readers_are_exact_and_read_only():
 
     source = {"version": 2, "hf_token_encrypted": envelope}
     assert wrapper.reader.probe(source, _context()) is True
-    assert wrapper.reader.read(source, _context()) == envelope
+    assert wrapper.reader.read(source, _context()) == {
+        "hf_token": "SYNTHETIC_PROVIDER_TOKEN"
+    }
     assert wrapper.reader.probe(
         {"version": 2, "hf_token_encrypted": {"schema": "wrong"}},
         _context(),
@@ -141,6 +138,46 @@ def test_utils_provider_settings_readers_are_exact_and_read_only():
     ) is False
     assert not hasattr(plaintext.reader, "write")
     assert not hasattr(wrapper.reader, "write")
+
+
+def test_utils_provider_wrapper_reader_fails_closed_after_exact_probe():
+    units = {unit.id: unit for unit in utils_legacy_reader_units()}
+    wrapper = units[UTILS_PROVIDER_SETTINGS_WRAPPER_READER_ID]
+    keystore.initialize_keystore("synthetic provider failure password")
+    codec = PrivacyEnvelopeCodec("helto.comfyui-utils")
+    valid = codec.encrypt_state({"hf_token": "SYNTHETIC_PROVIDER_TOKEN"})
+    ciphertext = base64.urlsafe_b64decode(
+        valid["ciphertext"] + "=" * ((4 - len(valid["ciphertext"]) % 4) % 4)
+    )
+    tampered = {
+        **valid,
+        "ciphertext": base64.urlsafe_b64encode(
+            ciphertext[:-1] + bytes([ciphertext[-1] ^ 1])
+        ).decode("ascii").rstrip("="),
+    }
+
+    source = {"version": 2, "hf_token_encrypted": tampered}
+    assert wrapper.reader.probe(source, _context()) is True
+    with pytest.raises(ValueError) as unauthentic:
+        wrapper.reader.read(source, _context())
+    assert str(unauthentic.value) == "Historical Utils provider wrapper is invalid."
+    assert "SYNTHETIC" not in str(unauthentic.value)
+    assert tampered["ciphertext"] not in str(unauthentic.value)
+
+    for invalid in (
+        {"token": "SYNTHETIC_WRONG_FIELD"},
+        {"hf_token": 123},
+        {"hf_token": " SYNTHETIC_PADDED_TOKEN "},
+    ):
+        source = {
+            "version": 2,
+            "hf_token_encrypted": codec.encrypt_state(invalid),
+        }
+        assert wrapper.reader.probe(source, _context()) is True
+        with pytest.raises(ValueError) as rejected:
+            wrapper.reader.read(source, _context())
+        assert str(rejected.value) == "Historical Utils provider wrapper is invalid."
+        assert "SYNTHETIC" not in str(rejected.value)
 
 
 @pytest.mark.parametrize("generation", ("raw-xor", "priv1", "priv2", "priv3"))

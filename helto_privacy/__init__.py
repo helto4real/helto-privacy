@@ -165,6 +165,7 @@ from .records import (
     safe_record_diagnostic,
 )
 from .singletons import (
+    ProtectedSingletonValue,
     RevealedSingleton,
     SingletonError,
     SingletonMutationReceipt,
@@ -375,6 +376,7 @@ __all__ = [
     "ProfileValidationError",
     "ProtectedField",
     "ProtectedFieldResult",
+    "ProtectedSingletonValue",
     "RevealedFieldResult",
     "ProtectedOperation",
     "PublishedArtifactReference",

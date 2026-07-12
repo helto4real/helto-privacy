@@ -414,6 +414,38 @@ class SingletonHandle(_ResourceHandle):
             authorization=authorization,
         )
 
+    def protect_field(self, singleton_id: str, value: object, authorization):
+        """Protect a field without committing it outside a larger transaction."""
+
+        self._require_active()
+        from .singletons import protect_singleton_field
+
+        return protect_singleton_field(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+            value=value,
+            authorization=authorization,
+        )
+
+    def protect_blob(self, singleton_id: str, value: object, authorization):
+        """Protect a blob without committing it outside a larger transaction."""
+
+        self._require_active()
+        from .singletons import protect_singleton_blob
+
+        return protect_singleton_blob(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            singleton_id=singleton_id,
+            value=value,
+            authorization=authorization,
+        )
+
     def replace_field(
         self,
         singleton_id: str,

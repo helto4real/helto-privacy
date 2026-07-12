@@ -98,6 +98,19 @@ class RevealedSingleton:
 
 
 @dataclass(frozen=True, slots=True)
+class ProtectedSingletonValue:
+    """Typed current protection result without persistence authority."""
+
+    payload_kind: SingletonPayloadKind
+    protected: object = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.payload_kind, SingletonPayloadKind):
+            raise ValueError("Protected singleton value is invalid.")
+        object.__setattr__(self, "protected", copy.deepcopy(self.protected))
+
+
+@dataclass(frozen=True, slots=True)
 class SingletonMutationReceipt:
     """Product-data-free proof of one verified revision transition."""
 
@@ -197,22 +210,11 @@ def replace_singleton_field(
         authorization,
         "singleton.replace",
     )
-    if not isinstance(value, Mapping):
-        raise SingletonError("PRIVACY_SINGLETON_PAYLOAD_INVALID")
-    try:
-        normalized = copy.deepcopy(dict(value))
-        json.dumps(
-            normalized,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        )
-        protected = PrivacyEnvelopeCodec(declaration.current_schema).encrypt_state(
-            normalized
-        )
-    except Exception:
-        raise SingletonError("PRIVACY_SINGLETON_ENCRYPT_FAILED") from None
+    protected = _protect_declared_singleton(
+        declaration,
+        value,
+        SingletonPayloadKind.FIELD,
+    ).protected
     return _replace_snapshot(
         profile.id,
         declaration,
@@ -244,15 +246,11 @@ def replace_singleton_blob(
         authorization,
         "singleton.replace",
     )
-    if not isinstance(value, bytes):
-        raise SingletonError("PRIVACY_SINGLETON_PAYLOAD_INVALID")
-    try:
-        protected = PrivacyEnvelopeCodec(declaration.current_schema).encrypt_bytes(
-            value,
-            declaration.purpose,
-        )
-    except Exception:
-        raise SingletonError("PRIVACY_SINGLETON_ENCRYPT_FAILED") from None
+    protected = _protect_declared_singleton(
+        declaration,
+        value,
+        SingletonPayloadKind.BLOB,
+    ).protected
     return _replace_snapshot(
         profile.id,
         declaration,
@@ -260,6 +258,64 @@ def replace_singleton_blob(
         expected_revision,
         protected,
         "replace",
+    )
+
+
+def protect_singleton_field(
+    *,
+    installation,
+    profile: PrivacyProfile,
+    adapters: Mapping[str, object],
+    resource_id: str,
+    singleton_id: str,
+    value: object,
+    authorization: AuthorizedPrivacyRequest,
+) -> ProtectedSingletonValue:
+    """Protect a field for a larger shared migration transaction."""
+
+    declaration, _adapter = _authorized_mutation_binding(
+        installation,
+        profile,
+        adapters,
+        resource_id,
+        singleton_id,
+        SingletonPayloadKind.FIELD,
+        authorization,
+        "singleton.replace",
+    )
+    return _protect_declared_singleton(
+        declaration,
+        value,
+        SingletonPayloadKind.FIELD,
+    )
+
+
+def protect_singleton_blob(
+    *,
+    installation,
+    profile: PrivacyProfile,
+    adapters: Mapping[str, object],
+    resource_id: str,
+    singleton_id: str,
+    value: object,
+    authorization: AuthorizedPrivacyRequest,
+) -> ProtectedSingletonValue:
+    """Protect a blob for a larger shared migration transaction."""
+
+    declaration, _adapter = _authorized_mutation_binding(
+        installation,
+        profile,
+        adapters,
+        resource_id,
+        singleton_id,
+        SingletonPayloadKind.BLOB,
+        authorization,
+        "singleton.replace",
+    )
+    return _protect_declared_singleton(
+        declaration,
+        value,
+        SingletonPayloadKind.BLOB,
     )
 
 
@@ -354,6 +410,42 @@ def _authorized_mutation_binding(
         raise SingletonError("PRIVACY_SINGLETON_OPERATION_INVALID")
     _require_stable_scope(installation, declaration.scope_id)
     return declaration, adapter
+
+
+def _protect_declared_singleton(
+    declaration: SingletonDeclaration,
+    value: object,
+    expected_kind: SingletonPayloadKind,
+) -> ProtectedSingletonValue:
+    if declaration.payload_kind is not expected_kind:
+        raise SingletonError("PRIVACY_SINGLETON_OPERATION_INVALID")
+    if expected_kind is SingletonPayloadKind.FIELD:
+        if not isinstance(value, Mapping):
+            raise SingletonError("PRIVACY_SINGLETON_PAYLOAD_INVALID")
+        try:
+            normalized = copy.deepcopy(dict(value))
+            json.dumps(
+                normalized,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            protected = PrivacyEnvelopeCodec(
+                declaration.current_schema
+            ).encrypt_state(normalized)
+        except Exception:
+            raise SingletonError("PRIVACY_SINGLETON_ENCRYPT_FAILED") from None
+    else:
+        if not isinstance(value, bytes):
+            raise SingletonError("PRIVACY_SINGLETON_PAYLOAD_INVALID")
+        try:
+            protected = PrivacyEnvelopeCodec(
+                declaration.current_schema
+            ).encrypt_bytes(value, declaration.purpose)
+        except Exception:
+            raise SingletonError("PRIVACY_SINGLETON_ENCRYPT_FAILED") from None
+    return ProtectedSingletonValue(expected_kind, protected)
 
 
 def _replace_snapshot(
