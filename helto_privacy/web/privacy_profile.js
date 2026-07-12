@@ -212,6 +212,37 @@ export class BrowserRecordHandle extends BrowserResourceHandle {
     );
   }
 
+  create(recordKind, value) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    const declaration = requireRecordDeclaration(entry, this.resourceId, recordKind);
+    if (!declaration.mutationOperations.includes("create")) {
+      throw new PrivacyPackConnectionError("unknown_browser_record_operation");
+    }
+    return entry.transport.records.mutate(
+      this.resourceId,
+      declaration.id,
+      "create",
+      value,
+    );
+  }
+
+  mutate(recordKind, recordId, operation, value) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    const declaration = requireRecordDeclaration(entry, this.resourceId, recordKind);
+    if (operation === "create" || !declaration.mutationOperations.includes(operation)) {
+      throw new PrivacyPackConnectionError("unknown_browser_record_operation");
+    }
+    return entry.transport.records.mutate(
+      this.resourceId,
+      declaration.id,
+      operation,
+      value,
+      recordId,
+    );
+  }
+
   async delete(recordKind, recordId) {
     const entry = HANDLE_ENTRIES.get(this);
     entry.pack.authorization.requireReady();
@@ -436,6 +467,9 @@ export async function connectPrivacyPack({
       resourceId: String(item.resourceId),
       scopeId: String(item.scopeId),
       revealOperations: Object.freeze([...item.revealOperations]),
+      mutationOperations: Object.freeze([...item.mutationOperations]),
+      safeProjection: Object.freeze([...item.safeProjection]),
+      fixedPrivateLabel: String(item.fixedPrivateLabel),
     })),
     artifactDeclarations: attestation.artifacts.map((item) => Object.freeze({
       id: String(item.id),
@@ -666,6 +700,14 @@ function validateServerAttestation({
         (operation) => !["use", "preview", "details"].includes(operation),
       )
       || record.revealOperations.length !== new Set(record.revealOperations).size
+      || !Array.isArray(record.mutationOperations)
+      || record.mutationOperations.some(
+        (operation) => !["create", "replace", "patch", "duplicate"].includes(operation),
+      )
+      || record.mutationOperations.length !== new Set(record.mutationOperations).size
+      || !Array.isArray(record.safeProjection)
+      || record.safeProjection.length !== 0
+      || record.fixedPrivateLabel !== "Private record"
       || recordIds.has(record.id)
       || !attestation.resources.some(
         (resource) => resource.id === record.resourceId

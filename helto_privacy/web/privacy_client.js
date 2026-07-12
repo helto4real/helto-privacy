@@ -593,7 +593,22 @@ function createAttestedPrivacyRecordClient({ packId, declarations, requestClient
       },
     );
   };
-  return Object.freeze({ list, reveal, delete: remove, replace });
+  const mutate = (resourceId, recordKind, operation, value, recordId = null) => {
+    const item = declaration(resourceId, recordKind);
+    const safeOperation = String(operation || "");
+    if (!item.mutationOperations.includes(safeOperation)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_MUTATION_INVALID");
+    }
+    const target = safeOperation === "create"
+      ? `${base(item)}/mutate/create`
+      : `${recordTarget(item, recordId)}/mutate/${encodeURIComponent(safeOperation)}`;
+    return requestClient.request(
+      `record.${safeOperation}`,
+      target,
+      { body: { value } },
+    );
+  };
+  return Object.freeze({ list, reveal, delete: remove, replace, mutate });
 }
 
 function normalizeProtectedFields(fields) {
@@ -663,6 +678,15 @@ function normalizeRecordDeclarations(records) {
       (Array.isArray(record?.revealOperations) ? record.revealOperations : [])
         .map((value) => String(value || "")),
     );
+    const mutationOperations = Object.freeze(
+      (Array.isArray(record?.mutationOperations) ? record.mutationOperations : [])
+        .map((value) => String(value || "")),
+    );
+    const safeProjection = Object.freeze(
+      (Array.isArray(record?.safeProjection) ? record.safeProjection : [])
+        .map((value) => String(value || "")),
+    );
+    const fixedPrivateLabel = String(record?.fixedPrivateLabel || "");
     if (
       !/^[a-z0-9][a-z0-9._-]*$/.test(id)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(resourceId)
@@ -671,12 +695,26 @@ function normalizeRecordDeclarations(records) {
         (operation) => !["use", "preview", "details"].includes(operation),
       )
       || revealOperations.length !== new Set(revealOperations).size
+      || mutationOperations.some(
+        (operation) => !["create", "replace", "patch", "duplicate"].includes(operation),
+      )
+      || mutationOperations.length !== new Set(mutationOperations).size
+      || safeProjection.length !== 0
+      || fixedPrivateLabel !== "Private record"
       || seen.has(id)
     ) {
       throw new PrivacyBrowserRequestError("PRIVACY_RECORD_DECLARATION_INVALID");
     }
     seen.add(id);
-    return Object.freeze({ id, resourceId, scopeId, revealOperations });
+    return Object.freeze({
+      id,
+      resourceId,
+      scopeId,
+      revealOperations,
+      mutationOperations,
+      safeProjection,
+      fixedPrivateLabel,
+    });
   });
 }
 

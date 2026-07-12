@@ -494,6 +494,9 @@ def test_record_transport_uses_only_attested_fixed_routes_and_confirmation(tmp_p
               resourceId: "library",
               scopeId: "global",
               revealOperations: ["use", "details"],
+              mutationOperations: ["create", "replace", "patch", "duplicate"],
+              safeProjection: [],
+              fixedPrivateLabel: "Private record",
             }],
             modeScopes: [],
           });
@@ -512,6 +515,12 @@ def test_record_transport_uses_only_attested_fixed_routes_and_confirmation(tmp_p
 
         await transport.records.list("library", "prompt-record");
         await transport.records.reveal("library", "prompt-record", id, "use");
+        await transport.records.mutate(
+          "library", "prompt-record", "create", { prompt: "SYNTHETIC_CREATE" },
+        );
+        await transport.records.mutate(
+          "library", "prompt-record", "patch", { prompt: "SYNTHETIC_PATCH" }, id,
+        );
         await transport.records.delete("library", "prompt-record", id, true);
         await transport.records.replace(
           "library",
@@ -524,20 +533,25 @@ def test_record_transport_uses_only_attested_fixed_routes_and_confirmation(tmp_p
         assert.deepEqual(calls.map((call) => call.target), [
           "/helto_privacy/profiles/helto.test/records/library/prompt-record",
           `/helto_privacy/profiles/helto.test/records/library/prompt-record/${id}/reveal/use`,
+          "/helto_privacy/profiles/helto.test/records/library/prompt-record/mutate/create",
+          `/helto_privacy/profiles/helto.test/records/library/prompt-record/${id}/mutate/patch`,
           `/helto_privacy/profiles/helto.test/records/library/prompt-record/${id}/delete`,
           `/helto_privacy/profiles/helto.test/records/library/prompt-record/${id}/replace`,
         ]);
         assert.equal(calls[0].options.method, "GET");
         assert.equal(calls[0].options.headers["X-Helto-Privacy-Token"], undefined);
         assert.equal(
-          calls[2].options.headers["X-Helto-Privacy-Destructive"],
+          calls[4].options.headers["X-Helto-Privacy-Destructive"],
           "confirmed",
         );
         assert.equal(
-          calls[3].options.headers["X-Helto-Privacy-Destructive"],
+          calls[5].options.headers["X-Helto-Privacy-Destructive"],
           "confirmed",
         );
-        assert.deepEqual(JSON.parse(calls[3].options.body), {
+        assert.deepEqual(JSON.parse(calls[2].options.body), {
+          value: { prompt: "SYNTHETIC_CREATE" },
+        });
+        assert.deepEqual(JSON.parse(calls[5].options.body), {
           protectedValue: "SYNTHETIC_PROTECTED_VALUE",
         });
         assert.throws(

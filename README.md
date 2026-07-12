@@ -486,6 +486,9 @@ profile = PrivacyProfile(
                 RecordRevealProjection("use", ("prompt",)),
                 RecordRevealProjection("details", ("summary",)),
             ),
+            mutation_operations=("create", "replace", "patch", "duplicate"),
+            safe_projection=(),
+            fixed_private_label="Private record",
         ),
     ),
 )
@@ -495,6 +498,10 @@ class PromptStore:
     def read_protected(self, record_id): ... # Current encrypted envelope.
     def write_protected(self, record_id, value): ...
     def delete(self, record_id): ...
+
+    def mutate(self, current, operation, value):
+        # Validate product meaning and return the full normalized record.
+        ...
 
     def project(self, value, operation):
         if operation == "use":
@@ -521,6 +528,26 @@ revealed = privacy.records("library").reveal(
 use_prompt(revealed.value["prompt"])
 ```
 
+Authorized plaintext mutations go through the same typed handle. The consumer
+adapter owns domain normalization; shared privacy mints opaque IDs, encrypts the
+normalized value, commits it, reopens and decrypts it, compares canonical JSON,
+and rolls back on any mismatch:
+
+```python
+created = privacy.records("library").mutate(
+    "prompt-record",
+    "create",
+    {"prompt": "authorized value"},
+    privacy.authorization.authorize_request(request, "record.create"),
+)
+```
+
+Browser consumers use `records.create(...)` and `records.mutate(...)`; only the
+opaque mutation receipt crosses the route. A projection that must update an
+authorized activity field can return `RecordProjectionResult(value,
+replacement)`. Shared privacy encrypts and verifies the replacement before the
+projection is returned.
+
 Delete and protected replacement remain available while locked, but require a
 one-use confirmation bound to the exact pack, resource, kind, ID, and action.
 Replacement accepts only a current protected envelope—never plaintext:
@@ -537,11 +564,14 @@ confirmation = confirm_record_mutation(
 privacy.records("library").delete("prompt-record", record_id, confirmation)
 ```
 
-The attested browser handle exposes `list`, `reveal`, `delete`, and `replace`.
+The attested browser handle exposes `list`, `reveal`, `create`, `mutate`,
+`delete`, and protected-envelope `replace`.
 It owns a generic Helto-styled destructive confirmation modal and rebuilds every shell with
 `redactPrivateRecordShell()`, discarding extra server/consumer metadata rather
 than masking or retaining it. Generic protected operations cannot target a
-record resource, so duplicate, merge, edit, or metadata-reveal escape hatches
+record resource. Duplicate, replace, and patch can be registered only through
+the declaration's fixed mutation operations and the shared verified mutation
+path; arbitrary merge, metadata-reveal, and product-local route escape hatches
 cannot be registered.
 
 Record responses use `Cache-Control: private, no-store`, `nosniff`,

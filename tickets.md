@@ -473,13 +473,13 @@ lists strict minimal shells while preserving product CRUD and normalization.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare the record kind, operations, empty safe projection, current and
+- [x] Declare the record kind, operations, empty safe projection, current and
       legacy schema bindings, and fixed generic private label.
-- [ ] Bind JSON document CRUD/atomic persistence, IDs, naming, payload
+- [x] Bind JSON document CRUD/atomic persistence, IDs, naming, payload
       normalization, and authorized product use to shared record handles.
-- [ ] Remove consumer shell construction, crypto, token checks, and raw error
+- [x] Remove consumer shell construction, crypto, token checks, and raw error
       responses behind the inactive adapter path.
-- [ ] Prove locked list/delete, authorized use/edit/duplicate, failed decrypt,
+- [x] Prove locked list/delete, authorized use/edit/duplicate, failed decrypt,
       genuine v1 rewrite receipt, no metadata leak, and preserved domain CRUD.
 
 ## Move run-info redaction

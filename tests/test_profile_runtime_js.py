@@ -84,6 +84,9 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 resourceId: "library",
                 scopeId: "global",
                 revealOperations: ["use", "details"],
+                mutationOperations: ["create", "replace", "patch", "duplicate"],
+                safeProjection: [],
+                fixedPrivateLabel: "Private record",
               }}],
               artifacts: [{{
                 id: "thumbnail",
@@ -156,6 +159,13 @@ def run_node_module_test(tmp_path, body: str) -> None:
                   ok: true,
                   value: {{ prompt: "SYNTHETIC_AUTHORIZED_PROMPT" }},
                   correlationId: "hp-record-abcdefghijklmnop",
+                }};
+                else if (target.includes("/mutate/")) payload = {{
+                  ok: true,
+                  recordId: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+                  kind: "prompt-record",
+                  operation: target.split("/").at(-1),
+                  correlationId: "hp-record-bcdefghijklmnopq",
                 }};
                 else payload = {{ ok: true, operation: target.split("/").at(-1) }};
               }} else if (target.includes("/artifacts/thumbnail/thumbnail/")) {{
@@ -433,6 +443,22 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
             correlationId: "hp-record-abcdefghijklmnop",
           },
         );
+        assert.deepEqual(
+          await records.create("prompt-record", { prompt: "SYNTHETIC_CREATE_VALUE" }),
+          {
+            ok: true,
+            recordId: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+            kind: "prompt-record",
+            operation: "create",
+            correlationId: "hp-record-bcdefghijklmnopq",
+          },
+        );
+        assert.equal((await records.mutate(
+          "prompt-record",
+          "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          "patch",
+          { prompt: "SYNTHETIC_PATCH_VALUE" },
+        )).operation, "patch");
         class ConfirmationElement {
           constructor(tag, ownerDocument) {
             this.tagName = tag.toUpperCase(); this.ownerDocument = ownerDocument;

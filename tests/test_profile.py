@@ -125,6 +125,39 @@ def test_record_reveal_contract_requires_explicit_fields_and_fixed_operations():
     )
     assert declaration.reveal_operations == ("details", "use")
 
+    with pytest.raises(ProfileValidationError) as unsafe_shell:
+        RecordDeclaration(
+            "prompt-record",
+            "library",
+            "main",
+            "helto.record.v1",
+            "records",
+            safe_projection=("name",),
+        )
+    assert unsafe_shell.value.code == "unsafe_record_list_projection"
+
+    with pytest.raises(ProfileValidationError) as unsafe_label:
+        RecordDeclaration(
+            "prompt-record",
+            "library",
+            "main",
+            "helto.record.v1",
+            "records",
+            fixed_private_label="User-authored name",
+        )
+    assert unsafe_label.value.code == "invalid_private_record_label"
+
+    with pytest.raises(ProfileValidationError) as unknown_mutation:
+        RecordDeclaration(
+            "prompt-record",
+            "library",
+            "main",
+            "helto.record.v1",
+            "records",
+            mutation_operations=("merge",),
+        )
+    assert unknown_mutation.value.code == "invalid_record_mutation_operation"
+
 
 def test_protected_operation_compiles_a_fixed_same_origin_route_contract():
     operation = ProtectedOperation(

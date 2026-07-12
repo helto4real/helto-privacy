@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hmac
 import json
 import re
 import secrets
@@ -38,13 +39,17 @@ _RECORD_ERROR_CODES = frozenset(
         "PRIVACY_RECORD_ID_INVALID",
         "PRIVACY_RECORD_LIST_FAILED",
         "PRIVACY_RECORD_MODE_BLOCKED",
+        "PRIVACY_RECORD_MUTATION_FAILED",
+        "PRIVACY_RECORD_MUTATION_INVALID",
         "PRIVACY_RECORD_OPERATION_FAILED",
         "PRIVACY_RECORD_OPERATION_INVALID",
         "PRIVACY_RECORD_PROJECTION_FAILED",
         "PRIVACY_RECORD_PROJECTION_INVALID",
+        "PRIVACY_RECORD_PROTECTION_FAILED",
         "PRIVACY_RECORD_READ_FAILED",
         "PRIVACY_RECORD_REPLACEMENT_INVALID",
         "PRIVACY_RECORD_REPLACE_FAILED",
+        "PRIVACY_RECORD_VERIFICATION_FAILED",
     }
 )
 
@@ -71,21 +76,18 @@ class LockedRecordShell:
 
     id: str = field(repr=False)
     kind: str
+    label: str = PRIVATE_RECORD_LABEL
 
     @property
     def private(self) -> bool:
         return True
-
-    @property
-    def label(self) -> str:
-        return PRIVATE_RECORD_LABEL
 
     def to_payload(self) -> dict[str, object]:
         return {
             "id": self.id,
             "kind": self.kind,
             "private": True,
-            "label": PRIVATE_RECORD_LABEL,
+            "label": self.label,
         }
 
 
@@ -95,6 +97,21 @@ class RevealedRecord:
 
     value: dict[str, object] = field(repr=False)
     correlation_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProtectedRecordValue:
+    """A current record envelope produced without committing it."""
+
+    envelope: dict[str, object] = field(repr=False)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordProjectionResult:
+    """Authorized projection with an optional product-owned current rewrite."""
+
+    value: Mapping[str, object] = field(repr=False)
+    replacement: Mapping[str, object] | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,6 +125,9 @@ class RecordMutationReceipt:
 
 
 _CONFIRMATION_MARKER = object()
+_MISSING = object()
+_RECORD_OPERATION_LOCKS_GUARD = Lock()
+_RECORD_OPERATION_LOCKS: dict[tuple[str, str], object] = {}
 
 
 class _MutationOperation(str, Enum):
@@ -186,6 +206,127 @@ def generate_private_record_id() -> str:
     if _PRIVATE_RECORD_ID.fullmatch(record_id) is None:
         raise RecordError("PRIVACY_RECORD_ID_INVALID")
     return record_id
+
+
+def protect_record_value(
+    *,
+    installation,
+    profile: PrivacyProfile,
+    resource_id: str,
+    record_kind: str,
+    value: object,
+    authorization: AuthorizedPrivacyRequest,
+) -> ProtectedRecordValue:
+    """Protect one product-normalized record without committing it."""
+
+    declaration = _record_declaration(profile, resource_id, record_kind)
+    require_current_authorization(
+        authorization,
+        "record.protect",
+        pack_id=profile.id,
+    )
+    _require_stable_scope(installation, declaration.scope_id)
+    plaintext = copy.deepcopy(value)
+    try:
+        if not isinstance(plaintext, Mapping):
+            raise RecordError("PRIVACY_RECORD_PROTECTION_FAILED")
+        envelope = PrivacyEnvelopeCodec(declaration.current_schema).encrypt_state(
+            plaintext
+        )
+        return ProtectedRecordValue(copy.deepcopy(envelope))
+    except RecordError:
+        raise
+    except Exception:
+        raise RecordError("PRIVACY_RECORD_PROTECTION_FAILED") from None
+    finally:
+        clear_mutable_plaintext(plaintext)
+
+
+def mutate_record(
+    *,
+    installation,
+    profile: PrivacyProfile,
+    adapters: Mapping[str, object],
+    resource_id: str,
+    record_kind: str,
+    operation: str,
+    value: object,
+    authorization: AuthorizedPrivacyRequest,
+    record_id: str | None = None,
+) -> RecordMutationReceipt:
+    """Authorize, normalize, protect, atomically write, and verify a mutation."""
+
+    declaration = _record_declaration(profile, resource_id, record_kind)
+    safe_operation = str(operation or "")
+    if safe_operation not in declaration.mutation_operations:
+        raise RecordError("PRIVACY_RECORD_MUTATION_INVALID")
+    require_current_authorization(
+        authorization,
+        f"record.{safe_operation}",
+        pack_id=profile.id,
+    )
+    _require_stable_scope(installation, declaration.scope_id)
+    adapter = adapters.get(declaration.store_adapter)
+    read_protected = getattr(adapter, "read_protected", None)
+    write_protected = getattr(adapter, "write_protected", None)
+    delete = getattr(adapter, "delete", None)
+    mutate = getattr(adapter, "mutate", None)
+    if any(
+        not callable(method)
+        for method in (read_protected, write_protected, delete, mutate)
+    ):
+        raise RecordError("PRIVACY_RECORD_ADAPTER_INVALID")
+
+    source_id = None if safe_operation == "create" else _record_id(record_id)
+    target_id = (
+        _new_unique_record_id(adapter)
+        if safe_operation in {"create", "duplicate"}
+        else source_id
+    )
+    current: object = None
+    request_value = copy.deepcopy(value)
+    normalized: object = None
+    original = _MISSING
+    operation_lock = _record_operation_lock(profile.id, resource_id)
+    operation_lock.acquire()
+    try:
+        if source_id is not None:
+            original = read_protected(source_id)
+            current = PrivacyEnvelopeCodec(declaration.current_schema).decrypt_state(
+                original
+            )
+        normalized = mutate(current, safe_operation, request_value)
+        if not isinstance(normalized, Mapping):
+            raise RecordError("PRIVACY_RECORD_MUTATION_FAILED")
+        protected = PrivacyEnvelopeCodec(declaration.current_schema).encrypt_state(
+            normalized
+        )
+        target_original = original if target_id == source_id else _MISSING
+        _commit_current_record(
+            adapter,
+            target_id,
+            protected,
+            normalized,
+            declaration.current_schema,
+            target_original,
+        )
+        return RecordMutationReceipt(
+            target_id,
+            declaration.id,
+            safe_operation,
+            _correlation_id(),
+        )
+    except RecordError:
+        raise
+    except PrivacyError:
+        raise RecordError("PRIVACY_RECORD_DECRYPT_FAILED") from None
+    except Exception:
+        raise RecordError("PRIVACY_RECORD_MUTATION_FAILED") from None
+    finally:
+        clear_mutable_plaintext(normalized)
+        clear_mutable_plaintext(request_value)
+        clear_mutable_plaintext(current)
+        operation_lock.release()
 
 
 def private_record_response_headers(
@@ -273,7 +414,13 @@ def list_record_shells(
             if record_id in seen:
                 raise RecordError("PRIVACY_RECORD_ID_INVALID")
             seen.add(record_id)
-            shells.append(LockedRecordShell(record_id, declaration.id))
+            shells.append(
+                LockedRecordShell(
+                    record_id,
+                    declaration.id,
+                    declaration.fixed_private_label,
+                )
+            )
     except RecordError:
         raise
     except Exception:
@@ -314,6 +461,10 @@ def reveal_record(
 
     plaintext: object = None
     projection: object = None
+    replacement: object = None
+    protected: object = None
+    operation_lock = _record_operation_lock(profile.id, resource_id)
+    operation_lock.acquire()
     try:
         try:
             protected = read_protected(safe_record_id)
@@ -326,14 +477,35 @@ def reveal_record(
         except PrivacyError:
             raise RecordError("PRIVACY_RECORD_DECRYPT_FAILED") from None
         try:
-            projection = project(plaintext, safe_operation)
+            projected = project(plaintext, safe_operation)
+            if isinstance(projected, RecordProjectionResult):
+                projection = projected.value
+                replacement = projected.replacement
+            else:
+                projection = projected
         except Exception:
             raise RecordError("PRIVACY_RECORD_PROJECTION_FAILED") from None
         value = _safe_projection(projection, reveal_projection.safe_fields)
+        if replacement is not None:
+            if not isinstance(replacement, Mapping):
+                raise RecordError("PRIVACY_RECORD_PROJECTION_FAILED")
+            current = PrivacyEnvelopeCodec(declaration.current_schema).encrypt_state(
+                replacement
+            )
+            _commit_current_record(
+                adapter,
+                safe_record_id,
+                current,
+                replacement,
+                declaration.current_schema,
+                protected,
+            )
         return RevealedRecord(value, _correlation_id())
     finally:
+        clear_mutable_plaintext(replacement)
         clear_mutable_plaintext(projection)
         clear_mutable_plaintext(plaintext)
+        operation_lock.release()
 
 
 def delete_record(
@@ -366,7 +538,8 @@ def delete_record(
     if not callable(delete):
         raise RecordError("PRIVACY_RECORD_ADAPTER_INVALID")
     try:
-        delete(safe_record_id)
+        with _record_operation_lock(profile.id, resource_id):
+            delete(safe_record_id)
     except Exception:
         raise RecordError("PRIVACY_RECORD_DELETE_FAILED") from None
     return RecordMutationReceipt(
@@ -409,7 +582,8 @@ def replace_record(
     if not callable(write_protected):
         raise RecordError("PRIVACY_RECORD_ADAPTER_INVALID")
     try:
-        write_protected(safe_record_id, protected)
+        with _record_operation_lock(profile.id, resource_id):
+            write_protected(safe_record_id, protected)
     except Exception:
         raise RecordError("PRIVACY_RECORD_REPLACE_FAILED") from None
     return RecordMutationReceipt(
@@ -418,6 +592,89 @@ def replace_record(
         "replace",
         _correlation_id(),
     )
+
+
+def _new_unique_record_id(adapter: object) -> str:
+    list_ids = getattr(adapter, "list_ids", None)
+    if not callable(list_ids):
+        raise RecordError("PRIVACY_RECORD_ADAPTER_INVALID")
+    try:
+        values = list_ids()
+        if isinstance(values, (str, bytes, Mapping)) or not isinstance(values, Iterable):
+            raise RecordError("PRIVACY_RECORD_LIST_FAILED")
+        existing = {_record_id(value) for value in values}
+    except Exception:
+        raise RecordError("PRIVACY_RECORD_LIST_FAILED") from None
+    for _attempt in range(4):
+        candidate = generate_private_record_id()
+        if candidate not in existing:
+            return candidate
+    raise RecordError("PRIVACY_RECORD_ID_INVALID")
+
+
+def _record_operation_lock(pack_id: str, resource_id: str):
+    key = (pack_id, resource_id)
+    with _RECORD_OPERATION_LOCKS_GUARD:
+        lock = _RECORD_OPERATION_LOCKS.get(key)
+        if lock is None:
+            lock = Lock()
+            _RECORD_OPERATION_LOCKS[key] = lock
+        return lock
+
+
+def _commit_current_record(
+    adapter: object,
+    record_id: object,
+    protected: object,
+    expected: object,
+    schema: str,
+    original: object,
+) -> None:
+    safe_record_id = _record_id(record_id)
+    write_protected = getattr(adapter, "write_protected", None)
+    read_protected = getattr(adapter, "read_protected", None)
+    delete = getattr(adapter, "delete", None)
+    if any(
+        not callable(method)
+        for method in (write_protected, read_protected, delete)
+    ):
+        raise RecordError("PRIVACY_RECORD_ADAPTER_INVALID")
+    try:
+        write_protected(safe_record_id, copy.deepcopy(protected))
+        reopened = read_protected(safe_record_id)
+        revealed = PrivacyEnvelopeCodec(schema).decrypt_state(reopened)
+        if not hmac.compare_digest(
+            _canonical_record_value(revealed),
+            _canonical_record_value(expected),
+        ):
+            raise RecordError("PRIVACY_RECORD_VERIFICATION_FAILED")
+    except Exception as exc:
+        try:
+            if original is _MISSING:
+                delete(safe_record_id)
+            else:
+                write_protected(safe_record_id, copy.deepcopy(original))
+        except Exception:
+            raise RecordError("PRIVACY_RECORD_REPLACE_FAILED") from None
+        if isinstance(exc, RecordError):
+            raise
+        raise RecordError("PRIVACY_RECORD_VERIFICATION_FAILED") from None
+    finally:
+        if "revealed" in locals():
+            clear_mutable_plaintext(revealed)
+
+
+def _canonical_record_value(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except Exception:
+        raise RecordError("PRIVACY_RECORD_VERIFICATION_FAILED") from None
 
 
 def _record_declaration(

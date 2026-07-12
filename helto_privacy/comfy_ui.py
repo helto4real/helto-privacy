@@ -16,6 +16,8 @@ Registered surface (pack-neutral, stable):
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/reveal``
 - ``POST /helto_privacy/profiles/{pack_id}/executions/{execution_id}/prepare``
 - ``GET  /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}``
+- ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/mutate/create``
+- ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/mutate/{operation}``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/reveal/{operation}``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/delete``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/replace``
@@ -689,6 +691,22 @@ def register_helto_privacy_ui(
                 500,
             )
 
+    @routes.post(record_base + "/mutate/create")
+    async def post_helto_privacy_record_create(request):
+        return await _authorized_record_mutation_route(
+            request,
+            web,
+            operation="create",
+        )
+
+    @routes.post(record_base + "/{record_id}/mutate/{operation}")
+    async def post_helto_privacy_record_mutation(request):
+        return await _authorized_record_mutation_route(
+            request,
+            web,
+            operation=str(request.match_info.get("operation") or ""),
+        )
+
     @routes.post(record_base + "/{record_id}/delete")
     async def post_helto_privacy_record_delete(request):
         return await _destructive_record_route(request, web, operation="delete")
@@ -1256,6 +1274,79 @@ async def _destructive_record_route(request, web, *, operation: str):
             f"PRIVACY_RECORD_{operation.upper()}_FAILED",
             500,
         )
+
+
+async def _authorized_record_mutation_route(request, web, *, operation: str):
+    from ._plaintext import clear_mutable_plaintext
+    from .guard import PrivacyRouteError
+    from .records import RecordError
+    from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+
+    payload: object = None
+    try:
+        pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+        resource_id = str(request.match_info.get("resource_id") or "")
+        record_kind = str(request.match_info.get("record_kind") or "")
+        record_id = (
+            None
+            if operation == "create"
+            else str(request.match_info.get("record_id") or "")
+        )
+        payload = await request.json()
+        if not isinstance(payload, dict) or "value" not in payload:
+            raise RecordError("PRIVACY_RECORD_MUTATION_INVALID")
+        authorization = pack.authorization.authorize_request(
+            request,
+            f"record.{operation}",
+        )
+        receipt = pack.records(resource_id).mutate(
+            record_kind,
+            operation,
+            payload["value"],
+            authorization,
+            record_id=record_id,
+        )
+        return web.json_response(
+            {
+                "ok": True,
+                "recordId": receipt.record_id,
+                "kind": receipt.kind,
+                "operation": receipt.operation,
+                "correlationId": receipt.correlation_id,
+            },
+            headers=_record_response_headers(receipt.correlation_id),
+        )
+    except PackBlockedError:
+        return _record_route_error_response(
+            web,
+            "PRIVACY_PROFILE_UNAVAILABLE",
+            404,
+        )
+    except UnknownResourceError:
+        return _record_route_error_response(
+            web,
+            "PRIVACY_RECORD_RESOURCE_INVALID",
+            400,
+        )
+    except SuiteBlockedError:
+        return _record_route_error_response(web, "PRIVACY_SUITE_BLOCKED", 409)
+    except PrivacyRouteError as exc:
+        return _record_route_error_response(web, exc.code, exc.http_status)
+    except RecordError as exc:
+        return _record_route_error_response(
+            web,
+            exc.code,
+            _record_error_status(exc.code),
+            exc.correlation_id,
+        )
+    except Exception:  # noqa: BLE001
+        return _record_route_error_response(
+            web,
+            "PRIVACY_RECORD_MUTATION_FAILED",
+            500,
+        )
+    finally:
+        clear_mutable_plaintext(payload)
 
 
 def _record_error_status(code: str) -> int:

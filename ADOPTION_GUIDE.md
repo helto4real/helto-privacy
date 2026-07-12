@@ -458,11 +458,17 @@ RecordDeclaration(
         RecordRevealProjection("use", ("prompt",)),
         RecordRevealProjection("details", ("summary",)),
     ),
+    mutation_operations=("create", "replace", "patch", "duplicate"),
+    safe_projection=(),
+    fixed_private_label="Private record",
 )
 ```
 
 The store implements `list_ids`, `read_protected`, `write_protected`, and
-`delete`, plus the mode-transition methods. Reveal-capable stores also
+`delete`, plus the mode-transition methods. Mutation-capable stores also
+implement `mutate(current, operation, value)` and return one complete normalized
+record; the shared handle owns opaque ID generation, encryption, atomic
+write/read-back verification, rollback, and generic errors. Reveal-capable stores also
 implement `project(value, operation)`. `list_ids` must not read or decrypt a
 record. `project` returns canonical JSON and every returned top-level field must
 appear in that operation's `RecordRevealProjection.safe_fields`; omission means
@@ -476,16 +482,21 @@ Replace the pack's record routes with the typed browser handle:
 const records = privacy.records("library");
 const shells = await records.list("prompt-record");
 const revealed = await records.reveal("prompt-record", opaqueId, "use");
+const created = await records.create("prompt-record", { prompt: "authorized" });
+await records.mutate("prompt-record", opaqueId, "patch", { prompt: "updated" });
 await records.delete("prompt-record", opaqueId); // Shared Helto confirmation modal.
 ```
 
 The shared handle rebuilds locked shells as `{ id, kind, private: true,
 label: "Private record" }` and discards every extra field. It supports only
-declared `use`, `preview`, or `details` reveals. Delete and replacement work
+declared `use`, `preview`, or `details` reveals. Authorized create, replace,
+patch, and duplicate use the shared mutation route and return only opaque
+receipts. Delete and protected-envelope replacement work
 while locked after shared confirmation; replacement accepts a protected current
 envelope only. Do not register a generic `ProtectedOperation` on a record
-resource or retain local duplicate, merge, edit, preview-metadata, record-token,
-or decrypt-to-default routes.
+resource or retain local crypto, shell-building, record-token, raw-error, or
+decrypt-to-default routes. Product naming, payload normalization, and document
+persistence remain in the adapter.
 
 Use `private_record_response_headers()` for private media/record responses and
 `safe_record_diagnostic()` for coarse diagnostics. Never include an original

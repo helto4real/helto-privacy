@@ -374,6 +374,8 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 "snapshot.protect",
                 "snapshot.reveal",
                 "execution.prepare",
+                "record.create",
+                "record.patch",
                 "record.use",
                 "artifact.preview",
             }
@@ -535,6 +537,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             )
 
     record_id = "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
+    outer_record_id = record_id
 
     class Records:
         def list_shells(self, record_kind):
@@ -551,6 +554,27 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             return RevealedRecord(
                 {"prompt": "SYNTHETIC_AUTHORIZED_VALUE"},
                 "hp-record-abcdefghijklmnop",
+            )
+
+        def mutate(
+            self,
+            record_kind,
+            operation,
+            value,
+            authorization,
+            *,
+            record_id: str | None = None,
+        ):
+            assert record_kind == "prompt-record"
+            assert operation in {"create", "patch"}
+            assert value == {"prompt": "SYNTHETIC_PLAINTEXT_CANARY"}
+            assert authorization == f"synthetic-record.{operation}"
+            assert record_id == (None if operation == "create" else outer_record_id)
+            return RecordMutationReceipt(
+                outer_record_id,
+                record_kind,
+                operation,
+                "hp-record-defghijklmnopqrs",
             )
 
         def delete(self, record_kind, supplied_id, confirmation):
@@ -840,6 +864,57 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         "correlationId": "hp-record-abcdefghijklmnop",
     }
     assert reveal_response.headers["Cache-Control"] == "private, no-store"
+
+    async def mutation_payload():
+        return {"value": {"prompt": "SYNTHETIC_PLAINTEXT_CANARY"}}
+
+    create_record = prompt_server.routes.handlers[
+        ("POST", record_base + "/mutate/create")
+    ]
+    create_response = asyncio.run(
+        create_record(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "library",
+                    "record_kind": "prompt-record",
+                },
+                headers={},
+                cookies={},
+                json=mutation_payload,
+            )
+        )
+    )
+    assert create_response.data == {
+        "ok": True,
+        "recordId": record_id,
+        "kind": "prompt-record",
+        "operation": "create",
+        "correlationId": "hp-record-defghijklmnopqrs",
+    }
+    assert "SYNTHETIC_PLAINTEXT_CANARY" not in str(create_response.data)
+    mutate_record = prompt_server.routes.handlers[
+        ("POST", record_base + "/{record_id}/mutate/{operation}")
+    ]
+    patch_response = asyncio.run(
+        mutate_record(
+            types.SimpleNamespace(
+                match_info={
+                    "pack_id": profile.id,
+                    "resource_id": "library",
+                    "record_kind": "prompt-record",
+                    "record_id": record_id,
+                    "operation": "patch",
+                },
+                headers={},
+                cookies={},
+                json=mutation_payload,
+            )
+        )
+    )
+    assert patch_response.data["operation"] == "patch"
+    assert patch_response.headers["Cache-Control"] == "private, no-store"
+    assert "SYNTHETIC_PLAINTEXT_CANARY" not in str(patch_response.data)
 
     delete_records = prompt_server.routes.handlers[
         ("POST", record_base + "/{record_id}/delete")

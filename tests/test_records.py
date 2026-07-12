@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 import helto_privacy.keystore as keystore
 import helto_privacy.runtime as runtime
 from helto_privacy import (
     LockedRecordShell,
+    ProtectedRecordValue,
     RecordError,
     RecordMutationReceipt,
+    RecordProjectionResult,
     RevealedRecord,
     confirm_record_mutation,
     generate_private_record_id,
@@ -62,9 +66,12 @@ class RecordStore:
         self.deleted = []
         self.written = []
         self.failure = None
+        self.mutation_calls = []
+        self.project_replacement = None
+        self.corrupt_next_write = False
 
     def list_ids(self):
-        return self.ids
+        return tuple(dict.fromkeys((*self.ids, *self.records)))
 
     def read_protected(self, record_id):
         self.read_calls += 1
@@ -74,18 +81,39 @@ class RecordStore:
         if self.failure:
             raise RuntimeError(self.failure)
         self.written.append((record_id, value))
+        if self.corrupt_next_write:
+            self.corrupt_next_write = False
+            value = copy.deepcopy(value)
+            value["ciphertext"] = (
+                ("A" if value["ciphertext"][0] != "A" else "B")
+                + value["ciphertext"][1:]
+            )
+        self.records[record_id] = value
 
     def delete(self, record_id):
         if self.failure:
             raise RuntimeError(self.failure)
         self.deleted.append(record_id)
+        self.records.pop(record_id, None)
+        self.ids = tuple(item for item in self.ids if item != record_id)
 
     def project(self, value, operation):
         self.project_calls += 1
         self.retained_plaintext = value
-        if operation == "use":
-            return {"prompt": value["prompt"], **self.extra_projection}
-        return {"summary": value["summary"], **self.extra_projection}
+        projection = (
+            {"prompt": value["prompt"], **self.extra_projection}
+            if operation == "use"
+            else {"summary": value["summary"], **self.extra_projection}
+        )
+        if self.project_replacement is not None:
+            return RecordProjectionResult(projection, self.project_replacement)
+        return projection
+
+    def mutate(self, current, operation, value):
+        self.mutation_calls.append((current, operation, value))
+        result = dict(current or {})
+        result.update(value["record"])
+        return result
 
     def prepare_mode_transition(self, *_args):
         return None
@@ -97,7 +125,7 @@ class RecordStore:
         return None
 
 
-def _profile(*, reveal: bool = False) -> PrivacyProfile:
+def _profile(*, reveal: bool = False, mutations: bool = False) -> PrivacyProfile:
     return PrivacyProfile(
         id="helto.record-test",
         distribution="comfyui-record-test",
@@ -121,6 +149,12 @@ def _profile(*, reveal: bool = False) -> PrivacyProfile:
                     RecordRevealProjection("details", ("summary",)),
                     RecordRevealProjection("use", ("prompt",)),
                 ) if reveal else (),
+                mutation_operations=(
+                    "create",
+                    "replace",
+                    "patch",
+                    "duplicate",
+                ) if mutations else (),
             ),
         ),
     )
@@ -167,6 +201,24 @@ def reveal_pack(monkeypatch):
         }
     )
     return pack, store, record_id, Request(token)
+
+
+@pytest.fixture
+def mutation_pack(monkeypatch):
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        "helto_privacy.suite_runtime.require_active_process_suite",
+        lambda: None,
+    )
+    store = RecordStore()
+    store.ids = ()
+    pack = runtime.install(
+        _profile(reveal=True, mutations=True),
+        {"mode": ModeAdapter(), "records": store},
+    )
+    token = keystore.initialize_keystore("synthetic record mutation password")["token"]
+    return pack, store, Request(token)
 
 
 def test_locked_listing_returns_only_minimal_shells_without_reading_records(
@@ -257,6 +309,133 @@ def test_authorized_reveal_returns_only_allowlisted_product_projection(reveal_pa
     assert store.read_calls == 1
     assert store.project_calls == 1
     assert store.retained_plaintext == {}
+
+
+def test_record_declaration_exposes_strict_shell_and_mutation_contract():
+    declaration = _profile(reveal=True, mutations=True).records[0]
+
+    assert declaration.fixed_private_label == "Private record"
+    assert declaration.safe_projection == ()
+    assert declaration.mutation_operations == (
+        "create",
+        "duplicate",
+        "patch",
+        "replace",
+    )
+
+
+def test_authorized_create_patch_and_duplicate_are_shared_protected_mutations(
+    mutation_pack,
+    monkeypatch,
+):
+    pack, store, request = mutation_pack
+    generated = iter(
+        (
+            "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+            "hp-rec-Q1w2E3r4T5y6U7i8O9p0A1s2D3f4G5h6",
+        )
+    )
+    monkeypatch.setattr("helto_privacy.records.generate_private_record_id", lambda: next(generated))
+    handle = pack.records("library")
+
+    created = handle.mutate(
+        "prompt-record",
+        "create",
+        {"record": {"prompt": "SYNTHETIC_CREATED", "summary": "created"}},
+        authorize_privacy_request(request, "record.create", pack_id=pack.profile.id),
+    )
+    patched = handle.mutate(
+        "prompt-record",
+        "patch",
+        {"record": {"summary": "patched"}},
+        authorize_privacy_request(request, "record.patch", pack_id=pack.profile.id),
+        record_id=created.record_id,
+    )
+    duplicated = handle.mutate(
+        "prompt-record",
+        "duplicate",
+        {"record": {"prompt": "SYNTHETIC_DUPLICATED"}},
+        authorize_privacy_request(request, "record.duplicate", pack_id=pack.profile.id),
+        record_id=created.record_id,
+    )
+
+    codec = PrivacyEnvelopeCodec("helto.record-test.v1")
+    assert created.operation == "create"
+    assert patched.record_id == created.record_id
+    assert duplicated.record_id != created.record_id
+    assert codec.decrypt_state(store.records[created.record_id]) == {
+        "prompt": "SYNTHETIC_CREATED",
+        "summary": "patched",
+    }
+    assert codec.decrypt_state(store.records[duplicated.record_id]) == {
+        "prompt": "SYNTHETIC_DUPLICATED",
+        "summary": "patched",
+    }
+    assert all(
+        envelope["schema"] == "helto.record-test.v1"
+        for envelope in store.records.values()
+    )
+
+
+def test_record_protect_supports_verified_consumer_migration_without_commit(
+    mutation_pack,
+):
+    pack, store, request = mutation_pack
+    protected = pack.records("library").protect(
+        "prompt-record",
+        {"prompt": "SYNTHETIC_MIGRATED", "summary": "migration"},
+        authorize_privacy_request(request, "record.protect", pack_id=pack.profile.id),
+    )
+
+    assert isinstance(protected, ProtectedRecordValue)
+    assert protected.envelope["schema"] == "helto.record-test.v1"
+    assert store.written == []
+
+
+def test_failed_mutation_readback_restores_the_original_envelope(mutation_pack):
+    pack, store, request = mutation_pack
+    handle = pack.records("library")
+    created = handle.mutate(
+        "prompt-record",
+        "create",
+        {"record": {"prompt": "SYNTHETIC_ORIGINAL", "summary": "original"}},
+        authorize_privacy_request(request, "record.create", pack_id=pack.profile.id),
+    )
+    original = copy.deepcopy(store.records[created.record_id])
+    store.corrupt_next_write = True
+
+    with pytest.raises(RecordError) as failed:
+        handle.mutate(
+            "prompt-record",
+            "patch",
+            {"record": {"summary": "SYNTHETIC_FAILED_PATCH"}},
+            authorize_privacy_request(request, "record.patch", pack_id=pack.profile.id),
+            record_id=created.record_id,
+        )
+
+    assert failed.value.code == "PRIVACY_RECORD_VERIFICATION_FAILED"
+    assert store.records[created.record_id] == original
+    assert "SYNTHETIC" not in repr(failed.value)
+
+
+def test_authorized_use_can_persist_product_activity_under_shared_crypto(reveal_pack):
+    pack, store, record_id, request = reveal_pack
+    store.project_replacement = {
+        "prompt": "SYNTHETIC_PRIVATE_PROMPT",
+        "summary": "SYNTHETIC_PRIVATE_SUMMARY",
+        "last_used_at": "2030-01-01T00:00:00Z",
+    }
+    revealed = pack.records("library").reveal(
+        "prompt-record",
+        record_id,
+        "use",
+        authorize_privacy_request(request, "record.use", pack_id=pack.profile.id),
+    )
+
+    assert revealed.value == {"prompt": "SYNTHETIC_PRIVATE_PROMPT"}
+    assert PrivacyEnvelopeCodec("helto.record-test.v1").decrypt_state(
+        store.records[record_id]
+    )["last_used_at"] == "2030-01-01T00:00:00Z"
 
 
 def test_reveal_rejects_nonallowlisted_projection_without_leaking_values(reveal_pack):

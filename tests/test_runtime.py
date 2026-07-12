@@ -303,12 +303,15 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 },
         ],
         "records": [
-            {
-                "id": "test-record",
-                "resourceId": "library",
-                "scopeId": "test-scope",
-                "revealOperations": [],
-            },
+                {
+                    "id": "test-record",
+                    "resourceId": "library",
+                    "scopeId": "test-scope",
+                    "revealOperations": [],
+                    "mutationOperations": [],
+                    "safeProjection": [],
+                    "fixedPrivateLabel": "Private record",
+                },
         ],
         "singletons": [],
         "artifacts": [

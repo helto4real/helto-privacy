@@ -330,6 +330,43 @@ class RecordHandle(_ResourceHandle):
             authorization=authorization,
         )
 
+    def protect(self, record_kind: str, value: object, authorization):
+        self._require_active()
+        from .records import protect_record_value
+
+        return protect_record_value(
+            installation=self._installation,
+            profile=self._installation.profile,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            value=value,
+            authorization=authorization,
+        )
+
+    def mutate(
+        self,
+        record_kind: str,
+        operation: str,
+        value: object,
+        authorization,
+        *,
+        record_id: str | None = None,
+    ):
+        self._require_active()
+        from .records import mutate_record
+
+        return mutate_record(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            operation=operation,
+            value=value,
+            authorization=authorization,
+            record_id=record_id,
+        )
+
     def delete(self, record_kind: str, record_id: str, confirmation):
         self._require_active()
         from .records import delete_record
@@ -912,6 +949,9 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "resourceId": record.resource_id,
                     "scopeId": record.scope_id,
                     "revealOperations": list(record.reveal_operations),
+                    "mutationOperations": list(record.mutation_operations),
+                    "safeProjection": list(record.safe_projection),
+                    "fixedPrivateLabel": record.fixed_private_label,
                 }
                 for record in profile.records
             ],

@@ -286,6 +286,9 @@ class RecordDeclaration:
     current_schema: str
     store_adapter: str
     projections: tuple[RecordRevealProjection, ...] = ()
+    mutation_operations: tuple[str, ...] = ()
+    safe_projection: tuple[str, ...] = ()
+    fixed_private_label: str = "Private record"
 
     def __post_init__(self) -> None:
         for value in (
@@ -307,6 +310,26 @@ class RecordDeclaration:
             "projections",
             tuple(sorted(projections, key=lambda item: item.operation)),
         )
+        mutations = _normalized_stable_ids(
+            self.mutation_operations,
+            "duplicate_record_mutation_operation",
+        )
+        if any(
+            operation not in {"create", "replace", "patch", "duplicate"}
+            for operation in mutations
+        ):
+            raise ProfileValidationError("invalid_record_mutation_operation")
+        object.__setattr__(self, "mutation_operations", mutations)
+        safe_projection = _normalized_text_values(
+            self.safe_projection,
+            "invalid_safe_projection_field",
+            "duplicate_safe_projection_field",
+        )
+        if safe_projection:
+            raise ProfileValidationError("unsafe_record_list_projection")
+        object.__setattr__(self, "safe_projection", safe_projection)
+        if self.fixed_private_label != "Private record":
+            raise ProfileValidationError("invalid_private_record_label")
 
     @property
     def reveal_operations(self) -> tuple[str, ...]:
@@ -946,6 +969,8 @@ class PrivacyProfile:
             )
             if record.projections:
                 _add_contract(contracts, record.store_adapter, "project")
+            if record.mutation_operations:
+                _add_contract(contracts, record.store_adapter, "mutate")
         for singleton in self.singletons:
             _add_contract(
                 contracts,
@@ -1071,6 +1096,9 @@ class PrivacyProfile:
                     "scopeId": record.scope_id,
                     "currentSchema": record.current_schema,
                     "storeAdapter": record.store_adapter,
+                    "mutationOperations": list(record.mutation_operations),
+                    "safeProjection": list(record.safe_projection),
+                    "fixedPrivateLabel": record.fixed_private_label,
                     "revealProjections": [
                         {
                             "operation": projection.operation,
