@@ -275,6 +275,63 @@ def register_helto_privacy_ui(
             )
 
     @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/resolve"
+    )
+    async def post_helto_privacy_mode_resolution(request):
+        from .mode import ModePolicyError, ModeTransitionError
+        from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            scope_id = str(request.match_info.get("scope_id") or "")
+            payload = await request.json()
+            declaration = payload.get("declaration")
+            facts = _mode_facts_from_payload(payload.get("facts"))
+            scope = next(
+                (item for item in pack.profile.scopes if item.id == scope_id),
+                None,
+            )
+            if scope is None:
+                raise UnknownResourceError()
+            resolution = pack.mode(scope.mode_resource_id).resolve_declaration(
+                scope.id,
+                declaration,
+                facts,
+            )
+            return web.json_response(
+                _mode_resolution_payload(
+                    scope.id,
+                    scope.mode_resource_id,
+                    resolution,
+                ),
+                headers={"Cache-Control": "no-store"},
+            )
+        except (ModePolicyError, ModeTransitionError):
+            return _privacy_error_response(
+                web,
+                "PRIVACY_MODE_STATE_UNAVAILABLE",
+                409,
+            )
+        except (AttributeError, TypeError, ValueError):
+            return _privacy_error_response(
+                web,
+                "PRIVACY_MODE_DECLARATION_INVALID",
+                400,
+            )
+        except (PackBlockedError, UnknownResourceError):
+            return _privacy_error_response(
+                web,
+                "PRIVACY_PROFILE_UNAVAILABLE",
+                404,
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_MODE_STATUS_FAILED",
+                500,
+            )
+
+    @routes.post(
         f"{ROUTE_PREFIX}/profiles/{{pack_id}}/fields/{{field_id}}/disposition"
     )
     async def post_helto_privacy_field_disposition(request):
@@ -1256,6 +1313,49 @@ def _artifact_route_error_response(
         {"ok": False, "error": code, "correlationId": correlation},
         status=status,
         headers=_artifact_response_headers(correlation),
+    )
+
+
+def _mode_facts_from_payload(value):
+    from .mode import ModeEvidence, ModeFacts
+
+    if value is None:
+        return ModeFacts()
+    if not isinstance(value, dict):
+        raise ValueError("Invalid mode facts.")
+    allowed = {
+        "globalMode",
+        "requestMode",
+        "currentMode",
+        "upstream",
+        "parents",
+        "records",
+        "artifacts",
+        "executions",
+    }
+    if set(value) - allowed:
+        raise ValueError("Invalid mode facts.")
+
+    def evidence(name: str) -> tuple[ModeEvidence, ...]:
+        items = value.get(name, [])
+        if not isinstance(items, list):
+            raise ValueError("Invalid mode evidence.")
+        result = []
+        for item in items:
+            if not isinstance(item, dict) or set(item) != {"sourceId", "mode"}:
+                raise ValueError("Invalid mode evidence.")
+            result.append(ModeEvidence(str(item["sourceId"]), item["mode"]))
+        return tuple(result)
+
+    return ModeFacts(
+        global_mode=value.get("globalMode"),
+        request_mode=value.get("requestMode"),
+        current_mode=value.get("currentMode"),
+        upstream=evidence("upstream"),
+        parents=evidence("parents"),
+        records=evidence("records"),
+        artifacts=evidence("artifacts"),
+        executions=evidence("executions"),
     )
 
 

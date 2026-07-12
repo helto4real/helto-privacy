@@ -100,6 +100,7 @@ def run_node_module_test(tmp_path, body: str) -> None:
             const executionBodies = [];
             const recordCalls = [];
             const artifactCalls = [];
+            const modeResolutionCalls = [];
             globalThis.fetch = async (url, options = {{}}) => {{
               const target = String(url);
               let payload = {{ ok: true }};
@@ -109,6 +110,18 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 payload = {{ ok: true, envelope: "SYNTHETIC_CURRENT_ENVELOPE" }};
               }} else if (target.endsWith("/reveal")) {{
                 payload = {{ ok: true, value: {{ value: "SYNTHETIC_REVEALED_STATE" }} }};
+              }} else if (target.endsWith("/modes/global/resolve")) {{
+                const body = JSON.parse(options.body);
+                modeResolutionCalls.push({{ target, body }});
+                payload = {{
+                  id: "global",
+                  modeResourceId: "privacy-mode",
+                  declared: body.declaration,
+                  effective: body.declaration === "public" ? "public" : "private",
+                  inheritedFrom: "declared-" + body.declaration,
+                  floors: [],
+                  transitionStatus: "idle",
+                }};
               }} else if (target.endsWith("/modes")) {{
                 payload = {{ ok: true, scopes: [{{
                   id: "global",
@@ -180,6 +193,143 @@ def run_node_module_test(tmp_path, body: str) -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_snapshot_resolves_owner_local_mode_declaration_and_facts(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const owner = {
+          id: 12,
+          type: "HeltoTimeline",
+          live: { value: "initial" },
+          protected: "SYNTHETIC_ENVELOPE",
+        };
+        const workflow = {
+          apply() {},
+          clear() {},
+          normalize(node) { return node.live; },
+          readProtected(node) { return node.protected; },
+          writeProtected(node, value) { node.protected = value; },
+          onPrivacySessionChange() {},
+          reconcileNode() {},
+          reconcileNodeDefinition() {},
+        };
+        const seenOwners = [];
+        const mode = {
+          readDeclaredMode(node) { seenOwners.push(node); return "public"; },
+          readModeFacts(node) {
+            assert.equal(node, owner);
+            return { upstream: [{ sourceId: "node-11", mode: "public" }] };
+          },
+          writeDeclaredMode() {},
+          onPrivacySessionChange() {},
+          reconcileNode() {},
+          reconcileNodeDefinition() {},
+        };
+        serverAttestation = () => attestation({
+          requiredBrowserAdapters: [
+            {
+              id: "mode-editor",
+              nodeTypes: ["HeltoTimeline"],
+              methods: [
+                "onPrivacySessionChange",
+                "readDeclaredMode",
+                "reconcileNode",
+                "reconcileNodeDefinition",
+                "writeDeclaredMode",
+              ],
+            },
+            attestation().requiredBrowserAdapters[0],
+          ],
+          modeScopes: [{
+            id: "global",
+            modeResourceId: "privacy-mode",
+            modeEditorAdapter: "mode-editor",
+          }],
+        });
+        const app = {
+          rootGraph: { _nodes: [owner] },
+          registeredNodeTypes: {},
+          registerExtension(extension) { this.extension = extension; },
+        };
+
+        await privacy.connectPrivacyPack({
+          app,
+          packId: "helto.director",
+          profileFingerprint: fingerprint,
+          suiteManifestDigest: suiteDigest,
+          adapters: { "mode-editor": mode, "timeline-editor": workflow },
+        });
+
+        assert.deepEqual(seenOwners, [owner]);
+        assert.equal(modeResolutionCalls.length, 1);
+        assert.deepEqual(modeResolutionCalls[0].body, {
+          declaration: "public",
+          facts: { upstream: [{ sourceId: "node-11", mode: "public" }] },
+        });
+        """,
+    )
+
+
+def test_owner_local_mode_adapter_failure_blocks_profile_connection(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const owner = {
+          id: 12,
+          type: "HeltoTimeline",
+          live: { value: "initial" },
+          protected: "SYNTHETIC_ENVELOPE",
+        };
+        const workflow = {
+          apply() {}, clear() {}, normalize(node) { return node.live; },
+          readProtected(node) { return node.protected; },
+          writeProtected(node, value) { node.protected = value; },
+          onPrivacySessionChange() {}, reconcileNode() {}, reconcileNodeDefinition() {},
+        };
+        const mode = {
+          readDeclaredMode() { throw new Error("SYNTHETIC_PRIVATE_MODE_FAILURE"); },
+          writeDeclaredMode() {}, onPrivacySessionChange() {},
+          reconcileNode() {}, reconcileNodeDefinition() {},
+        };
+        serverAttestation = () => attestation({
+          requiredBrowserAdapters: [
+            {
+              id: "mode-editor",
+              nodeTypes: ["HeltoTimeline"],
+              methods: [
+                "onPrivacySessionChange", "readDeclaredMode", "reconcileNode",
+                "reconcileNodeDefinition", "writeDeclaredMode",
+              ],
+            },
+            attestation().requiredBrowserAdapters[0],
+          ],
+          modeScopes: [{
+            id: "global",
+            modeResourceId: "privacy-mode",
+            modeEditorAdapter: "mode-editor",
+          }],
+        });
+        const app = {
+          rootGraph: { _nodes: [owner] },
+          registeredNodeTypes: {},
+          registerExtension() {},
+        };
+
+        await assert.rejects(
+          () => privacy.connectPrivacyPack({
+            app,
+            packId: "helto.director",
+            profileFingerprint: fingerprint,
+            suiteManifestDigest: suiteDigest,
+            adapters: { "mode-editor": mode, "timeline-editor": workflow },
+          }),
+          (error) => error.code === "browser_lifecycle_registration_failed",
+        );
+        assert.equal(modeResolutionCalls.length, 0);
+        """,
+    )
 
 
 def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp_path):

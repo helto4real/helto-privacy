@@ -309,7 +309,11 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     assert response.data["suiteManifestDigest"] is None
     assert response.data["resources"] == [{"id": "privacy-mode", "kind": "mode"}]
     assert response.data["modeScopes"] == [
-        {"id": "route-test", "modeResourceId": "privacy-mode"}
+        {
+            "id": "route-test",
+            "modeResourceId": "privacy-mode",
+            "modeEditorAdapter": "mode-browser",
+        }
     ]
     assert response.data["protectedFields"] == []
     assert response.data["executionProjections"] == []
@@ -330,6 +334,19 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         def resolve(self, scope_id):
             assert scope_id == "route-test"
             return Resolution()
+
+        def resolve_declaration(self, scope_id, declaration, facts):
+            assert (scope_id, declaration) == ("route-test", "public")
+            assert [(item.source_id, item.mode) for item in facts.upstream] == [
+                ("node-12", "private")
+            ]
+            return types.SimpleNamespace(
+                declared=types.SimpleNamespace(value="public"),
+                effective=types.SimpleNamespace(value="public"),
+                inherited_from="declared-public",
+                floors=(),
+                transition_status=types.SimpleNamespace(value="idle"),
+            )
 
         def transition(self, scope_id, target, authorization):
             assert threading.get_ident() != route_thread
@@ -393,6 +410,39 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         ],
     }
     assert mode_response.headers == {"Cache-Control": "no-store"}
+
+    async def resolution_payload():
+        return {
+            "declaration": "public",
+            "facts": {
+                "upstream": [{"sourceId": "node-12", "mode": "private"}],
+            },
+        }
+
+    resolution_handler = prompt_server.routes.handlers[
+        (
+            "POST",
+            f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/resolve",
+        )
+    ]
+    resolution_response = asyncio.run(
+        resolution_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "scope_id": "route-test"},
+                json=resolution_payload,
+            )
+        )
+    )
+    assert resolution_response.data == {
+        "id": "route-test",
+        "modeResourceId": "privacy-mode",
+        "declared": "public",
+        "effective": "public",
+        "inheritedFrom": "declared-public",
+        "floors": [],
+        "transitionStatus": "idle",
+    }
+    assert resolution_response.headers == {"Cache-Control": "no-store"}
 
     async def transition_payload():
         return {"target": "public"}

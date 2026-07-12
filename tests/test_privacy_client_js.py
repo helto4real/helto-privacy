@@ -280,6 +280,60 @@ def test_public_mode_transition_cannot_forge_declassification_confirmation(tmp_p
     )
 
 
+def test_node_local_mode_declaration_uses_attested_resolution_route(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        globalThis.localStorage = {
+          getItem: () => "synthetic-token",
+          setItem() {},
+          removeItem() {},
+        };
+        globalThis.document = { cookie: "" };
+        const calls = [];
+        globalThis.fetch = async (url, options = {}) => {
+          const target = String(url);
+          if (target.endsWith("/profiles/helto.test")) return response({
+            ok: true,
+            id: "helto.test",
+            fingerprint: "a".repeat(64),
+            suiteManifestDigest: "b".repeat(64),
+            protectedOperations: [],
+            modeScopes: [{
+              id: "node",
+              modeResourceId: "privacy-mode",
+              modeEditorAdapter: "mode-browser",
+            }],
+          });
+          if (target.endsWith("/suite/browser-attestation")) return response({ ok: true });
+          calls.push({ target, options });
+          return response({ ok: true, declared: "public", effective: "public" });
+        };
+        const transport = await client.connectAttestedPrivacyProfileClient({
+          packId: "helto.test",
+          profileFingerprint: "a".repeat(64),
+          suiteManifestDigest: "b".repeat(64),
+        });
+
+        const resolution = await transport.mode.resolve(
+          "privacy-mode",
+          "node",
+          "public",
+          { upstream: [{ sourceId: "node-12", mode: "private" }] },
+        );
+        assert.equal(resolution.effective, "public");
+        assert.equal(
+          calls[0].target,
+          "/helto_privacy/profiles/helto.test/modes/node/resolve",
+        );
+        assert.deepEqual(JSON.parse(calls[0].options.body), {
+          declaration: "public",
+          facts: { upstream: [{ sourceId: "node-12", mode: "private" }] },
+        });
+        """,
+    )
+
+
 def test_snapshot_transport_uses_only_attested_fixed_field_routes(tmp_path):
     run_node_module_test(
         tmp_path,

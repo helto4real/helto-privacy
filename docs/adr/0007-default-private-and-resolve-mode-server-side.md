@@ -32,3 +32,14 @@ relationships and supplied upstream, artifact, execution, record, request, and
 captured-state floors. This resolution is not persisted as a pack-wide
 declaration, so concurrent nodes with different explicit settings cannot race
 through one global adapter state.
+
+For browser-owned node state, the attested profile names the scope's mode
+editor adapter. The snapshot coordinator asks that adapter for the current
+node's normalized declaration and any closed, product-data-free `ModeFacts`
+evidence needed for that node, such as connected upstream scope IDs and their
+normalized modes. The profile-bound route reconstructs the typed facts,
+rejects unknown shapes, and lets malformed modes resolve fail-closed through
+shared policy. Consumer adapters never send prompt or other product values in
+this payload. The route calls the same node-local mode handle and returns
+product-data-free policy evidence; it never stores the per-node declaration or
+facts as pack-wide mode state.

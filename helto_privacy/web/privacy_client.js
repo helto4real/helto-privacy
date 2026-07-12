@@ -229,11 +229,27 @@ function createAttestedPrivacyModeClient({
     });
   }
 
-  async function resolve(resourceId, scopeId) {
+  async function resolve(resourceId, scopeId, declaration = undefined, facts = undefined) {
     if (!scopes.some(
       (scope) => scope.id === scopeId && scope.modeResourceId === resourceId,
     )) {
       throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_MODE_SCOPE_INVALID");
+    }
+    if (declaration !== undefined) {
+      if (!["inherit", "private", "public"].includes(declaration)) {
+        throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_MODE_INVALID");
+      }
+      if (
+        facts !== undefined
+        && (facts === null || typeof facts !== "object" || Array.isArray(facts))
+      ) {
+        throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_MODE_INVALID");
+      }
+      return requestClient.request(
+        "mode.resolve",
+        `${ROUTE_PREFIX}/profiles/${encodeURIComponent(id)}/modes/${encodeURIComponent(scopeId)}/resolve`,
+        { body: { declaration, ...(facts === undefined ? {} : { facts }) }, retryUnlock: false },
+      );
     }
     const result = await readAll();
     const scope = result.scopes.find(
@@ -845,9 +861,13 @@ function normalizeBrowserModeScopes(scopes) {
   return scopes.flatMap((scope) => {
     const id = String(scope?.id || "");
     const modeResourceId = String(scope?.modeResourceId || "");
+    const modeEditorAdapter = scope?.modeEditorAdapter == null
+      ? null
+      : String(scope.modeEditorAdapter || "");
     return /^[a-z0-9][a-z0-9._-]*$/.test(id)
       && /^[a-z0-9][a-z0-9._-]*$/.test(modeResourceId)
-      ? [Object.freeze({ id, modeResourceId })]
+      && (modeEditorAdapter === null || /^[a-z0-9][a-z0-9._-]*$/.test(modeEditorAdapter))
+      ? [Object.freeze({ id, modeResourceId, modeEditorAdapter })]
       : [];
   });
 }

@@ -868,6 +868,7 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                 {
                     "id": scope.id,
                     "modeResourceId": scope.mode_resource_id,
+                    "modeEditorAdapter": scope.mode_editor_adapter,
                 }
                 for scope in profile.scopes
             ],

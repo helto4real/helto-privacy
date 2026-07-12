@@ -565,7 +565,7 @@ export function createPrivacySnapshotCoordinator({
   async function refreshMode(entry, { initial = false } = {}) {
     let nextPrivate;
     try {
-      nextPrivate = await resolvePrivate(entry.field) !== false;
+      nextPrivate = await resolvePrivate(entry.field, entry.owner) !== false;
     } catch {
       throw new PrivacySnapshotError("PRIVACY_MODE_STATE_UNAVAILABLE");
     }

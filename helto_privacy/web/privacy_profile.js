@@ -413,6 +413,9 @@ export async function connectPrivacyPack({
     modeScopes: attestation.modeScopes.map((item) => Object.freeze({
       id: String(item.id),
       modeResourceId: String(item.modeResourceId),
+      modeEditorAdapter: item.modeEditorAdapter == null
+        ? null
+        : String(item.modeEditorAdapter),
     })),
     protectedFields: attestation.protectedFields.map((item) => Object.freeze({
       id: String(item.id),
@@ -475,12 +478,19 @@ export async function connectPrivacyPack({
         ),
       })),
     ),
-    resolvePrivate: async (field) => {
+    resolvePrivate: async (field, owner) => {
       const scope = entry.modeScopes.find((item) => item.id === field.scopeId);
       if (!scope) return true;
+      const modeAdapter = scope.modeEditorAdapter
+        ? entry.adapters[scope.modeEditorAdapter]
+        : null;
+      const declaration = modeAdapter?.readDeclaredMode?.(owner);
+      const facts = modeAdapter?.readModeFacts?.(owner);
       const resolution = await entry.transport.mode.resolve(
         scope.modeResourceId,
         scope.id,
+        declaration,
+        facts,
       );
       return resolution.effective !== "public";
     },
@@ -576,6 +586,12 @@ function validateServerAttestation({
     if (
       !scope?.id
       || !scope?.modeResourceId
+      || (
+        scope.modeEditorAdapter != null
+        && !attestation.requiredBrowserAdapters.some(
+          (adapter) => adapter.id === scope.modeEditorAdapter,
+        )
+      )
       || modeScopeIds.has(scope.id)
       || !attestation.resources.some(
         (resource) => resource.id === scope.modeResourceId && resource.kind === RESOURCE_KIND.MODE,
