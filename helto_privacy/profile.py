@@ -393,8 +393,11 @@ class ArtifactDeclaration:
             self.media_type
         ) is None:
             raise ProfileValidationError("invalid_artifact_media_type")
-        operations = _normalized_stable_ids(self.operations, "duplicate_artifact_operation")
-        if not operations:
+        operations = _normalized_stable_ids(
+            self.operations,
+            "duplicate_artifact_operation",
+        )
+        if not operations and self.retention is not ArtifactRetention.RUN_SCOPED_SPILL:
             raise ProfileValidationError("missing_artifact_operation")
         object.__setattr__(self, "operations", operations)
 

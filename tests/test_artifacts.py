@@ -669,6 +669,45 @@ def test_artifact_retirement_revokes_an_active_browser_lease(artifact_pack):
     assert revoked.code == "PRIVACY_ARTIFACT_LEASE_INVALID"
 
 
+def test_served_transient_batch_items_require_distinct_lifecycle_owners(
+    artifact_pack,
+):
+    pack, _root, _token = artifact_pack
+    handle = pack.artifacts("media")
+
+    async def exercise():
+        shared_owner = generate_artifact_owner_id()
+        retired = await handle.write("replay", shared_owner, b"first")
+        current = await handle.write("replay", shared_owner, b"second")
+        with pytest.raises(ArtifactError) as stale:
+            await handle.read("replay", retired)
+
+        first_distinct = await handle.write(
+            "replay",
+            generate_artifact_owner_id(),
+            b"batch-a",
+        )
+        second_distinct = await handle.write(
+            "replay",
+            generate_artifact_owner_id(),
+            b"batch-b",
+        )
+        return (
+            stale.value,
+            await handle.read("replay", current),
+            await handle.read("replay", first_distinct),
+            await handle.read("replay", second_distinct),
+        )
+
+    stale, current, first_distinct, second_distinct = asyncio.run(exercise())
+    assert stale.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+    assert (current, first_distinct, second_distinct) == (
+        b"second",
+        b"batch-a",
+        b"batch-b",
+    )
+
+
 def test_served_transients_retire_after_consumption_and_bad_caches_are_discarded(
     artifact_pack,
 ):
@@ -790,6 +829,54 @@ def test_cleanup_failures_are_ledgered_retried_and_never_expose_paths(
     report = asyncio.run(handle.sweep())
     assert report.retired == 1
     assert report.pending == 0
+    assert not list(root.rglob("*.hpa"))
+
+
+def test_group_retirement_revokes_all_authority_before_orphan_sweep(
+    artifact_pack,
+    monkeypatch,
+):
+    pack, root, _token = artifact_pack
+    handle = pack.artifacts("media")
+
+    async def create():
+        return (
+            await handle.write(
+                "replay",
+                generate_artifact_owner_id(),
+                b"group-a",
+            ),
+            await handle.write(
+                "replay",
+                generate_artifact_owner_id(),
+                b"group-b",
+            ),
+        )
+
+    first, second = asyncio.run(create())
+    blocked_path = next(root.rglob(f"{first.id}.hpa"))
+    original_unlink = Path.unlink
+
+    def fail_one(path, *args, **kwargs):
+        if path == blocked_path:
+            raise OSError("synthetic cleanup fault")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr(Path, "unlink", fail_one)
+        retired = asyncio.run(
+            handle.retire_group(
+                (("replay", first), ("replay", second))
+            )
+        )
+
+    assert retired == 1
+    for reference in (first, second):
+        with pytest.raises(ArtifactError) as revoked:
+            asyncio.run(handle.read("replay", reference))
+        assert revoked.value.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+    report = asyncio.run(handle.sweep())
+    assert report.retired == 1
     assert not list(root.rglob("*.hpa"))
 
 

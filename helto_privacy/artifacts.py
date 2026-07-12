@@ -512,6 +512,34 @@ async def retire_artifact(
     )
 
 
+async def retire_artifact_group(
+    *,
+    profile: PrivacyProfile,
+    resource_id: str,
+    artifacts: tuple[tuple[str, object], ...] | list[tuple[str, object]],
+) -> int:
+    """Revoke a reference group atomically; defer failed file deletion."""
+
+    identities: set[tuple[str, str]] = set()
+    for artifact_kind, reference in artifacts:
+        declaration = _artifact_declaration(profile, resource_id, artifact_kind)
+        safe_reference = _reference(reference)
+        identity = (declaration.id, safe_reference.id)
+        if identity in identities:
+            raise ArtifactError("PRIVACY_ARTIFACT_REFERENCE_INVALID")
+        identities.add(identity)
+    if not identities:
+        return 0
+    return await _run_blocking(
+        _retire_group_matching,
+        lambda entry: (
+            entry.get("packId") == profile.id
+            and entry.get("resourceId") == resource_id
+            and (entry.get("artifactKind"), entry.get("artifactId")) in identities
+        ),
+    )
+
+
 async def release_owner_artifacts(
     *,
     profile: PrivacyProfile,
@@ -1391,9 +1419,25 @@ def _retire_matching(predicate, fail_on_error: bool) -> int:
     return retired
 
 
+def _retire_group_matching(predicate) -> int:
+    """Revoke group authority even when ciphertext deletion needs a sweep."""
+
+    with _LOCK:
+        ledger = _load_ledger()
+        retired, _failed = _retire_from_ledger(
+            ledger,
+            predicate,
+            forget_failed=True,
+        )
+        _write_ledger(ledger)
+    return retired
+
+
 def _retire_from_ledger(
     ledger: dict[str, object],
     predicate,
+    *,
+    forget_failed: bool = False,
 ) -> tuple[int, int]:
     remaining = []
     retired = 0
@@ -1407,8 +1451,9 @@ def _retire_from_ledger(
             _entry_path(entry).unlink(missing_ok=True)
             retired += 1
         except OSError:
-            entry["cleanupPending"] = True
-            remaining.append(entry)
+            if not forget_failed:
+                entry["cleanupPending"] = True
+                remaining.append(entry)
             failed += 1
     ledger["entries"] = remaining
     return retired, failed

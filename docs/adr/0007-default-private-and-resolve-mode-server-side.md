@@ -24,3 +24,11 @@ protection early. Reconciliation must transactionally establish the floor's
 private target. Request-only strengthening does not rewrite the established
 scope. Declassification additionally consumes one confirmation capability bound
 to the current session, pack, scope, and target.
+
+Workflow inputs that declare mode for one concrete node execution use the bound
+mode handle's node-local resolution entry point. A consumer adapter may
+normalize its legacy widget value, but the shared server still applies scope
+relationships and supplied upstream, artifact, execution, record, request, and
+captured-state floors. This resolution is not persisted as a pack-wide
+declaration, so concurrent nodes with different explicit settings cannot race
+through one global adapter state.

@@ -13,6 +13,21 @@ for that reference, including a stream already in progress. The browser's
 attested artifact handle exchanges the reference for its operation-scoped
 preview lease.
 
+Multi-item previews use `write_group()` and `retire_group()`. Each item gets a
+distinct served-transient owner so retention never invalidates a sibling, while
+replacement revokes the complete prior reference set under one ledger lock.
+If deleting ciphertext is interrupted, the ledger still forgets the complete
+old group so its references become unreadable immediately; startup orphan sweep
+finishes the physical cleanup.
+
+`RunScopedArtifactPublicationService` is the pause/replay spill seam. It opens
+one exactly-once cleanup session over `ArtifactHandle.run()`, sanitizes
+read/write/cleanup failures, invalidates every reference when the session
+closes, and leaves interruption recovery to the shared startup sweep. A
+run-scoped spill may declare no browser operation because it is read only by its
+own server-side run; all other retention classes must still declare at least one
+typed lease operation.
+
 `RootBoundSourceLeasePublisher` is the existing-file seam. Consumers remain
 responsible for deciding which roots and media formats are valid and return a
 `root_bound_source(...)` descriptor. Only path-free lease data crosses to the

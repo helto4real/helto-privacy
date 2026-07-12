@@ -15,14 +15,18 @@ from .artifacts import (
     RootBoundSource,
     generate_artifact_owner_id,
     issue_root_bound_source_lease,
+    retire_artifact_group,
     root_bound_source,
 )
 from .artifact_publication import (
     ArtifactPublicationService,
     ArtifactPublicationError,
     PublishedArtifactReference,
+    PublishedRunArtifactReference,
     PublishedSourceLease,
     RootBoundSourceLeasePublisher,
+    RunScopedArtifactPublication,
+    RunScopedArtifactPublicationService,
 )
 from .comfy_ui import register_helto_privacy_ui, register_legacy_key_dir
 from .concurrency import run_blocking_adapter

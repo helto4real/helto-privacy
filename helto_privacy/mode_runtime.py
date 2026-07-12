@@ -135,6 +135,28 @@ def resolve_bound_mode(
         return resolution
 
 
+def resolve_bound_declaration(
+    installation,
+    mode_resource_id: str,
+    scope_id: str,
+    declaration: object,
+    facts: ModeFacts | None,
+) -> ModeResolution:
+    """Resolve a consumer-normalized node-local declaration server-side."""
+
+    scope = _scope(installation, mode_resource_id, scope_id)
+    supplied_facts = facts if isinstance(facts, ModeFacts) else ModeFacts()
+    with _TRANSITION_LOCK:
+        require_stable_bound_scope(installation, scope.id)
+        return _resolve_declared_mode(
+            installation,
+            mode_resource_id,
+            scope,
+            declaration,
+            supplied_facts,
+        )
+
+
 def _initial_established_mode(
     resolution: ModeResolution,
     facts: ModeFacts,

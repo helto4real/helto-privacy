@@ -376,15 +376,15 @@ area, and replay bundle follows shared artifact lifecycle rules.
 
 **Blocked by:** Replace private-media tokens with leases.
 
-- [ ] Declare node-local mode sources, artifact purposes/retention, ownership,
+- [x] Declare node-local mode sources, artifact purposes/retention, ownership,
       and the complete derivative inventory for all affected media nodes.
-- [ ] Bind existing encoders, output routing, filename rules, source roots,
+- [x] Bind existing encoders, output routing, filename rules, source roots,
       cache keys, replay serialization, and pause/release behavior to mode,
       artifact, lease, and execution handles.
-- [ ] Eliminate request-authoritative privacy booleans, named plaintext private
+- [x] Eliminate request-authoritative privacy booleans, named plaintext private
       staging, local encrypted-temp branches, and consumer cleanup policy behind
       the inactive path.
-- [ ] Preserve output/media semantics and prove transition purge, replay
+- [x] Preserve output/media semantics and prove transition purge, replay
       cleanup, interruption, restart, and leak-oracle behavior.
 
 ## Move queue persistence, capture and replay

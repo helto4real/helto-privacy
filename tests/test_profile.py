@@ -61,6 +61,34 @@ def test_artifact_operations_must_use_the_typed_lease_contract():
     assert generic.value.code == "artifact_operation_must_use_typed_contract"
 
 
+def test_only_run_scoped_spills_may_omit_browser_operations():
+    spill = ArtifactDeclaration(
+        "replay-spill",
+        "media",
+        "main",
+        "replay-spill",
+        "artifact",
+        1,
+        ArtifactRetention.RUN_SCOPED_SPILL,
+        (),
+    )
+    assert spill.operations == ()
+
+    with pytest.raises(ProfileValidationError) as missing:
+        ArtifactDeclaration(
+            "thumbnail",
+            "media",
+            "main",
+            "thumbnail",
+            "artifact",
+            1,
+            ArtifactRetention.REGENERABLE_CACHE,
+            (),
+            media_type="image/webp",
+        )
+    assert missing.value.code == "missing_artifact_operation"
+
+
 def test_record_reveal_contract_requires_explicit_fields_and_fixed_operations():
     with pytest.raises(ProfileValidationError) as missing_fields:
         RecordRevealProjection("use", ())

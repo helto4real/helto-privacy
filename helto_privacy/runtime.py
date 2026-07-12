@@ -173,6 +173,22 @@ class ModeHandle(_ResourceHandle):
             facts,
         )
 
+    def resolve_declaration(
+        self,
+        scope_id: str,
+        declaration: object,
+        facts=None,
+    ):
+        from .mode_runtime import resolve_bound_declaration
+
+        return resolve_bound_declaration(
+            self._installation,
+            self.resource_id,
+            scope_id,
+            declaration,
+            facts,
+        )
+
     def transition(
         self,
         scope_id: str,
@@ -489,6 +505,19 @@ class ArtifactHandle(_ResourceHandle):
             resource_id=self.resource_id,
             artifact_kind=artifact_kind,
             reference=reference,
+        )
+
+    async def retire_group(
+        self,
+        artifacts: tuple[tuple[str, object], ...] | list[tuple[str, object]],
+    ) -> int:
+        self.readiness.require_ready()
+        from .artifacts import retire_artifact_group
+
+        return await retire_artifact_group(
+            profile=self._installation.profile,
+            resource_id=self.resource_id,
+            artifacts=artifacts,
         )
 
     async def release_owner(self, owner_id: str) -> int:

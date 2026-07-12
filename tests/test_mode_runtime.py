@@ -1,5 +1,6 @@
 import asyncio
 from pathlib import Path
+import threading
 
 import helto_privacy.artifacts as artifacts
 import helto_privacy.keystore as keystore
@@ -362,6 +363,87 @@ def test_bound_mode_handle_allows_explicit_public_without_floor(monkeypatch):
 
     assert resolution.effective is EffectivePrivacyMode.PUBLIC
     assert resolution.floors == ()
+
+
+def test_bound_mode_handle_resolves_node_local_declaration_and_floors(monkeypatch):
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    adapter = ModeSourceAdapter(
+        {
+            "global": DeclaredPrivacyMode.PUBLIC,
+            "local": DeclaredPrivacyMode.PRIVATE,
+        }
+    )
+    pack = runtime.install(_profile(), {"mode-source": adapter})
+    mode = pack.mode("privacy-mode")
+
+    public = mode.resolve_declaration("local", DeclaredPrivacyMode.PUBLIC)
+    private = mode.resolve_declaration(
+        "local",
+        DeclaredPrivacyMode.PUBLIC,
+        ModeFacts(
+            upstream=(
+                ModeEvidence("private-input", EffectivePrivacyMode.PRIVATE),
+            )
+        ),
+    )
+    malformed = mode.resolve_declaration("local", "false")
+
+    assert public.effective is EffectivePrivacyMode.PUBLIC
+    assert private.effective is EffectivePrivacyMode.PRIVATE
+    assert [(floor.kind, floor.source_id) for floor in private.floors] == [
+        (PrivacyFloorKind.UPSTREAM, "private-input")
+    ]
+    assert malformed.effective is EffectivePrivacyMode.PRIVATE
+
+
+def test_node_local_resolution_holds_transition_lock_through_policy(monkeypatch):
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    adapter = ModeSourceAdapter(
+        {
+            "global": DeclaredPrivacyMode.PUBLIC,
+            "local": DeclaredPrivacyMode.PRIVATE,
+        }
+    )
+    pack = runtime.install(_profile(), {"mode-source": adapter})
+    entered = threading.Event()
+    release = threading.Event()
+    contender_acquired = threading.Event()
+    errors = []
+    original = mode_runtime._resolve_declared_mode
+
+    def blocking_resolution(*args, **kwargs):
+        entered.set()
+        if not release.wait(2):
+            raise AssertionError("resolution test did not release")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(mode_runtime, "_resolve_declared_mode", blocking_resolution)
+
+    def resolve():
+        try:
+            pack.mode("privacy-mode").resolve_declaration(
+                "local",
+                DeclaredPrivacyMode.PUBLIC,
+            )
+        except BaseException as exc:
+            errors.append(exc)
+
+    def contend():
+        with mode_runtime._TRANSITION_LOCK:
+            contender_acquired.set()
+
+    resolver = threading.Thread(target=resolve)
+    resolver.start()
+    assert entered.wait(1)
+    contender = threading.Thread(target=contend)
+    contender.start()
+    assert not contender_acquired.wait(0.05)
+    release.set()
+    resolver.join(2)
+    contender.join(2)
+
+    assert errors == []
+    assert contender_acquired.is_set()
 
 
 def test_persistent_floor_change_blocks_until_protection_reconciles(monkeypatch):
