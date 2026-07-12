@@ -148,7 +148,7 @@ export function createPrivacySnapshotCoordinator({
           await revealEntry(entry);
         }
       } else if (typeof entry.adapter.apply === "function") {
-        entry.adapter.apply(entry.owner, entry.envelope, entry.context);
+        entry.adapter.apply(entry.owner, entry.envelope, adapterContext(entry));
       }
     }
     entry.initialized = true;
@@ -196,10 +196,10 @@ export function createPrivacySnapshotCoordinator({
       if (!result || !("value" in result) || typeof entry.adapter.apply !== "function") {
         throw new Error("invalid reveal");
       }
-      entry.adapter.apply(entry.owner, result.value, entry.context);
+      entry.adapter.apply(entry.owner, result.value, adapterContext(entry));
     } catch {
       if (typeof entry.adapter.clear === "function") {
-        entry.adapter.clear(entry.owner, entry.context);
+        entry.adapter.clear(entry.owner, adapterContext(entry));
       }
       throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED");
     }
@@ -497,7 +497,7 @@ export function createPrivacySnapshotCoordinator({
         }
         entry.settledGeneration = entry.envelope ? entry.generation : -1;
         if (typeof entry.adapter.clear === "function") {
-          entry.adapter.clear(entry.owner, entry.context);
+          entry.adapter.clear(entry.owner, adapterContext(entry));
         }
       }
       return;
@@ -580,7 +580,7 @@ export function createPrivacySnapshotCoordinator({
       entry.disposition = ENVELOPE_DISPOSITION.VERIFIED_CURRENT;
       entry.settledGeneration = entry.generation;
       if (typeof entry.adapter.apply === "function") {
-        entry.adapter.apply(entry.owner, entry.envelope, entry.context);
+        entry.adapter.apply(entry.owner, entry.envelope, adapterContext(entry));
       }
       return;
     }
@@ -810,7 +810,7 @@ function validateAdapter(adapter) {
 
 function normalizeLive(entry) {
   try {
-    return entry.adapter.normalize(entry.owner, entry.context);
+    return entry.adapter.normalize(entry.owner, adapterContext(entry));
   } catch {
     throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_NORMALIZATION_FAILED");
   }
@@ -818,7 +818,7 @@ function normalizeLive(entry) {
 
 function readProtected(entry) {
   try {
-    const value = entry.adapter.readProtected(entry.owner, entry.context);
+    const value = entry.adapter.readProtected(entry.owner, adapterContext(entry));
     if (typeof value !== "string") {
       throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_READ_FAILED");
     }
@@ -830,7 +830,7 @@ function readProtected(entry) {
 
 function writeProtected(entry, envelope) {
   try {
-    entry.adapter.writeProtected(entry.owner, envelope, entry.context);
+    entry.adapter.writeProtected(entry.owner, envelope, adapterContext(entry));
     const written = readProtected(entry);
     if (written !== envelope) {
       throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_WRITE_FAILED");
@@ -838,6 +838,13 @@ function writeProtected(entry, envelope) {
   } catch {
     throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_WRITE_FAILED");
   }
+}
+
+function adapterContext(entry) {
+  return Object.freeze({
+    ...entry.context,
+    effectiveMode: entry.private ? "private" : "public",
+  });
 }
 
 function requireEntryInitialized(entry) {

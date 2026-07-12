@@ -109,6 +109,45 @@ def test_equal_concurrent_preparation_is_deduplicated_and_stale_result_loses(tmp
     )
 
 
+def test_adapter_context_exposes_resolved_effective_mode(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const seen = [];
+        const node = {
+          type: "SyntheticNode",
+          live: { value: "edited" },
+          protected: "ENVELOPE_INITIAL",
+          writes: [],
+        };
+        const coordinator = createPrivacySnapshotCoordinator({
+          packId: "helto.test",
+          fields: [field],
+          adapters: {
+            "state-ui": {
+              ...adapter(),
+              normalize(owner, context) {
+                seen.push(context.effectiveMode);
+                return owner.live;
+              },
+            },
+          },
+          transport: {
+            disposition: async () => ({
+              disposition: ENVELOPE_DISPOSITION.VERIFIED_CURRENT,
+            }),
+            protect: async () => ({ envelope: "ENVELOPE_EDITED" }),
+          },
+          resolvePrivate: async () => true,
+        });
+        await coordinator.registerNode(node);
+        coordinator.markEdited(node, "private-state");
+        await coordinator.settle("manual-save");
+        assert.deepEqual(seen, ["private"]);
+        """,
+    )
+
+
 def test_locked_and_failed_ciphertext_is_save_only_and_byte_exact(tmp_path):
     run_node_module_test(
         tmp_path,
