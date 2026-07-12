@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from ..envelope import ALGORITHM, PrivacyEnvelopeCodec
+
 from ..migration import LegacyReaderUnit
 from ._utils_common import (
     UTILS_QUEUE_PREFIX,
@@ -49,6 +51,10 @@ UTILS_QUEUE_SQLITE_READER_IDS = MappingProxyType(
         for generation in _GENERATIONS[1:]
     }
 )
+UTILS_QUEUE_CURRENT_JSON_READER_ID = "utils-queue-current-json-v1"
+UTILS_QUEUE_CURRENT_SQLITE_READER_ID = "utils-queue-current-sqlite-v1"
+_CURRENT_SCHEMA = "helto.comfyui-utils"
+_QUEUE_PURPOSE = "queue-manager-state"
 
 
 def _generation_units() -> dict[str, LegacyReaderUnit]:
@@ -177,6 +183,114 @@ class _UtilsQueueSqliteReader:
         return decode_json_object(self._byte_reader.read(encrypted, context))
 
 
+class _UtilsQueueCurrentJsonReader:
+    _PAYLOAD_FIELDS = {"version", "privacy_enabled", "server_session_id", "payload"}
+    _STATE_FIELDS = {"version", "privacy_enabled", "server_session_id", "state"}
+
+    def probe(self, source: object, _context: object) -> bool:
+        if (
+            not isinstance(source, Mapping)
+            or frozenset(source)
+            not in {frozenset(self._PAYLOAD_FIELDS), frozenset(self._STATE_FIELDS)}
+            or source.get("version") != 1
+            or not isinstance(source.get("server_session_id"), str)
+            or not source.get("server_session_id")
+        ):
+            return False
+        if source.get("privacy_enabled") is False:
+            value = source.get("payload") if "payload" in source else source.get("state")
+            return isinstance(value, Mapping)
+        if source.get("privacy_enabled") is not True or not isinstance(
+            source.get("payload"), str
+        ):
+            return False
+        try:
+            envelope = decode_json_object(source["payload"].encode("utf-8"))
+        except ValueError:
+            return False
+        return PrivacyEnvelopeCodec(_CURRENT_SCHEMA).is_encrypted_payload(envelope)
+
+    def read(self, source: object, context: object) -> dict[str, object]:
+        if not self.probe(source, context):
+            raise ValueError("Current Utils queue JSON is invalid.")
+        if source.get("privacy_enabled") is False:
+            value = source.get("payload") if "payload" in source else source.get("state")
+            return dict(value)
+        decoded = PrivacyEnvelopeCodec(_CURRENT_SCHEMA).decrypt_state(
+            decode_json_object(source["payload"].encode("utf-8"))
+        )
+        state = decoded.get("state") if isinstance(decoded, Mapping) else None
+        if not isinstance(state, Mapping):
+            raise ValueError("Current Utils queue JSON is invalid.")
+        return dict(state)
+
+
+class _UtilsQueueCurrentSqliteReader:
+    _FIELDS = {
+        "version",
+        "privacy_enabled",
+        "encrypted_at_rest",
+        "server_session_id",
+        "updated_at",
+        "payload",
+    }
+
+    def probe(self, source: object, _context: object) -> bool:
+        if (
+            not isinstance(source, Mapping)
+            or set(source) != self._FIELDS
+            or source.get("version") != 1
+            or not isinstance(source.get("server_session_id"), str)
+            or not source.get("server_session_id")
+            or not isinstance(source.get("updated_at"), int)
+            or isinstance(source.get("updated_at"), bool)
+        ):
+            return False
+        try:
+            payload = standard_b64decode(source.get("payload"))
+        except ValueError:
+            return False
+        if (
+            source.get("privacy_enabled") is False
+            and source.get("encrypted_at_rest") is False
+        ):
+            try:
+                decode_json_object(payload)
+            except ValueError:
+                return False
+            return True
+        if (
+            source.get("privacy_enabled") is not True
+            or source.get("encrypted_at_rest") is not True
+        ):
+            return False
+        try:
+            envelope = decode_json_object(payload)
+        except ValueError:
+            return False
+        codec = PrivacyEnvelopeCodec(_CURRENT_SCHEMA)
+        return (
+            envelope.get("encrypted") is True
+            and envelope.get("algorithm") == ALGORITHM
+            and envelope.get("purpose") == _QUEUE_PURPOSE
+            and envelope.get("schema")
+            in {codec.byte_schema, codec.chunked_byte_schema}
+        )
+
+    def read(self, source: object, context: object) -> dict[str, object]:
+        if not self.probe(source, context):
+            raise ValueError("Current Utils queue SQLite row is invalid.")
+        payload = standard_b64decode(source["payload"])
+        if source.get("encrypted_at_rest") is False:
+            return decode_json_object(payload)
+        envelope = decode_json_object(payload)
+        decoded = PrivacyEnvelopeCodec(_CURRENT_SCHEMA).decrypt_bytes(
+            envelope,
+            _QUEUE_PURPOSE,
+        )
+        return decode_json_object(decoded)
+
+
 def utils_workflow_reader_units() -> tuple[LegacyReaderUnit, ...]:
     units = _generation_units()
     return tuple(
@@ -214,6 +328,20 @@ def utils_queue_reader_units() -> tuple[LegacyReaderUnit, ...]:
                 ),
             )
         )
+    readers.extend(
+        (
+            LegacyReaderUnit(
+                UTILS_QUEUE_CURRENT_JSON_READER_ID,
+                "Utils current queue JSON container",
+                _UtilsQueueCurrentJsonReader(),
+            ),
+            LegacyReaderUnit(
+                UTILS_QUEUE_CURRENT_SQLITE_READER_ID,
+                "Utils current queue SQLite container",
+                _UtilsQueueCurrentSqliteReader(),
+            ),
+        )
+    )
     return tuple(readers)
 
 

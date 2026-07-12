@@ -732,6 +732,7 @@ legacy-directory argument exists only for coordinated cutover. It registers:
 - `GET  /helto_privacy/ui/privacy.js` — the shared browser client and UI
 - `GET  /helto_privacy/ui/privacy_records.js` — opaque-ID validation and shell redaction
 - `GET  /helto_privacy/ui/privacy_snapshot.js` — runtime snapshot coordinator
+- `GET  /helto_privacy/ui/privacy_queue.js` — settled queue capture and fresh replay
 - `GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js` — the exact
   browser profile compiler
 

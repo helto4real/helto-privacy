@@ -371,6 +371,13 @@ both ComfyUI passes. Execution-bearing reasons fail before queue logic when any
 private field is locked or failed. Never catch a `PRIVACY_SNAPSHOT_*` error and
 substitute an old envelope, empty/default state, or plaintext.
 
+Queue products should import `privacy_queue.js` and create one
+`createPrivacyQueueCoordinator`. Its capture methods settle the graph-wide
+barrier for every batch item. Its replay method accepts a stored workflow
+snapshot, but requires the product adapter to rebuild a new prompt inside a
+fresh `runWithSnapshot("replay", ...)` transaction; it never submits the stored
+executable payload or its expired grants directly.
+
 ## Step 7 — Move private execution behind grants
 
 For every product input that affects a private result, set `execution=True` on

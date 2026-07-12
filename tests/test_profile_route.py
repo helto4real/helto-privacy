@@ -855,6 +855,9 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     snapshot_module_handler = prompt_server.routes.handlers[
         ("GET", comfy_ui.SNAPSHOT_MODULE_ROUTE)
     ]
+    queue_module_handler = prompt_server.routes.handlers[
+        ("GET", comfy_ui.QUEUE_MODULE_ROUTE)
+    ]
     client_module_response = asyncio.run(
         client_module_handler(types.SimpleNamespace())
     )
@@ -865,6 +868,11 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     )
     assert snapshot_module_response.status == 200
     assert "createPrivacySnapshotCoordinator" in snapshot_module_response.kwargs["text"]
+    queue_module_response = asyncio.run(
+        queue_module_handler(types.SimpleNamespace())
+    )
+    assert queue_module_response.status == 200
+    assert "createPrivacyQueueCoordinator" in queue_module_response.kwargs["text"]
     release = _release(ready=False)
     suite = SuiteInstallation(release)
     suite._verify_inventory(_inventory(release.manifest))

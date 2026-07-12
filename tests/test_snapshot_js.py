@@ -693,3 +693,53 @@ def test_scoped_graph_invoker_reuses_snapshot_and_unrelated_calls_queue(tmp_path
         );
         """,
     )
+
+
+def test_queue_manager_settles_every_registered_pack_coordinator(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const events = [];
+        const coordinatorA = {
+          settle: async (reason) => {
+            events.push(`a:settle:${reason}`);
+            return { revision: 1, fields: [] };
+          },
+          activateTransaction: () => events.push("a:activate"),
+          requireActiveTransaction: () => {},
+          releaseTransaction: () => events.push("a:release"),
+          requireSettled: () => {},
+        };
+        const coordinatorB = {
+          settle: async (reason) => {
+            events.push(`b:settle:${reason}`);
+            return { revision: 2, fields: [] };
+          },
+          activateTransaction: () => events.push("b:activate"),
+          requireActiveTransaction: () => {},
+          releaseTransaction: () => events.push("b:release"),
+          requireSettled: () => {},
+        };
+        const graph = { serialize: () => ({ nodes: [] }) };
+        const app = {
+          rootGraph: graph,
+          graphToPrompt: async () => ({ workflow: graph.serialize(), output: {} }),
+        };
+        const barrier = installGraphSerializationBarrier(
+          app,
+          () => [coordinatorA, coordinatorB],
+        );
+        await barrier.runWithSnapshot(
+          "queue-manager",
+          ({ graphToPrompt }) => graphToPrompt(),
+        );
+        assert.deepEqual(events, [
+          "a:settle:queue-manager",
+          "b:settle:queue-manager",
+          "a:activate",
+          "b:activate",
+          "b:release",
+          "a:release",
+        ]);
+        """,
+    )

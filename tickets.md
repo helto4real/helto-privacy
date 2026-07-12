@@ -395,14 +395,14 @@ captures/replays only settled snapshots with fresh execution grants.
 **Blocked by:** Move selector workflow state and operations; Move Prompt
 Enhancer and provider credentials; Move Privacy Show Any.
 
-- [ ] Declare private-by-default queue state, protected operations, sensitive
+- [x] Declare private-by-default queue state, protected operations, sensitive
       fields, generic status projection, and semantic comparison rules.
-- [ ] Bind queue normalization, SQLite identity/revision, state transitions,
+- [x] Bind queue normalization, SQLite identity/revision, state transitions,
       batching, capture, replay, rerun, preview, and delete to singleton,
       snapshot, execution, readiness, and authorization handles.
-- [ ] Migrate current JSON and genuine historical JSON/SQLite queue forms only
+- [x] Migrate current JSON and genuine historical JSON/SQLite queue forms only
       after current write/read-back verification.
-- [ ] Prove all registered workflow barriers settle before capture, replays get
+- [x] Prove all registered workflow barriers settle before capture, replays get
       fresh grants, locked/missing references reject, and queue-domain behavior
       remains unchanged.
 

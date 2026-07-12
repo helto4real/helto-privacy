@@ -30,6 +30,8 @@ Registered surface (pack-neutral, stable):
   validation and resolution.
 - ``GET  /helto_privacy/ui/privacy_snapshot.js`` — runtime-only snapshot and
   serialization barrier mechanics.
+- ``GET  /helto_privacy/ui/privacy_queue.js`` — settled queue capture and
+  fresh-grant replay orchestration.
 - ``GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js`` — exact-suite
   browser profile runtime.
 
@@ -66,6 +68,7 @@ CLIENT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_client.js"
 RECORDS_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_records.js"
 ARTIFACTS_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_artifacts.js"
 SNAPSHOT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_snapshot.js"
+QUEUE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_queue.js"
 PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile/{{manifest_digest}}.js"
 _WEB_DIR = Path(__file__).resolve().parent / "web"
 
@@ -930,6 +933,23 @@ def register_helto_privacy_ui(
     async def get_helto_privacy_snapshot_module(_request):
         try:
             source = (_WEB_DIR / "privacy_snapshot.js").read_text(encoding="utf-8")
+        except OSError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
+                500,
+            )
+        return web.Response(
+            text=source,
+            content_type="application/javascript",
+            charset="utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    @routes.get(QUEUE_MODULE_ROUTE)
+    async def get_helto_privacy_queue_module(_request):
+        try:
+            source = (_WEB_DIR / "privacy_queue.js").read_text(encoding="utf-8")
         except OSError:
             return _privacy_error_response(
                 web,

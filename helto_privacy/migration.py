@@ -1130,13 +1130,23 @@ def _persist_obligation(
     with _LOCK:
         state = _load_state()
         obligations = state.setdefault("obligations", {})
+        finalize_pending_ids = {
+            obligation_id
+            for pending in state.get("transactions", {}).values()
+            if isinstance(pending, dict)
+            and pending.get("phase") == "finalize-pending"
+            for obligation_id in _pending_obligation_ids(pending)
+        }
         for obligation_id, item in obligations.items():
             if (
                 isinstance(item, dict)
                 and item.get("packId") == pack_id
                 and item.get("bindingId") == binding.id
                 and item.get("sourceId") == source_id
-                and item.get("disposition") == "unresolved"
+                and (
+                    item.get("disposition") == "unresolved"
+                    or obligation_id in finalize_pending_ids
+                )
             ):
                 if audit_scope_id is not None:
                     item["auditScopeId"] = audit_scope_id

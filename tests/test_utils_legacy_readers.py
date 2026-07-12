@@ -32,6 +32,8 @@ from helto_privacy import (
     UTILS_PRIVACY_KEY_BIN_IMPORT_ID,
     UTILS_PROVIDER_SETTINGS_PLAINTEXT_READER_ID,
     UTILS_PROVIDER_SETTINGS_WRAPPER_READER_ID,
+    UTILS_QUEUE_CURRENT_JSON_READER_ID,
+    UTILS_QUEUE_CURRENT_SQLITE_READER_ID,
     UTILS_QUEUE_JSON_READER_IDS,
     UTILS_QUEUE_SQLITE_READER_IDS,
     UTILS_RAW_XOR_READER_ID,
@@ -248,6 +250,77 @@ def test_queue_json_and_sqlite_containers_decode_exact_historical_forms(generati
     assert sqlite_unit.reader.read(
         item["queueSqlite"]["value"], _context()
     ) == fixture["expected"]["queue"]
+
+
+def test_current_queue_json_and_sqlite_readers_are_exact(tmp_path, monkeypatch):
+    monkeypatch.setenv("HELTO_PRIVACY_KEYSTORE", str(tmp_path / "keystore.json"))
+    monkeypatch.setenv("HELTO_PRIVACY_SESSION_DIR", str(tmp_path / "session"))
+    monkeypatch.setattr(keystore, "SCRYPT_N", 2**12)
+    keystore.initialize_keystore("synthetic current queue password")
+    state = {"version": 1, "privacy_enabled": True, "queue": [], "history": []}
+    codec = PrivacyEnvelopeCodec("helto.comfyui-utils")
+    units = {unit.id: unit for unit in utils_legacy_reader_units()}
+    json_source = {
+        "version": 1,
+        "privacy_enabled": True,
+        "server_session_id": "synthetic-session",
+        "payload": json.dumps(
+            codec.encrypt_state({"state": state}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+    }
+    sqlite_source = {
+        "version": 1,
+        "privacy_enabled": True,
+        "encrypted_at_rest": True,
+        "server_session_id": "synthetic-session",
+        "updated_at": 10,
+        "payload": base64.b64encode(
+            json.dumps(
+                codec.encrypt_bytes(
+                    json.dumps(state, sort_keys=True, separators=(",", ":")).encode(),
+                    "queue-manager-state",
+                ),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).decode("ascii"),
+    }
+
+    json_reader = units[UTILS_QUEUE_CURRENT_JSON_READER_ID].reader
+    sqlite_reader = units[UTILS_QUEUE_CURRENT_SQLITE_READER_ID].reader
+    assert json_reader.probe(json_source, object()) is True
+    assert json_reader.read(json_source, object()) == state
+    assert sqlite_reader.probe(sqlite_source, object()) is True
+    assert sqlite_reader.read(sqlite_source, object()) == state
+    assert json_reader.probe({**json_source, "extra": True}, object()) is False
+    assert sqlite_reader.probe({**sqlite_source, "updated_at": True}, object()) is False
+
+    plaintext_json = {
+        "version": 1,
+        "privacy_enabled": False,
+        "server_session_id": "synthetic-session",
+        "payload": state,
+    }
+    plaintext_sqlite = {
+        **sqlite_source,
+        "privacy_enabled": False,
+        "encrypted_at_rest": False,
+        "payload": base64.b64encode(
+            json.dumps(state, sort_keys=True, separators=(",", ":")).encode()
+        ).decode("ascii"),
+    }
+    assert json_reader.probe(plaintext_json, object()) is True
+    assert json_reader.read(plaintext_json, object()) == state
+    assert sqlite_reader.probe(plaintext_sqlite, object()) is True
+    assert sqlite_reader.read(plaintext_sqlite, object()) == state
+    assert json_reader.probe(
+        {**plaintext_json, "privacy_enabled": True}, object()
+    ) is False
+    assert sqlite_reader.probe(
+        {**plaintext_sqlite, "encrypted_at_rest": True}, object()
+    ) is False
 
 
 def test_utils_fixture_catalog_is_content_addressed_and_provenance_recorded():
