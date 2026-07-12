@@ -438,14 +438,14 @@ without per-widget crypto.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare Generate/Krea workflow fields, legacy boolean mapping, upstream
+- [x] Declare Generate/Krea workflow fields, legacy boolean mapping, upstream
       privacy floor, semantic prompt projections, and protected operations.
-- [ ] Bind widget locate/apply/clear, linked-versus-local resolution, unlinked
+- [x] Bind widget locate/apply/clear, linked-versus-local resolution, unlinked
       workflow recovery, semantic normalization, and existing pipeline dispatch
       to workflow/execution handles.
-- [ ] Stage removal of browser serialization memo/encryption and backend direct
+- [x] Stage removal of browser serialization memo/encryption and backend direct
       decryption while preserving the product pipeline until AIO activation.
-- [ ] Prove genuine AIO v1 migration, one-snapshot identity, private RAM-cache
+- [x] Prove genuine AIO v1 migration, one-snapshot identity, private RAM-cache
       policy, linked input behavior, grant/reveal failure, and unchanged outputs.
 
 ## Move the Ideogram prompt builder
