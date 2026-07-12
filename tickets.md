@@ -456,14 +456,14 @@ prompt, palette, element, coordinate, and preview behavior remains intact.
 
 **Blocked by:** Move Generate and Krea prompts.
 
-- [ ] Declare every sensitive widget and mirrored property/workflow key, mode
+- [x] Declare every sensitive widget and mirrored property/workflow key, mode
       source, semantic execution projection, and Generate-derived floor.
-- [ ] Bind DOM/widget normalization, apply/clear, pending-edit flush, semantic
+- [x] Bind DOM/widget normalization, apply/clear, pending-edit flush, semantic
       projection, and product prompt construction to shared workflow/execution
       handles.
-- [ ] Stage removal of synchronous field/whole-state writers, custom locked
+- [x] Stage removal of synchronous field/whole-state writers, custom locked
       preservation, local recovery, and toggle policy until AIO activation.
-- [ ] Prove one receipt covers every mirror, AIO v1 migration is current-only,
+- [x] Prove one receipt covers every mirror, AIO v1 migration is current-only,
       locked bytes survive save, failures block, and builder product tests pass.
 
 ## Move the Ideogram prompt library
