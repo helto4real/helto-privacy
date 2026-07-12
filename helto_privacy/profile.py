@@ -438,6 +438,7 @@ class SemanticExecutionProjection:
     workflow_resource_id: str
     projection_adapter: str
     dispatch_adapter: str
+    input_name: str = "private_execution"
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
@@ -445,6 +446,7 @@ class SemanticExecutionProjection:
         _validate_stable_id(self.workflow_resource_id)
         _validate_stable_id(self.projection_adapter)
         _validate_stable_id(self.dispatch_adapter)
+        _validate_stable_id(self.input_name)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1123,6 +1125,7 @@ class PrivacyProfile:
                     "workflowResourceId": projection.workflow_resource_id,
                     "projectionAdapter": projection.projection_adapter,
                     "dispatchAdapter": projection.dispatch_adapter,
+                    "inputName": projection.input_name,
                 }
                 for projection in self.execution_projections
             ],

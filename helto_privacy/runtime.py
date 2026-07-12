@@ -249,6 +249,7 @@ class WorkflowHandle(_ResourceHandle):
         )
 
     def protect(self, field_id: str, value: object, authorization):
+        self.readiness.require_ready()
         from .snapshot import protect_field_value
 
         field_declaration, state_adapter = self._snapshot_field(field_id)
@@ -258,6 +259,21 @@ class WorkflowHandle(_ResourceHandle):
             state_adapter=state_adapter,
             value=value,
             authorization=authorization,
+        )
+
+    def protect_runtime(self, field_id: str, value: object):
+        """Protect backend-produced state without accepting a reveal capability."""
+
+        self.readiness.require_ready()
+        from .mode_runtime import require_stable_bound_scope
+        from .snapshot import protect_runtime_field_value
+
+        field_declaration, state_adapter = self._snapshot_field(field_id)
+        require_stable_bound_scope(self._installation, field_declaration.scope_id)
+        return protect_runtime_field_value(
+            field_declaration=field_declaration,
+            state_adapter=state_adapter,
+            value=value,
         )
 
     def _snapshot_field(self, field_id: str):
@@ -853,6 +869,7 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "id": projection.id,
                     "executionResourceId": projection.execution_resource_id,
                     "workflowResourceId": projection.workflow_resource_id,
+                    "inputName": projection.input_name,
                 }
                 for projection in profile.execution_projections
             ],

@@ -77,6 +77,7 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 id: "timeline-render",
                 executionResourceId: "render",
                 workflowResourceId: "timeline",
+                inputName: "private_execution",
               }}],
               records: [{{
                 id: "prompt-record",
@@ -106,6 +107,8 @@ def run_node_module_test(tmp_path, body: str) -> None:
                 payload = {{ ok: true, disposition: "verified-current" }};
               }} else if (target.endsWith("/protect")) {{
                 payload = {{ ok: true, envelope: "SYNTHETIC_CURRENT_ENVELOPE" }};
+              }} else if (target.endsWith("/reveal")) {{
+                payload = {{ ok: true, value: {{ value: "SYNTHETIC_REVEALED_STATE" }} }};
               }} else if (target.endsWith("/modes")) {{
                 payload = {{ ok: true, scopes: [{{
                   id: "global",

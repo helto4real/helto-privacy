@@ -333,6 +333,27 @@ def test_protect_normalizes_and_returns_only_current_envelope(snapshot_pack):
     assert "synthetic" not in repr(protected)
 
 
+def test_runtime_protect_has_no_request_or_reveal_capability(snapshot_pack):
+    pack, _token, _request = snapshot_pack
+
+    protected = pack.workflow("state").protect_runtime(
+        "private-state",
+        {"value": "synthetic-runtime-result"},
+    )
+
+    assert protected.disposition is EnvelopeDisposition.VERIFIED_CURRENT
+    assert PrivacyEnvelopeCodec("helto.snapshot-test.v1").decrypt_state(
+        protected.envelope
+    ) == {"normalized": "synthetic-runtime-result"}
+    keystore.lock_keystore()
+    with pytest.raises(SnapshotError) as locked:
+        pack.workflow("state").protect_runtime(
+            "private-state",
+            {"value": "must-not-fall-back"},
+        )
+    assert locked.value.code == "PRIVACY_SNAPSHOT_PROTECTION_FAILED"
+
+
 def test_unknown_field_and_forged_authorization_fail_closed(snapshot_pack):
     pack, _token, request = snapshot_pack
     workflow = pack.workflow("state")

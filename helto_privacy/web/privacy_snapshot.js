@@ -51,9 +51,12 @@ export function createPrivacySnapshotCoordinator({
   timeoutMs = 5000,
   blocked = false,
   resolvePrivate = async () => true,
+  executionProjections = [],
+  prepareExecution = null,
 }) {
   const id = stableId(packId, "PRIVACY_SNAPSHOT_PACK_INVALID");
   const declarations = normalizeFields(fields);
+  const projections = normalizeExecutionProjections(executionProjections);
   const adapterMap = adapters && typeof adapters === "object" ? adapters : {};
   if (
     typeof transport?.disposition !== "function"
@@ -138,6 +141,14 @@ export function createPrivacySnapshotCoordinator({
           entry.edited = true;
           await prepareEntry(entry, { allowUninitialized: true });
         }
+        if (
+          entry.disposition === ENVELOPE_DISPOSITION.VERIFIED_CURRENT
+          && typeof entry.adapter.apply === "function"
+        ) {
+          await revealEntry(entry);
+        }
+      } else if (typeof entry.adapter.apply === "function") {
+        entry.adapter.apply(entry.owner, entry.envelope, entry.context);
       }
     }
     entry.initialized = true;
@@ -173,6 +184,25 @@ export function createPrivacySnapshotCoordinator({
       entry.edited = false;
     }
     return entry.disposition;
+  }
+
+  async function revealEntry(entry) {
+    if (typeof transport?.reveal !== "function") {
+      throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED");
+    }
+    let result;
+    try {
+      result = await transport.reveal(entry.field.id, entry.envelope);
+      if (!result || !("value" in result) || typeof entry.adapter.apply !== "function") {
+        throw new Error("invalid reveal");
+      }
+      entry.adapter.apply(entry.owner, result.value, entry.context);
+    } catch {
+      if (typeof entry.adapter.clear === "function") {
+        entry.adapter.clear(entry.owner, entry.context);
+      }
+      throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED");
+    }
   }
 
   function markEdited(owner, fieldId) {
@@ -466,6 +496,9 @@ export function createPrivacySnapshotCoordinator({
           entry.disposition = ENVELOPE_DISPOSITION.LOCKED_CURRENT;
         }
         entry.settledGeneration = entry.envelope ? entry.generation : -1;
+        if (typeof entry.adapter.clear === "function") {
+          entry.adapter.clear(entry.owner, entry.context);
+        }
       }
       return;
     }
@@ -473,7 +506,15 @@ export function createPrivacySnapshotCoordinator({
       await Promise.all(
         allEntries()
           .filter((entry) => entry.initialized && entry.private)
-          .map((entry) => refreshDisposition(entry)),
+          .map(async (entry) => {
+            await refreshDisposition(entry);
+            if (
+              entry.disposition === ENVELOPE_DISPOSITION.VERIFIED_CURRENT
+              && typeof entry.adapter.apply === "function"
+            ) {
+              await revealEntry(entry);
+            }
+          }),
       );
     }
   }
@@ -486,6 +527,39 @@ export function createPrivacySnapshotCoordinator({
 
   function allEntries() {
     return [...owners.values()].flatMap((entries) => [...entries.values()]);
+  }
+
+  async function injectExecutionReferences(promptData) {
+    if (!projections.length) return promptData;
+    requireActiveExecutionTransaction();
+    if (typeof prepareExecution !== "function") {
+      throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_EXECUTION_BLOCKED");
+    }
+    const output = promptData?.output;
+    if (!output || typeof output !== "object") {
+      throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_EXECUTION_BLOCKED");
+    }
+    for (const projection of projections) {
+      for (const [owner, entries] of owners.entries()) {
+        const fields = [...entries.values()].filter((entry) => (
+          entry.field.workflowResourceId === projection.workflowResourceId
+          && entry.field.execution
+        ));
+        if (!fields.length || fields.every((entry) => entry.private === false)) continue;
+        if (fields.some((entry) => !entry.initialized || entry.private === false)) {
+          throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_EXECUTION_BLOCKED");
+        }
+        const nodeOutput = output[String(owner?.id)];
+        if (!nodeOutput || typeof nodeOutput !== "object") continue;
+        const prepared = await prepareExecution(projection, owner, fields);
+        if (!prepared?.reference || typeof prepared.reference !== "object") {
+          throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_EXECUTION_BLOCKED");
+        }
+        nodeOutput.inputs ??= {};
+        nodeOutput.inputs[projection.inputName] = JSON.stringify(prepared.reference);
+      }
+    }
+    return promptData;
   }
 
   async function refreshMode(entry, { initial = false } = {}) {
@@ -505,6 +579,9 @@ export function createPrivacySnapshotCoordinator({
     if (!nextPrivate) {
       entry.disposition = ENVELOPE_DISPOSITION.VERIFIED_CURRENT;
       entry.settledGeneration = entry.generation;
+      if (typeof entry.adapter.apply === "function") {
+        entry.adapter.apply(entry.owner, entry.envelope, entry.context);
+      }
       return;
     }
     entry.settledGeneration = -1;
@@ -535,7 +612,26 @@ export function createPrivacySnapshotCoordinator({
     releaseTransaction,
     requireActiveTransaction,
     requireActiveExecutionTransaction,
+    injectExecutionReferences,
   });
+}
+
+function normalizeExecutionProjections(values) {
+  if (!Array.isArray(values)) {
+    throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_FIELDS_INVALID");
+  }
+  return Object.freeze(values.map((projection) => Object.freeze({
+    id: stableId(projection?.id, "PRIVACY_SNAPSHOT_FIELD_INVALID"),
+    executionResourceId: stableId(
+      projection?.executionResourceId,
+      "PRIVACY_SNAPSHOT_FIELD_INVALID",
+    ),
+    workflowResourceId: stableId(
+      projection?.workflowResourceId,
+      "PRIVACY_SNAPSHOT_FIELD_INVALID",
+    ),
+    inputName: stableId(projection?.inputName, "PRIVACY_SNAPSHOT_FIELD_INVALID"),
+  })));
 }
 
 export function installGraphSerializationBarrier(app, getCoordinators) {
@@ -568,6 +664,17 @@ export function installGraphSerializationBarrier(app, getCoordinators) {
   const requireAll = (reason) => {
     for (const coordinator of coordinators()) coordinator.requireSettled(reason);
   };
+  const injectExecutionReferences = async (promptData, current) => {
+    let protectedPromptData = promptData;
+    for (const coordinator of current) {
+      if (typeof coordinator.injectExecutionReferences === "function") {
+        protectedPromptData = await coordinator.injectExecutionReferences(
+          protectedPromptData,
+        );
+      }
+    }
+    return protectedPromptData;
+  };
   const runWithTransaction = async (reason, operation) => {
     const current = coordinators();
     const transactions = await Promise.all(
@@ -586,7 +693,8 @@ export function installGraphSerializationBarrier(app, getCoordinators) {
           for (const coordinator of current) {
             coordinator.requireActiveTransaction("graph-to-prompt");
           }
-          return originalGraphToPrompt.apply(app, args);
+          const promptData = await originalGraphToPrompt.apply(app, args);
+          return injectExecutionReferences(promptData, current);
         },
       });
       return await operation(operationContext);
@@ -610,7 +718,10 @@ export function installGraphSerializationBarrier(app, getCoordinators) {
       state.wrapGraphs();
       return runExclusive(
         "graph-to-prompt",
-        () => originalGraphToPrompt.apply(this, args),
+        async () => {
+          const promptData = await originalGraphToPrompt.apply(this, args);
+          return injectExecutionReferences(promptData, coordinators());
+        },
       );
     };
   }
@@ -678,7 +789,14 @@ function normalizeFields(fields) {
       throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_FIELD_INVALID");
     }
     seen.add(id);
-    return Object.freeze({ id, workflowResourceId, scopeId, browserAdapter, nodeTypes });
+    return Object.freeze({
+      id,
+      workflowResourceId,
+      scopeId,
+      browserAdapter,
+      nodeTypes,
+      execution: field?.execution === true,
+    });
   }));
 }
 

@@ -355,6 +355,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             assert operation in {
                 "snapshot.disposition",
                 "snapshot.protect",
+                "snapshot.reveal",
                 "execution.prepare",
                 "record.use",
                 "artifact.preview",
@@ -446,6 +447,18 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             return types.SimpleNamespace(
                 disposition=types.SimpleNamespace(value="verified-current"),
                 envelope={"encrypted": True, "ciphertext": "opaque"},
+            )
+
+        def reveal(self, field_id, protected_value, authorization):
+            assert field_id == "private-state"
+            assert authorization == "synthetic-snapshot.reveal"
+            if protected_value == "SYNTHETIC_LOCKED_CURRENT":
+                raise SnapshotError("PRIVACY_SNAPSHOT_REVEAL_FAILED")
+            if protected_value == "SYNTHETIC_INTERNAL_FAILURE":
+                raise RuntimeError("SYNTHETIC_PRIVATE_DIAGNOSTIC")
+            assert protected_value == "SYNTHETIC_CIPHERTEXT"
+            return types.SimpleNamespace(
+                value={"value": "SYNTHETIC_AUTHORIZED_VALUE"},
             )
 
     class Execution:
@@ -588,6 +601,92 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
         "envelope": {"encrypted": True, "ciphertext": "opaque"},
     }
     assert "SYNTHETIC_PLAINTEXT_CANARY" not in str(protect_response.data)
+
+    reveal_handler = prompt_server.routes.handlers[
+        (
+            "POST",
+            f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/fields/{{field_id}}/reveal",
+        )
+    ]
+
+    async def reveal_payload():
+        return {"protectedValue": "SYNTHETIC_CIPHERTEXT"}
+
+    reveal_response = asyncio.run(
+        reveal_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "field_id": "private-state"},
+                headers={},
+                cookies={},
+                json=reveal_payload,
+            )
+        )
+    )
+    assert reveal_response.data == {
+        "ok": True,
+        "fieldId": "private-state",
+        "value": {"value": "SYNTHETIC_AUTHORIZED_VALUE"},
+    }
+    assert reveal_response.headers == {"Cache-Control": "no-store"}
+
+    async def malformed_reveal_payload():
+        return {"value": "SYNTHETIC_CIPHERTEXT"}
+
+    malformed_reveal = asyncio.run(
+        reveal_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "field_id": "private-state"},
+                headers={},
+                cookies={},
+                json=malformed_reveal_payload,
+            )
+        )
+    )
+    assert malformed_reveal.status == 400
+    assert malformed_reveal.data == {
+        "ok": False,
+        "error": "PRIVACY_SNAPSHOT_INPUT_INVALID",
+    }
+    assert malformed_reveal.headers == {"Cache-Control": "no-store"}
+
+    async def locked_reveal_payload():
+        return {"protectedValue": "SYNTHETIC_LOCKED_CURRENT"}
+
+    locked_reveal = asyncio.run(
+        reveal_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "field_id": "private-state"},
+                headers={},
+                cookies={},
+                json=locked_reveal_payload,
+            )
+        )
+    )
+    assert locked_reveal.status == 409
+    assert locked_reveal.data == {
+        "ok": False,
+        "error": "PRIVACY_SNAPSHOT_REVEAL_FAILED",
+    }
+
+    async def failed_reveal_payload():
+        return {"protectedValue": "SYNTHETIC_INTERNAL_FAILURE"}
+
+    failed_reveal = asyncio.run(
+        reveal_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id, "field_id": "private-state"},
+                headers={},
+                cookies={},
+                json=failed_reveal_payload,
+            )
+        )
+    )
+    assert failed_reveal.status == 500
+    assert failed_reveal.data == {
+        "ok": False,
+        "error": "PRIVACY_SNAPSHOT_REVEAL_FAILED",
+    }
+    assert "SYNTHETIC_PRIVATE_DIAGNOSTIC" not in str(failed_reveal.data)
 
     invalid_field_response = asyncio.run(
         disposition_handler(

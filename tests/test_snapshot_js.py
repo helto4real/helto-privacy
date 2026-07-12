@@ -743,3 +743,62 @@ def test_queue_manager_settles_every_registered_pack_coordinator(tmp_path):
         ]);
         """,
     )
+
+
+def test_graph_transaction_injects_fresh_private_execution_reference(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const node = {
+          id: 7,
+          type: "SyntheticNode",
+          live: { value: "private" },
+          protected: "CURRENT_ENVELOPE",
+          writes: [],
+        };
+        const prepared = [];
+        const coordinator = createPrivacySnapshotCoordinator({
+          packId: "helto.test",
+          fields: [{ ...field, execution: true }],
+          executionProjections: [{
+            id: "render",
+            executionResourceId: "render-execution",
+            workflowResourceId: "state",
+            inputName: "private_execution",
+          }],
+          adapters: { "state-ui": adapter() },
+          transport: {
+            disposition: async () => ({ disposition: ENVELOPE_DISPOSITION.VERIFIED_CURRENT }),
+            protect: async () => { throw new Error("MUST_NOT_ENCRYPT"); },
+          },
+          prepareExecution: async (projection, owner, entries) => {
+            const grant = `grant-${prepared.length + 1}`;
+            prepared.push({ projection, owner, entries });
+            return { reference: { grant } };
+          },
+        });
+        await coordinator.registerNode(node);
+        const graph = { serialize: () => ({ nodes: [] }) };
+        const app = {
+          rootGraph: graph,
+          graphToPrompt: async () => ({
+            workflow: graph.serialize(),
+            output: { "7": { inputs: {} } },
+          }),
+        };
+        installGraphSerializationBarrier(app, () => [coordinator]);
+
+        const first = await app.graphToPrompt();
+        const second = await app.graphToPrompt();
+
+        assert.deepEqual(JSON.parse(first.output["7"].inputs.private_execution), {
+          grant: "grant-1",
+        });
+        assert.deepEqual(JSON.parse(second.output["7"].inputs.private_execution), {
+          grant: "grant-2",
+        });
+        assert.equal(prepared.length, 2);
+        assert.equal(prepared[0].owner, node);
+        assert.equal(prepared[0].entries[0].field.id, "private-state");
+        """,
+    )

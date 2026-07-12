@@ -291,11 +291,12 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
         "legacyBindings": [],
         "legacyKeyImports": [],
         "executionProjections": [
-            {
-                "id": "test-dispatch",
-                "executionResourceId": "dispatch",
-                "workflowResourceId": "editor-state",
-            },
+                {
+                    "id": "test-dispatch",
+                    "executionResourceId": "dispatch",
+                    "workflowResourceId": "editor-state",
+                    "inputName": "private_execution",
+                },
         ],
         "records": [
             {

@@ -220,6 +220,21 @@ def protect_field_value(
     """Normalize consumer state and produce only the declared current envelope."""
 
     _require_snapshot_authorization(authorization, "snapshot.protect", pack_id)
+    return protect_runtime_field_value(
+        field_declaration=field_declaration,
+        state_adapter=state_adapter,
+        value=value,
+    )
+
+
+def protect_runtime_field_value(
+    *,
+    field_declaration: ProtectedField,
+    state_adapter: object,
+    value: object,
+) -> ProtectedFieldResult:
+    """Protect backend-produced state without creating a reveal capability."""
+
     normalized = _normalize_state(state_adapter, value, field_declaration)
     try:
         envelope = PrivacyEnvelopeCodec(field_declaration.current_schema).encrypt_state(

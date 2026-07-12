@@ -426,6 +426,7 @@ export async function connectPrivacyPack({
       id: String(item.id),
       executionResourceId: String(item.executionResourceId),
       workflowResourceId: String(item.workflowResourceId),
+      inputName: String(item.inputName),
     })),
     recordDeclarations: attestation.records.map((item) => Object.freeze({
       id: String(item.id),
@@ -460,8 +461,20 @@ export async function connectPrivacyPack({
   entry.snapshotCoordinator = createPrivacySnapshotCoordinator({
     packId: entry.id,
     fields: entry.protectedFields,
+    executionProjections: entry.executionProjections,
     adapters: entry.adapters,
     transport: entry.transport.snapshot,
+    prepareExecution: (projection, _owner, fields) => entry.transport.execution.prepare(
+      projection.executionResourceId,
+      projection.id,
+      fields.map((field) => ({
+        fieldId: field.field.id,
+        protectedValue: entry.snapshotCoordinator.executionProjection(
+          field.owner,
+          field.field.id,
+        ),
+      })),
+    ),
     resolvePrivate: async (field) => {
       const scope = entry.modeScopes.find((item) => item.id === field.scopeId);
       if (!scope) return true;
@@ -601,6 +614,27 @@ function validateServerAttestation({
   }
   if (!Array.isArray(attestation.executionProjections)) {
     throw new PrivacyPackConnectionError("invalid_execution_projection_declaration");
+  }
+  const executionProjectionIds = new Set();
+  for (const projection of attestation.executionProjections) {
+    if (
+      !projection?.id
+      || !projection?.executionResourceId
+      || !projection?.workflowResourceId
+      || !projection?.inputName
+      || executionProjectionIds.has(projection.id)
+      || !attestation.resources.some(
+        (resource) => resource.id === projection.executionResourceId
+          && resource.kind === RESOURCE_KIND.EXECUTION,
+      )
+      || !attestation.resources.some(
+        (resource) => resource.id === projection.workflowResourceId
+          && resource.kind === RESOURCE_KIND.WORKFLOW,
+      )
+    ) {
+      throw new PrivacyPackConnectionError("invalid_execution_projection_declaration");
+    }
+    executionProjectionIds.add(projection.id);
   }
   if (!Array.isArray(attestation.records)) {
     throw new PrivacyPackConnectionError("invalid_record_declaration");

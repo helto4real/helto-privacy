@@ -13,6 +13,7 @@ Registered surface (pack-neutral, stable):
 - ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect``
+- ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/reveal``
 - ``POST /helto_privacy/profiles/{pack_id}/executions/{execution_id}/prepare``
 - ``GET  /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/reveal/{operation}``
@@ -395,6 +396,55 @@ def register_helto_privacy_ui(
             return _privacy_error_response(
                 web,
                 "PRIVACY_SNAPSHOT_PROTECTION_FAILED",
+                500,
+            )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/fields/{{field_id}}/reveal"
+    )
+    async def post_helto_privacy_field_reveal(request):
+        from .guard import PrivacyRouteError
+        from .runtime import PackBlockedError, bound_privacy_pack
+        from .snapshot import SnapshotError
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            field_id = str(request.match_info.get("field_id") or "")
+            workflow, field = pack.snapshot_field(field_id)
+            payload = await request.json()
+            if not isinstance(payload, dict) or "protectedValue" not in payload:
+                return _privacy_error_response(
+                    web,
+                    "PRIVACY_SNAPSHOT_INPUT_INVALID",
+                    400,
+                )
+            authorization = pack.authorization.authorize_request(
+                request,
+                "snapshot.reveal",
+            )
+            result = workflow.reveal(
+                field.id,
+                payload["protectedValue"],
+                authorization,
+            )
+            return web.json_response(
+                {"ok": True, "fieldId": field.id, "value": result.value},
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except PrivacyRouteError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except SnapshotError as exc:
+            return _privacy_error_response(
+                web,
+                exc.code,
+                _snapshot_error_status(exc.code),
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_SNAPSHOT_REVEAL_FAILED",
                 500,
             )
 

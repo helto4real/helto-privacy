@@ -452,7 +452,15 @@ function createAttestedPrivacySnapshotClient({ packId, fields, requestClient }) 
       { body: { value } },
     );
   };
-  return Object.freeze({ disposition, protect });
+  const reveal = (fieldId, protectedValue) => {
+    const id = requireField(fieldId);
+    return requestClient.request(
+      "snapshot.reveal",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/fields/${encodeURIComponent(id)}/reveal`,
+      { body: { protectedValue } },
+    );
+  };
+  return Object.freeze({ disposition, protect, reveal });
 }
 
 function createAttestedPrivacyExecutionClient({
