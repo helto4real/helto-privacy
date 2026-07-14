@@ -1501,6 +1501,7 @@ export function installGraphSerializationBarrier(
     operationTail: Promise.resolve(),
     activeQueueGraphToPrompt: null,
     submissionService: null,
+    queueInterceptor: null,
     onConflict,
   };
   const connectionState = APP_CONNECTION_GATES.get(app) || null;
@@ -1709,6 +1710,46 @@ export function installGraphSerializationBarrier(
     });
   }
 
+  const submitProtectedPrompt = (number, promptData, options = undefined) => {
+    if (!connectionGate || !state.submissionService) {
+      throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_OPERATION_INVALID");
+    }
+    const args = options === undefined
+      ? [number, promptData]
+      : [number, promptData, options];
+    return state.submissionService.handlers.apiQueuePrompt(
+      submissionOwnership.core.apiQueuePrompt,
+      submissionOwnership.api,
+      args,
+    );
+  };
+  const installQueueInterceptor = (interceptor) => {
+    if (
+      !connectionGate
+      || !interceptor
+      || typeof interceptor !== "object"
+      || Array.isArray(interceptor)
+      || typeof interceptor.appQueuePrompt !== "function"
+      || typeof interceptor.apiQueuePrompt !== "function"
+      || state.queueInterceptor
+    ) {
+      throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_OPERATION_INVALID");
+    }
+    const token = Object.freeze({});
+    state.queueInterceptor = Object.freeze({ token, interceptor });
+    return Object.freeze({
+      submitPrompt(number, promptData, options = undefined) {
+        if (state.queueInterceptor?.token !== token) {
+          throw new PrivacySnapshotError("PRIVACY_SNAPSHOT_OPERATION_INVALID");
+        }
+        return submitProtectedPrompt(number, promptData, options);
+      },
+      dispose() {
+        if (state.queueInterceptor?.token === token) state.queueInterceptor = null;
+      },
+    });
+  };
+
   if (connectionGate) {
     connectionGate.installBarrierHandlers({
       graphToPrompt: (graphToPrompt, receiver, args) => (
@@ -1719,8 +1760,18 @@ export function installGraphSerializationBarrier(
             () => invokeGraphToPrompt(graphToPrompt, receiver, args, coordinators()),
           )
       ),
-      appQueuePrompt: state.submissionService.handlers.appQueuePrompt,
-      apiQueuePrompt: state.submissionService.handlers.apiQueuePrompt,
+      appQueuePrompt: (captured, receiver, args) => {
+        const active = state.queueInterceptor?.interceptor;
+        return active
+          ? active.appQueuePrompt(Object.freeze([...args]))
+          : state.submissionService.handlers.appQueuePrompt(captured, receiver, args);
+      },
+      apiQueuePrompt: (captured, receiver, args) => {
+        const active = state.queueInterceptor?.interceptor;
+        return active
+          ? active.apiQueuePrompt(Object.freeze([...args]))
+          : state.submissionService.handlers.apiQueuePrompt(captured, receiver, args);
+      },
       fetchApi: state.submissionService.handlers.fetchApi,
       requireSerialize: requireAll,
       projectSerialization: projectAll,
@@ -1792,6 +1843,7 @@ export function installGraphSerializationBarrier(
       state.wrapGraphs();
       return runExclusive(reason, operation);
     },
+    installQueueInterceptor,
   });
   APP_BARRIERS.set(app, state);
   state.wrapGraphs();

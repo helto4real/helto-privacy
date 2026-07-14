@@ -1781,6 +1781,12 @@ export class BrowserWorkflowHandle extends BrowserInvokableResourceHandle {
     return entry.serializationBarrier.runWithSnapshot(reason, operation);
   }
 
+  installQueueInterceptor(interceptor) {
+    const entry = HANDLE_ENTRIES.get(this);
+    entry.pack.authorization.requireReady();
+    return entry.serializationBarrier.installQueueInterceptor(interceptor);
+  }
+
   requireSettled(reason = "serialize") {
     const entry = HANDLE_ENTRIES.get(this);
     return entry.serializationBarrier.requireSettled(reason);

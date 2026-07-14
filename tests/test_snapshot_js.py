@@ -25,6 +25,7 @@ def run_node_module_test(tmp_path, body: str) -> None:
               PrivacySnapshotError,
               createPrivacySnapshotCoordinator,
               installGraphSerializationBarrier,
+              installPrivacyConnectionSerializationGate,
             }} from {module_path.as_uri()!r};
 
             const field = {{
@@ -1455,6 +1456,102 @@ def test_scoped_graph_invoker_reuses_snapshot_and_unrelated_calls_queue(tmp_path
             await graphToPrompt();
           }),
           (error) => error.code === "PRIVACY_SNAPSHOT_TRANSACTION_STALE",
+        );
+        """,
+    )
+
+
+def test_privacy_owned_queue_interceptor_preserves_protected_direct_submission(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const events = [];
+        class TestApi {
+          constructor() { this.clientId = "synthetic-client"; }
+          async fetchApi(route, options) {
+            events.push(["fetch", route, JSON.parse(options.body)]);
+            return new Response(JSON.stringify({ prompt_id: "protected-core" }), {
+              status: 200,
+              headers: { "content-type": "application/json" },
+            });
+          }
+          async queuePrompt(number, data, options = undefined) {
+            const body = {
+              client_id: this.clientId ?? "",
+              prompt: data.output,
+              ...(options?.partialExecutionTargets
+                ? { partial_execution_targets: options.partialExecutionTargets }
+                : {}),
+              extra_data: {
+                extra_pnginfo: { workflow: data.workflow },
+                ...(options?.previewMethod && options.previewMethod !== "default"
+                  ? { preview_method: options.previewMethod }
+                  : {}),
+              },
+              ...(number === -1 ? { front: true } : {}),
+              ...(number !== 0 && number !== -1 ? { number } : {}),
+            };
+            const response = await this.fetchApi("/prompt", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(body),
+            });
+            return response.json();
+          }
+        }
+        class TestApp {
+          constructor() {
+            this.api = new TestApi();
+            this.rootGraph = { serialize: () => ({ nodes: [] }) };
+          }
+          async graphToPrompt() { return { workflow: { nodes: [] }, output: {} }; }
+          async queuePrompt(...args) { events.push(["core-app", ...args]); return "core-app"; }
+        }
+        const app = new TestApp();
+        const attempt = installPrivacyConnectionSerializationGate(app);
+        const coordinator = {
+          setSubmissionInvalidator() {},
+          settle: async () => ({ packId: "helto.test", revision: 1, fields: [] }),
+          activateTransaction() {},
+          releaseTransaction() {},
+          requireActiveTransaction() {},
+          requireSettled() {},
+          projectSerializedWorkflow: (workflow) => workflow,
+          sanitizePromptExport: (promptData) => promptData,
+          prepareSubmission: async (promptData) => ({ promptData, references: [] }),
+          revokePreparedReferences: async () => {},
+          onSessionChange: async () => {},
+        };
+        const barrier = installGraphSerializationBarrier(app, () => [coordinator]);
+        await barrier.takeOwnership(attempt);
+
+        const intercepted = [];
+        const controller = barrier.installQueueInterceptor({
+          appQueuePrompt(args) { intercepted.push(["app", ...args]); return "captured-app"; },
+          apiQueuePrompt(args) { intercepted.push(["api", ...args]); return { prompt_id: "captured-api" }; },
+        });
+        assert.equal(await app.queuePrompt(0, 2), "captured-app");
+        assert.deepEqual(await app.api.queuePrompt(0, { workflow: { nodes: [] }, output: {} }), {
+          prompt_id: "captured-api",
+        });
+        assert.deepEqual(intercepted.map((item) => item[0]), ["app", "api"]);
+        assert.equal(events.length, 0);
+        assert.throws(
+          () => barrier.installQueueInterceptor({ appQueuePrompt() {}, apiQueuePrompt() {} }),
+          (error) => error.code === "PRIVACY_SNAPSHOT_OPERATION_INVALID",
+        );
+
+        const promptData = { workflow: { nodes: [] }, output: { "1": { inputs: {} } } };
+        assert.deepEqual(await controller.submitPrompt(0, promptData), {
+          prompt_id: "protected-core",
+        });
+        assert.equal(events[0][0], "fetch");
+        assert.deepEqual(events[0][2].prompt, promptData.output);
+        controller.dispose();
+        assert.equal(await app.queuePrompt(1, 3), "core-app");
+        assert.throws(
+          () => controller.submitPrompt(0, promptData),
+          (error) => error.code === "PRIVACY_SNAPSHOT_OPERATION_INVALID",
         );
         """,
     )
