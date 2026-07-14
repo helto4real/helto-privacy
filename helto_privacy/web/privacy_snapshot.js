@@ -81,7 +81,10 @@ export function installPrivacyConnectionSerializationGate(app) {
     controller: null,
   };
   state.refreshGraphs = () => {
-    wrapConnectionGraphAndSubgraphs(app.rootGraph || app.graph, state);
+    const graph = dataPropertyWithoutGet(app, "rootGraphInternal")
+      || dataPropertyWithoutGet(app, "rootGraph")
+      || dataPropertyWithoutGet(app, "graph");
+    wrapConnectionGraphAndSubgraphs(graph, state);
   };
   state.submissionOwnership = installPrivacySubmissionOwnership({
     app,
@@ -185,6 +188,18 @@ function beginConnectionAttempt(state) {
       });
     },
   });
+}
+
+function dataPropertyWithoutGet(instance, propertyName) {
+  let owner = instance;
+  while (owner && owner !== Object.prototype) {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, propertyName);
+    if (descriptor) {
+      return Object.hasOwn(descriptor, "value") ? descriptor.value : null;
+    }
+    owner = Object.getPrototypeOf(owner);
+  }
+  return null;
 }
 
 function openConnectionGateIfReady(state) {

@@ -46,11 +46,14 @@ export function installPrivacySubmissionOwnership({
       throw createError("PRIVACY_PROFILE_UNAVAILABLE");
     }
   };
-  const requireApi = (receiver) => {
-    requireAvailable();
+  const requireApiReceiver = (receiver) => {
     if (receiver !== api || app.api !== api) {
       throw createError("PRIVACY_PROFILE_UNAVAILABLE");
     }
+  };
+  const requireApi = (receiver) => {
+    requireAvailable();
+    requireApiReceiver(receiver);
   };
   const guardedGraphToPrompt = async function guardedGraphToPrompt(...args) {
     refresh();
@@ -70,7 +73,14 @@ export function installPrivacySubmissionOwnership({
     return handlers.apiQueuePrompt(core.apiQueuePrompt, this, args);
   };
   const guardedFetchApi = async function guardedFetchApi(...args) {
-    requireApi(this);
+    requireApiReceiver(this);
+    const routeKind = typeof args[0] === "string"
+      ? classifyPromptRoute(args[0])
+      : "prompt-equivalent";
+    if (routeKind === "other") {
+      return core.fetchApi.apply(this, args);
+    }
+    requireAvailable();
     if (typeof handlers.fetchApi !== "function") fail();
     return handlers.fetchApi(core.fetchApi, this, args);
   };

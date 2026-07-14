@@ -1259,6 +1259,12 @@ def test_connection_gate_is_installed_before_attestation_and_hands_off_to_snapsh
               app.queuePrompt(),
               (error) => error.code === "PRIVACY_PROFILE_CONNECTING",
             );
+            const status = await app.api.fetchApi("/status");
+            assert.equal(status.ok, true);
+            await assert.rejects(
+              app.api.fetchApi("/prompt", { method: "POST" }),
+              (error) => error.code === "PRIVACY_PROFILE_CONNECTING",
+            );
           }
           return fetchBeforeGate(...args);
         };
