@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture, ProductStateProtocolFixture
+
 import helto_privacy.keystore as keystore
 import helto_privacy.migration as migration
 import helto_privacy.runtime as runtime
@@ -27,10 +29,12 @@ from helto_privacy import (
     PrivacyEnvelopeCodec,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     ProtectedOperation,
     ProfileResource,
     RecordDeclaration,
+    RecordSnapshot,
     ResourceKind,
     aio_v1_reader_unit,
     install,
@@ -58,7 +62,7 @@ class Request:
         self.cookies = {}
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, *_args):
         return "private"
 
@@ -75,7 +79,7 @@ class ModeAdapter:
         return None
 
 
-class StateAdapter:
+class StateAdapter(ProductStateProtocolFixture):
     def capture(self, *_args):
         return None
 
@@ -107,14 +111,11 @@ class RecordAdapter:
     def list_ids(self, *_args):
         return ()
 
-    def read_protected(self, *_args):
-        return None
+    def read_record(self, *_args):
+        return RecordSnapshot(0)
 
-    def write_protected(self, *_args):
-        return None
-
-    def delete(self, *_args):
-        return None
+    def compare_and_swap_record(self, *_args):
+        return False
 
     def prepare_mode_transition(self, *_args):
         return None
@@ -186,6 +187,7 @@ def _profile() -> PrivacyProfile:
             FieldLocation(FieldLocationKind.WIDGET, "aio_state"),
             "helto.aio-image-generate.v2",
             "aio-state",
+            ProtectedStateAuthority.SERVER_DURABLE,
             legacy_reader_ids=(AIO_V1_READER_ID,),
         ),
         ProtectedField(
@@ -198,6 +200,7 @@ def _profile() -> PrivacyProfile:
             FieldLocation(FieldLocationKind.WIDGET, "spm_data"),
             "helto.smart-prompt-manager",
             "smart-state",
+            ProtectedStateAuthority.SERVER_DURABLE,
             legacy_reader_ids=(SMART_PROMPT_V1_READER_ID,),
         ),
         ProtectedField(
@@ -210,6 +213,7 @@ def _profile() -> PrivacyProfile:
             FieldLocation(FieldLocationKind.PROPERTY, "aio_builder_state"),
             "helto.aio-image-generate.v2",
             "aio-builder-state",
+            ProtectedStateAuthority.SERVER_DURABLE,
             legacy_reader_ids=(AIO_V1_READER_ID,),
         ),
         ProtectedField(
@@ -222,6 +226,7 @@ def _profile() -> PrivacyProfile:
             FieldLocation(FieldLocationKind.WIDGET, "timeline"),
             "helto.timeline-director",
             "director-state",
+            ProtectedStateAuthority.SERVER_DURABLE,
         ),
     )
     return PrivacyProfile(
@@ -586,13 +591,6 @@ def test_profile_bound_reads_cover_workflow_record_export_and_director_key_conti
             "helto.aio-image-generate.v2",
         ),
         (
-            "aio-record-v1",
-            _fixture("aio_v1_state.json"),
-            "envelope",
-            "expectedNormalized",
-            "helto.aio-image-generate.v2",
-        ),
-        (
             "aio-builder-v1",
             _fixture("aio_v1_builder_state.json"),
             "envelope",
@@ -658,6 +656,11 @@ def test_profile_bound_reads_cover_workflow_record_export_and_director_key_conti
     ) == director["expectedNormalized"]
     assert all(
         binding.location_id != "director-state"
+        for binding in pack.profile.legacy_bindings
+    )
+    assert any(
+        binding.id == "aio-record-v1"
+        and binding.location_kind is LegacyLocationKind.RECORD
         for binding in pack.profile.legacy_bindings
     )
 

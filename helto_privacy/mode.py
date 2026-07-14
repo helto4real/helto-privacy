@@ -43,6 +43,8 @@ class ModeTransitionStatus(str, Enum):
     IDLE = "idle"
     PREPARING = "preparing"
     COMMITTING = "committing"
+    ROLLING_BACK = "rolling-back"
+    RETIRING = "retiring"
     BLOCKED = "blocked"
 
 

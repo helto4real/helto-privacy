@@ -430,12 +430,44 @@ def _import_decrypt_only_key_verified(
 def rotate_primary_key(password: str) -> dict[str, Any]:
     """Generate a fresh primary key and keep older keys for decryption."""
     with _exclusive_keystore_mutation():
-        return _rotate_primary_key(password)
+        from .external_operation_state import exclusive_external_operation_state
+
+        # Starting an external operation and choosing a new primary key are one
+        # admission boundary.  Holding the public-index lock closes the race
+        # between the active-state check and the keystore replacement.
+        with exclusive_external_operation_state():
+            return _rotate_primary_key(password)
 
 
 def _rotate_primary_key(password: str) -> dict[str, Any]:
     require_active_process_suite()
     _require_crypto()
+    try:
+        from .mode_state import has_non_idle_mode_transition
+
+        if has_non_idle_mode_transition():
+            raise PrivacyKeystoreError(
+                f"{ERROR_KEYSTORE_INVALID}: Key rotation is blocked by a privacy mode transition."
+            )
+    except PrivacyKeystoreError:
+        raise
+    except Exception:
+        raise PrivacyKeystoreError(
+            f"{ERROR_KEYSTORE_INVALID}: Mode transition state is unavailable."
+        ) from None
+    try:
+        from .external_operation_state import has_active_external_operations
+
+        if has_active_external_operations():
+            raise PrivacyKeystoreError(
+                f"{ERROR_KEYSTORE_INVALID}: Key rotation is blocked by an active external protected operation."
+            )
+    except PrivacyKeystoreError:
+        raise
+    except Exception:
+        raise PrivacyKeystoreError(
+            f"{ERROR_KEYSTORE_INVALID}: External protected-operation state is unavailable."
+        ) from None
     unlock_keystore(password)
     payload = _load_keystore()
     session = _read_session()
@@ -481,6 +513,14 @@ def session_key_for(key_id: str) -> bytes | None:
     if session is None:
         return None
     return session["keys"].get(str(key_id or "").strip())
+
+
+def unlocked_session_key_ids() -> tuple[str, ...]:
+    """Return opaque IDs for every retained key in the current unlocked session."""
+
+    require_active_process_suite()
+    session = _require_session()
+    return tuple(sorted(str(key_id) for key_id in session["keys"]))
 
 
 def session_token() -> str | None:
@@ -617,11 +657,17 @@ def _write_session(primary_key_id: str, keys: dict[str, bytes]) -> str:
 
 
 def _invalidate_private_runtimes(reason: str) -> None:
+    from .associations import invalidate_association_session
     from .artifacts import invalidate_artifact_session
     from .execution import invalidate_execution_session
+    from .opaque_references import invalidate_opaque_reference_session
+    from .subject_mode import invalidate_subject_mode_session
 
+    invalidate_association_session(reason)
     invalidate_artifact_session(reason)
     invalidate_execution_session(reason)
+    invalidate_opaque_reference_session(reason)
+    invalidate_subject_mode_session(reason)
 
 
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:

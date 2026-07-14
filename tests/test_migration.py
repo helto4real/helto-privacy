@@ -7,11 +7,13 @@ import threading
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture, ProductStateProtocolFixture
+
 import helto_privacy.keystore as keystore
 import helto_privacy._legacy_key_source as legacy_key_source
 import helto_privacy.migration as migration
 import helto_privacy.runtime as runtime
-from helto_privacy.guard import authorize_privacy_request
+from helto_privacy.guard import PrivacyAuthorizationError, authorize_privacy_request
 from helto_privacy.profile import (
     AdapterSlot,
     FieldLocation,
@@ -21,6 +23,7 @@ from helto_privacy.profile import (
     LegacyReaderBinding,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     ProfileResource,
     ResourceKind,
@@ -36,7 +39,7 @@ class Request:
         self.cookies = {}
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, _scope_id):
         return "private"
 
@@ -53,7 +56,7 @@ class ModeAdapter:
         return None
 
 
-class StateAdapter:
+class StateAdapter(ProductStateProtocolFixture):
     def capture(self, *_args):
         return None
 
@@ -86,6 +89,18 @@ class Reader:
     def read(self, _source, context):
         self.read_obligation_counts.append(context.unresolved_count)
         return {"value": "SYNTHETIC_NORMALIZED_VALUE"}
+
+
+class KeylessProbeReader:
+    def __init__(self) -> None:
+        self.read_calls = 0
+
+    def probe(self, source, _context):
+        return source == "SYNTHETIC_STRUCTURAL_LEGACY"
+
+    def read(self, _source, _context):
+        self.read_calls += 1
+        raise AssertionError("structural probing must never read")
 
 
 class MigrationTransaction:
@@ -134,6 +149,29 @@ class MigrationTransaction:
         self.finalized = True
 
 
+def test_structural_legacy_probe_is_keyless_and_read_only(monkeypatch):
+    migration.reset_migration_runtime_for_tests()
+    reader = KeylessProbeReader()
+    migration.register_legacy_reader_units(
+        (migration.LegacyReaderUnit("structural-v1", "Structural v1", reader),)
+    )
+    monkeypatch.setattr(
+        migration,
+        "_load_state",
+        lambda: (_ for _ in ()).throw(AssertionError("must not load migration state")),
+    )
+
+    assert migration.probe_registered_legacy_value(
+        "SYNTHETIC_STRUCTURAL_LEGACY",
+        ("structural-v1",),
+    ) is True
+    assert migration.probe_registered_legacy_value(
+        "CURRENT",
+        ("structural-v1",),
+    ) is False
+    assert reader.read_calls == 0
+
+
 def _profile() -> PrivacyProfile:
     return PrivacyProfile(
         id="helto.migration-test",
@@ -161,6 +199,7 @@ def _profile() -> PrivacyProfile:
                 FieldLocation(FieldLocationKind.WIDGET, "state"),
                 "helto.migration-test.v2",
                 "state",
+                ProtectedStateAuthority.SERVER_DURABLE,
                 legacy_reader_ids=("state-v1",),
             ),
         ),
@@ -294,6 +333,37 @@ def test_verified_transaction_receipt_is_all_or_nothing(migration_pack):
     assert transaction.rollback_values == []
     stored = (tmp_path / "migration" / "state.json").read_text(encoding="utf-8")
     assert "SYNTHETIC" not in stored
+
+
+def test_bound_completion_cannot_relabel_an_authorized_operation(migration_pack):
+    pack, _reader, token, _tmp_path = migration_pack
+    discovered = pack.migration.discover_and_read(
+        "state-v1-binding",
+        "SYNTHETIC_LEGACY_VALUE",
+        authorize_privacy_request(
+            Request(token),
+            "migration.read",
+            pack_id=pack.profile.id,
+        ),
+    )
+
+    with pytest.raises(PrivacyAuthorizationError):
+        migration.complete_bound_legacy(
+            pack.profile,
+            "state-v1-binding",
+            discovered.obligation.id,
+            discovered.value,
+            MigrationTransaction(),
+            authorize_privacy_request(
+                Request(token),
+                "migration.complete",
+                pack_id=pack.profile.id,
+            ),
+            operation_id="record.use",
+            recovery_locator="hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+        )
+
+    assert pack.migration.obligation(discovered.obligation.id).disposition == "unresolved"
 
 
 def test_grouped_transaction_closes_every_obligation_with_one_receipt(migration_pack):

@@ -510,14 +510,14 @@ or fail-open authorization path.
 **Blocked by:** Move Generate and Krea prompts; Move the Ideogram prompt
 builder; Move the Ideogram prompt library; Move run-info redaction.
 
-- [ ] Assemble and attest the complete server/browser profile, switch all
+- [x] Assemble and attest the complete server/browser profile, switch all
       prompt, builder, library, run-info, and recovery call sites, and activate
       only with every adapter present.
-- [ ] Delete the local privacy service/routes/client/recovery modules and all
+- [x] Delete the local privacy service/routes/client/recovery modules and all
       consumer crypto/token/shell/policy branches.
-- [ ] Align dependency, project, manager, documentation, and packaged browser
+- [x] Align dependency, project, manager, documentation, and packaged browser
       metadata to the candidate suite without local-path dependencies.
-- [ ] Run the full AIO suite and shared profile, legacy, private-default,
+- [x] Run the full AIO suite and shared profile, legacy, private-default,
       missing/stale-package, leak, and static-duplication evidence.
 
 ## Move timeline state and execution
@@ -528,15 +528,15 @@ or unreadable.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare the hidden timeline resource, current-schema continuity,
+- [x] Declare the hidden timeline resource, current-schema continuity,
       JSON-key import, global floor, semantic execution projection, and
       save/export/queue/render/replay operations.
-- [ ] Bind editor locate/normalize/apply/clear, debounced edit flush,
+- [x] Bind editor locate/normalize/apply/clear, debounced edit flush,
       validation/planning, and product execution to snapshot/barrier/execution
       handles.
-- [ ] Stage removal of synchronous encryption, local unlock behavior, direct
+- [x] Stage removal of synchronous encryption, local unlock behavior, direct
       backend decrypt, and decrypt-failure default substitution.
-- [ ] Prove pre-extraction ciphertext continuity, locked byte-preserving saves,
+- [x] Prove pre-extraction ciphertext continuity, locked byte-preserving saves,
       no execution/default fallback, fresh grants, and unchanged timeline
       normalization/planning behavior.
 
@@ -548,13 +548,13 @@ validation, asset rules, preview, and CRUD.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare project and character record kinds, protected operations, empty
+- [x] Declare project and character record kinds, protected operations, empty
       default safe projections, current-schema continuity, and JSON-key import.
-- [ ] Bind domain JSON persistence, IDs, embedded-media stripping, referenced
+- [x] Bind domain JSON persistence, IDs, embedded-media stripping, referenced
       assets, validation, and authorized preview/use to shared record handles.
-- [ ] Stage removal of record crypto, detailed locked shells, ungated private
+- [x] Stage removal of record crypto, detailed locked shells, ungated private
       routes, direct browser privacy behavior, and raw exception responses.
-- [ ] Prove minimal listing, locked deletion, authorized reveal, failed decrypt,
+- [x] Prove minimal listing, locked deletion, authorized reveal, failed decrypt,
       current rewrite receipts, canary redaction, and preserved product CRUD.
 
 ## Move thumbnail and waveform caches
@@ -565,15 +565,103 @@ validation, cache keys, and regeneration remain product-owned.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare thumbnail/waveform purposes, owners, retention, operations,
+- [x] Declare thumbnail/waveform purposes, owners, retention, operations,
       plaintext derivatives, and global privacy floor.
-- [ ] Bind source decode, allowed roots, cache key, WebP/peak encoding, and
+- [x] Bind source decode, allowed roots, cache key, WebP/peak encoding, and
       regeneration to shared artifact storage and serving.
-- [ ] Stage removal of cache encryption/filesystem/mode/cleanup branches,
+- [x] Stage removal of cache encryption/filesystem/mode/cleanup branches,
       request-authoritative privacy, raw paths, and direct serving URLs.
-- [ ] Prove atomic concurrency, purge/regeneration, lease revocation,
+- [x] Prove atomic concurrency, purge/regeneration, lease revocation,
       backpressure, startup sweep, allowed-root rejection, and unchanged media
       outputs.
+
+## Add dual-mode records, singletons and durable artifacts
+
+**What to build:** Director-owned records, singleton configuration, capture
+state, and durable adjuncts preserve one authoritative storage mode and can
+transition between public and private without requiring an unlocked keystore
+for public operation or weakening locked private behavior.
+
+**Blocked by:** Build the shared acceptance harness; Move project and character
+libraries; Move thumbnail and waveform caches.
+
+- [x] Give records and singletons fixed public/private storage semantics with
+      authoritative per-value mode, declaration-drift rejection, revisioned
+      updates, and unchanged locked private shells.
+- [x] Give durable adjuncts explicit public storage while regenerable caches
+      and served transients retire and regenerate instead of being converted.
+- [x] Prove public operation without a keystore, private locked failure,
+      current read-back, legacy/current continuity, and no mixed-mode fallback.
+- [x] Include every dual-mode value in transition preparation, verification,
+      rollback, restart recovery, and static duplication evidence.
+
+## Make shared mode transitions recoverable
+
+**What to build:** Shared storage and consumer participants stage mode changes
+non-destructively and recover the prior authoritative state after any failure
+or restart, with the mode source committed last.
+
+**Blocked by:** Add dual-mode records, singletons and durable artifacts.
+
+- [x] Persist preparing and committing journals bound to the exact profile,
+      transition identity, participants, prior mode, and target mode.
+- [x] Replace destructive artifact preparation with prepare, verify, commit,
+      rollback, and prior-representation retirement phases.
+- [x] Commit product state and shared storage before the mode source, roll back
+      in exact reverse order, and keep operations blocked until verification.
+- [x] Prove restart and deterministic fault recovery at every persistence,
+      rename, commit, read-back, rollback, cleanup, and journal boundary.
+
+## Attenuate protected-operation dependencies
+
+**What to build:** Product operations receive only ephemeral declared record,
+singleton, and artifact capabilities for the exact targets and verbs required
+by that operation.
+
+**Blocked by:** Add dual-mode records, singletons and durable artifacts.
+
+- [x] Declare exact record resource/kind/operation, singleton ID/verbs, and
+      artifact kind/verbs as canonical profile dependencies.
+- [x] Validate scope and target compatibility and include dependencies in
+      Python/browser fingerprints and attestation parity.
+- [x] Dispatch per-call capabilities that recheck authorization, session, and
+      transition state and become unusable when invocation ends.
+- [x] Reject cross-scope, undeclared, stale, leaked, logged, serialized, or
+      unrestricted pack-handle access with sanitized failures.
+
+## Reconcile durable artifact owners
+
+**What to build:** Recovery can retain an exact canonical durable-adjunct keep
+set and retire every other artifact for one bound owner without enumerating or
+exposing the private artifact ledger.
+
+**Blocked by:** Add dual-mode records, singletons and durable artifacts.
+
+- [x] Add a resource-bound owner reconciliation operation limited to declared
+      durable-adjunct kinds and exact validated keep references.
+- [x] Serialize reconciliation against writes and reject foreign, stale,
+      duplicate, wrong-owner, wrong-kind, or wrong-resource references.
+- [x] Retire noncanonical artifacts through the interruption-safe cleanup
+      ledger and fail closed while cleanup remains pending.
+- [x] Prove empty/canonical keep sets, concurrency, restart, cleanup retry, and
+      path/value-free coarse results.
+
+## Stream managed artifact payloads
+
+**What to build:** Large private and public artifacts encode, encrypt, copy,
+read, decode, and clean up incrementally through bounded attested streams rather
+than materializing complete payloads or joined serialized copies.
+
+**Blocked by:** Manage encrypted artifacts and leases.
+
+- [x] Declare a canonical streaming payload mode with bounded sink/source and
+      consumer codec interfaces.
+- [x] Implement incremental private encryption and authenticated read-back plus
+      bounded public copying without named plaintext staging.
+- [x] Prove backpressure, cancellation, `BaseException`, cleanup-pending,
+      restart, corruption, and bounded-memory behavior for both modes.
+- [x] Require consumers to state a truthful operational capacity when their
+      final output or stitching path cannot itself stream.
 
 ## Move take metadata, redaction and segment spills
 
@@ -581,16 +669,18 @@ validation, cache keys, and regeneration remain product-owned.
 projection and timeline segment spills use managed run-scoped artifacts without
 changing generation or stitching behavior.
 
-**Blocked by:** Build the shared acceptance harness.
+**Blocked by:** Build the shared acceptance harness; Attenuate protected-operation
+dependencies; Reconcile durable artifact owners; Stream managed artifact
+payloads.
 
-- [ ] Declare the protected take operation, sensitive registration/run
+- [x] Declare the protected take operation, sensitive registration/run
       metadata, safe sidecar candidates, segment-spill artifact, owners, and all
       plaintext/debug derivatives.
-- [ ] Bind take normalization/output association/sidecar write and tensor
+- [x] Bind take normalization/output association/sidecar write and tensor
       encode/decode/stitch adapters to shared redaction and spill handles.
-- [ ] Stage removal of ad-hoc server/browser redaction and local spill
+- [x] Stage removal of ad-hoc server/browser redaction and local spill
       encryption/filesystem/cleanup ledgers.
-- [ ] Prove canary-safe take/sidecar/UI projections, interruption and
+- [x] Prove canary-safe take/sidecar/UI projections, interruption and
       `BaseException` cleanup, restart sweep, no plaintext staging, and preserved
       LTX/WAN stitching semantics.
 
@@ -601,16 +691,17 @@ discovery/deletion preserve domain behavior without disclosing private paths,
 names, metadata, or path-bearing URLs.
 
 **Blocked by:** Move thumbnail and waveform caches; Move take metadata,
-redaction and segment spills.
+redaction and segment spills; Attenuate protected-operation dependencies;
+Reconcile durable artifact owners.
 
-- [ ] Declare every protected media operation and sensitive projection while
+- [x] Declare every protected media operation and sensitive projection while
       distinguishing user-owned source/output files from generated artifacts.
-- [ ] Bind folder configuration, aliases, roots, metadata extraction, take
+- [x] Bind folder configuration, aliases, roots, metadata extraction, take
       discovery/deletion, and domain UI to shared authorization, redaction, and
       lease handles.
-- [ ] Stage removal of request mode authority, path URL construction, direct
+- [x] Stage removal of request mode authority, path URL construction, direct
       private views, local privacy helpers, and raw private errors.
-- [ ] Prove opaque view/preview leases, strict projections, traversal/outside-
+- [x] Prove opaque view/preview leases, strict projections, traversal/outside-
       root rejection, missing-media deletion rules, no canary leakage, and
       unchanged product discovery/deletion.
 
@@ -621,16 +712,18 @@ its transitions cover every timeline, record, media, take, cache, and spill
 derivative before reporting success.
 
 **Blocked by:** Move timeline state and execution; Move project and character
-libraries; Move thumbnail and waveform caches; Move take metadata, redaction
-and segment spills; Move media browsing and source serving.
+libraries; Move thumbnail and waveform caches; Add dual-mode records,
+singletons and durable artifacts; Make shared mode transitions recoverable;
+Move take metadata, redaction and segment spills; Move media browsing and
+source serving.
 
-- [ ] Bind the legacy global setting to declared/effective shared mode while
+- [x] Bind the legacy global setting to declared/effective shared mode while
       retaining unrelated settings, validation, roots, and UI placement.
-- [ ] Supply complete product enumeration/rewrite/purge adapters for every
+- [x] Supply complete product enumeration/rewrite/purge adapters for every
       Director value and derivative introduced by the preceding tickets.
-- [ ] Remove server/browser token, cache-only transition, and local precedence
+- [x] Remove server/browser token, cache-only transition, and local precedence
       policy behind the inactive shared transition handle.
-- [ ] Prove missing/malformed state defaults private, requests cannot weaken the
+- [x] Prove missing/malformed state defaults private, requests cannot weaken the
       floor, declassification is authorized, and either all derivatives change
       or the original mode remains authoritative.
 
@@ -645,14 +738,14 @@ libraries; Move thumbnail and waveform caches; Move take metadata, redaction
 and segment spills; Move media browsing and source serving; Move the global
 privacy authority and transitions.
 
-- [ ] Assemble and attest the complete server/browser profile and switch all
+- [x] Assemble and attest the complete server/browser profile and switch all
       timeline, library, media, take, spill, settings, and recovery call sites.
-- [ ] Delete the vendored backend, package shim, local state/byte codec, privacy
+- [x] Delete the vendored backend, package shim, local state/byte codec, privacy
       routes/dialog/client, local token/mode/redaction/artifact policy, and
       positive fallback path.
-- [ ] Align dependency, project, manager, documentation, and packaged browser
+- [x] Align dependency, project, manager, documentation, and packaged browser
       metadata to the exact candidate suite.
-- [ ] Run the full Director Python/JS suites and shared continuity,
+- [x] Run the full Director Python/JS suites and shared continuity,
       missing-package blocking, transition, leak, artifact, browser, and
       static-fallback evidence.
 
@@ -663,14 +756,14 @@ snapshots and recovery while locked values remain protected and unmodified.
 
 **Blocked by:** Build the shared acceptance harness.
 
-- [ ] Declare prompt-library scope, hidden workflow field, mirrored mode,
+- [x] Declare prompt-library scope, hidden workflow field, mirrored mode,
       semantic projection, v1 schema/key bindings, and normalize/apply/clear
       adapters.
-- [ ] Bind editor state, mode mirror, locked preservation, recovery, and product
+- [x] Bind editor state, mode mirror, locked preservation, recovery, and product
       resolution entry to workflow/barrier handles.
-- [ ] Stage removal of local promises/memos/sequence tracking, per-node
+- [x] Stage removal of local promises/memos/sequence tracking, per-node
       serializers, graph patch, clear-on-failure, and toggle policy.
-- [ ] Prove genuine old-schema migration, current read-back, original-byte
+- [x] Prove genuine old-schema migration, current read-back, original-byte
       preservation, private-default behavior, failure blocking, and unchanged
       editor/schema normalization.
 
@@ -682,13 +775,13 @@ explicit authorized import and re-export.
 
 **Blocked by:** Move workflow and editor privacy.
 
-- [ ] Declare import-replace, import-merge, and export operations plus bare v1
+- [x] Declare import-replace, import-merge, and export operations plus bare v1
       and export-wrapper reader bindings.
-- [ ] Bind parser, normalization, destination-mode preservation, merge/replace,
+- [x] Bind parser, normalization, destination-mode preservation, merge/replace,
       filename, and JSON wrapper adapters to shared snapshot/migration handles.
-- [ ] Stage removal of direct decrypt/encrypt and local locked-state transition
+- [x] Stage removal of direct decrypt/encrypt and local locked-state transition
       behavior while preserving picker/download and domain conflict rules.
-- [ ] Prove genuine bare/export migration, explicit re-export receipt,
+- [x] Prove genuine bare/export migration, explicit re-export receipt,
       original-byte failure preservation, snapshot reuse, and product
       merge/filename behavior.
 
@@ -700,14 +793,14 @@ fallback library.
 
 **Blocked by:** Move workflow and editor privacy.
 
-- [ ] Declare the exact semantic projection and protected resolve-prompt
+- [x] Declare the exact semantic projection and protected resolve-prompt
       operation while retaining prompt selection, variables, cycles,
       validation, and output formatting as product behavior.
-- [ ] Bind semantic projection and dispatcher adapters to shared protected
+- [x] Bind semantic projection and dispatcher adapters to shared protected
       references, backend resolution, grants, and session RAM cache.
-- [ ] Remove unkeyed cache-token generation/resolution and missing/decrypt
+- [x] Remove unkeyed cache-token generation/resolution and missing/decrypt
       fallback-to-empty behavior behind the inactive execution path.
-- [ ] Prove cross-session identity isolation, lock cache clear, grant
+- [x] Prove cross-session identity isolation, lock cache clear, grant
       revocation, missing/mismatched reference rejection, no default execution,
       and unchanged resolver outputs.
 
@@ -720,14 +813,14 @@ serialization patches, and fallback execution behavior.
 **Blocked by:** Move workflow and editor privacy; Move private import and
 export; Move execution identity, dispatch and cache behavior.
 
-- [ ] Assemble and attest the complete server/browser profile, switch all
+- [x] Assemble and attest the complete server/browser profile, switch all
       editor, import/export, execution, recovery, and mode call sites, and
       activate only with every adapter present.
-- [ ] Delete local privacy backend/frontend machinery and every duplicated
+- [x] Delete local privacy backend/frontend machinery and every duplicated
       crypto, token, retry, cache identity, recovery, or policy branch.
-- [ ] Align dependency, project, manager, documentation, and packaged browser
+- [x] Align dependency, project, manager, documentation, and packaged browser
       metadata to the exact candidate suite.
-- [ ] Run the full unittest/JS syntax suites and shared legacy, execution,
+- [x] Run the full unittest/JS syntax suites and shared legacy, execution,
       recovery, design-system, missing-package, leak, and duplication evidence.
 
 ## Assemble the signed five-artifact candidate suite

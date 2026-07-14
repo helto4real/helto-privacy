@@ -70,7 +70,7 @@ def suite_manifest():
     return SuiteManifest(
         id="helto-suite-2026-07-10.1",
         schema=PRIVACY_SUITE_MANIFEST_V1,
-        contract="helto.privacy.v2",
+        contract="helto.privacy.v3",
         artifacts=artifacts,
         profiles=profiles,
         environments=(
@@ -95,7 +95,7 @@ def test_manifest_digest_is_canonical_and_order_independent():
     manifest = suite_manifest()
 
     assert manifest.digest == (
-        "02ff493b3f4860389fca83ba7053ebfb9df8b345c2e978a53702febd5dc8eafd"
+        "2cbe79c677c6edbc4e902e85fd1a881c82db80200200a5eb7e669c2ffbf31572"
     )
 
     reordered = SuiteManifest(

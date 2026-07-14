@@ -5,18 +5,53 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol, TypeVar
 
 
-PRIVACY_CONTRACT_V2 = "helto.privacy.v2"
+PRIVACY_CONTRACT_V3 = "helto.privacy.v3"
+MODE_TRANSITION_PROTOCOL = "recoverable-v1"
 _STABLE_ID = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _MEDIA_TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/[a-z0-9][a-z0-9.+-]*$")
-_MODE_TRANSITION_METHODS = (
-    "prepare_mode_transition",
-    "commit_mode_transition",
-    "rollback_mode_transition",
+_BROWSER_EXTERNAL_TRANSITION_METHODS = (
+    "settleModeTransition",
+    "inventoryModeTransitionOwners",
+    "readModeTransitionOwnerExact",
+    "applyModeTransitionOwnerExact",
+    "extractDetachedModeTransitionOwnerExact",
+    "restoreModeTransitionOwnerExact",
+    "reloadModeTransitionRuntime",
+    "reconcileModeTransitionRuntime",
+)
+_BROWSER_EXTERNAL_OPERATION_METHODS = (
+    "settleExternalOperation",
+    "identifyExternalOperationOwner",
+    "resolveExternalOperationOwner",
+    "readExternalOperationExact",
+    "applyExternalOperation",
+    "restoreExternalOperationExact",
+    "reloadExternalOperationRuntime",
+    "reconcileExternalOperationRuntime",
+)
+_SERVER_EXTERNAL_OPERATION_METHODS = (
+    "capture_external_operation",
+    "classify_external_operation",
+    "prepare_external_operation",
+    "finalize_external_operation",
+    "rollback_external_operation",
+)
+_SERVER_EXTERNAL_TRANSITION_METHODS = (
+    "classify_mode_transition_representation",
+    "decode_mode_transition_representation",
+    "normalize_mode_transition_value",
+    "encode_public_mode_transition",
+)
+_MODE_SOURCE_TRANSITION_METHODS = (
+    "read_mode_source",
+    "compare_and_set_mode_source",
+    "classify_mode_source",
+    "rollback_mode_source",
 )
 
 
@@ -44,6 +79,7 @@ class ResourceKind(str, Enum):
     SINGLETON = "singleton"
     ARTIFACT = "artifact"
     EXECUTION = "execution"
+    OPERATION = "operation"
 
 
 class FieldLocationKind(str, Enum):
@@ -54,6 +90,88 @@ class FieldLocationKind(str, Enum):
     INPUT = "input"
     RECORD = "record"
     BLOB = "blob"
+
+
+class ProtectedStateAuthority(str, Enum):
+    """Authority that can inventory and durably recover one product-state field."""
+
+    EXTERNAL_BROWSER_WORKFLOW = "external-browser-workflow"
+    SERVER_DURABLE = "server-durable"
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalTransitionPolicy:
+    """Attested bounds for browser-owned workflow transition recovery material."""
+
+    owner_identity: str = "graph-node-field-v1"
+    max_owners: int = 1024
+    max_original_bytes_per_owner: int = 2 * 1024 * 1024
+    max_target_bytes_per_owner: int = 2 * 1024 * 1024
+    max_total_bytes: int = 32 * 1024 * 1024
+    lease_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        if (
+            self.owner_identity != "graph-node-field-v1"
+            or type(self.max_owners) is not int
+            or not 1 <= self.max_owners <= 4096
+            or type(self.max_original_bytes_per_owner) is not int
+            or not 1024 <= self.max_original_bytes_per_owner <= 16 * 1024 * 1024
+            or type(self.max_target_bytes_per_owner) is not int
+            or not 1024 <= self.max_target_bytes_per_owner <= 16 * 1024 * 1024
+            or type(self.max_total_bytes) is not int
+            or not max(
+                self.max_original_bytes_per_owner,
+                self.max_target_bytes_per_owner,
+            ) <= self.max_total_bytes <= 64 * 1024 * 1024
+            or type(self.lease_seconds) is not int
+            or not 30 <= self.lease_seconds <= 900
+        ):
+            raise ProfileValidationError("invalid_external_transition_policy")
+
+    def contract_payload(self) -> dict[str, object]:
+        return {
+            "ownerIdentity": self.owner_identity,
+            "maxOwners": self.max_owners,
+            "maxOriginalBytesPerOwner": self.max_original_bytes_per_owner,
+            "maxTargetBytesPerOwner": self.max_target_bytes_per_owner,
+            "maxTotalBytes": self.max_total_bytes,
+            "leaseSeconds": self.lease_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalOperationPolicy:
+    """Attested bounds for one browser-owned exact operation target."""
+
+    owner_identity: str = "graph-node-v1"
+    max_identity_bytes: int = 16 * 1024
+    max_original_bytes: int = 2 * 1024 * 1024
+    max_target_bytes: int = 2 * 1024 * 1024
+    lease_seconds: int = 300
+
+    def __post_init__(self) -> None:
+        if (
+            self.owner_identity != "graph-node-v1"
+            or type(self.max_identity_bytes) is not int
+            or not 256 <= self.max_identity_bytes <= 64 * 1024
+            or type(self.max_original_bytes) is not int
+            or not 1024 <= self.max_original_bytes <= 16 * 1024 * 1024
+            or type(self.max_target_bytes) is not int
+            or not 1024 <= self.max_target_bytes <= 16 * 1024 * 1024
+            or type(self.lease_seconds) is not int
+            or not 30 <= self.lease_seconds <= 900
+        ):
+            raise ProfileValidationError("invalid_external_operation_policy")
+
+    def contract_payload(self) -> dict[str, object]:
+        return {
+            "ownerIdentity": self.owner_identity,
+            "maxIdentityBytes": self.max_identity_bytes,
+            "maxOriginalBytes": self.max_original_bytes,
+            "maxTargetBytes": self.max_target_bytes,
+            "leaseSeconds": self.lease_seconds,
+        }
 
 
 class LegacyLocationKind(str, Enum):
@@ -82,6 +200,71 @@ class ArtifactRetention(str, Enum):
     SERVED_TRANSIENT = "served-transient"
 
 
+class ArtifactPayloadMode(str, Enum):
+    """Closed payload-I/O contracts for managed artifacts."""
+
+    BOUNDED_BYTES_V1 = "bounded-bytes-v1"
+    STREAM_V1 = "stream-v1"
+
+
+class ArtifactDecodedOutput(str, Enum):
+    """Whether a streaming codec returns one materialized product value."""
+
+    MATERIALIZED = "materialized"
+    STREAM = "stream"
+
+
+_MAX_SAFE_INTEGER = (1 << 53) - 1
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactStreamContract:
+    """Profile-attested bounds for one forward-only artifact codec."""
+
+    codec_schema: str
+    codec_version: int
+    max_plaintext_bytes: int
+    decoded_output: ArtifactDecodedOutput
+    max_materialized_output_bytes: int | None = None
+    max_owner_plaintext_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.codec_schema)
+        numeric = (
+            self.codec_version,
+            self.max_plaintext_bytes,
+            *(
+                ()
+                if self.max_materialized_output_bytes is None
+                else (self.max_materialized_output_bytes,)
+            ),
+            *(
+                ()
+                if self.max_owner_plaintext_bytes is None
+                else (self.max_owner_plaintext_bytes,)
+            ),
+        )
+        if any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 1
+            or value > _MAX_SAFE_INTEGER
+            for value in numeric
+        ):
+            raise ProfileValidationError("invalid_artifact_stream_capacity")
+        if not isinstance(self.decoded_output, ArtifactDecodedOutput):
+            raise ProfileValidationError("invalid_artifact_decoded_output")
+        if (
+            self.decoded_output is ArtifactDecodedOutput.MATERIALIZED
+        ) is (self.max_materialized_output_bytes is None):
+            raise ProfileValidationError("invalid_artifact_decoded_output")
+        if (
+            self.max_owner_plaintext_bytes is not None
+            and self.max_owner_plaintext_bytes < self.max_plaintext_bytes
+        ):
+            raise ProfileValidationError("invalid_artifact_stream_capacity")
+
+
 class SensitiveFieldClass(str, Enum):
     """Closed reasons why protected-operation output is private by default."""
 
@@ -96,6 +279,60 @@ class SafeDiagnosticKind(str, Enum):
 
     BOOLEAN = "boolean"
     COUNT = "count"
+
+
+class SafePayloadKind(str, Enum):
+    """Closed scalar kinds permitted in the product-safe payload channel."""
+
+    BOOLEAN = "boolean"
+    COUNT = "count"
+    NUMBER = "number"
+    SAFE_TEXT = "safe-text"
+
+
+@dataclass(frozen=True, slots=True)
+class SafePayloadLeaf:
+    """One exact typed leaf in a safe-payload projection."""
+
+    path: str
+    kind: SafePayloadKind
+
+    def __post_init__(self) -> None:
+        _validate_projection_path(self.path)
+        if "*" in self.path.split(".") or not isinstance(self.kind, SafePayloadKind):
+            raise ProfileValidationError("invalid_safe_payload_projection")
+
+
+@dataclass(frozen=True, slots=True)
+class SafePayloadProjection:
+    """Exact JSON leaf allow-list for a product-safe operation payload."""
+
+    id: str
+    operation_id: str
+    schema: str
+    purpose: str
+    safe_leaves: tuple[SafePayloadLeaf, ...]
+
+    def __post_init__(self) -> None:
+        for value in (self.id, self.operation_id, self.schema, self.purpose):
+            _validate_stable_id(value)
+        leaves = tuple(self.safe_leaves)
+        if (
+            not leaves
+            or len(leaves) > 64
+            or any(not isinstance(item, SafePayloadLeaf) for item in leaves)
+        ):
+            raise ProfileValidationError("invalid_safe_payload_projection")
+        paths = tuple(item.path for item in leaves)
+        if len(paths) != len(set(paths)):
+            raise ProfileValidationError("duplicate_safe_payload_leaf")
+        object.__setattr__(self, "safe_leaves", tuple(sorted(leaves, key=lambda item: item.path)))
+
+    @property
+    def safe_leaf_paths(self) -> tuple[str, ...]:
+        """Read-only compatibility view without restoring untyped declarations."""
+
+        return tuple(item.path for item in self.safe_leaves)
 
 
 class SingletonPayloadKind(str, Enum):
@@ -158,6 +395,8 @@ class ProtectedField:
     location: FieldLocation
     current_schema: str
     purpose: str
+    state_authority: ProtectedStateAuthority
+    external_transition_policy: ExternalTransitionPolicy | None = None
     legacy_reader_ids: tuple[str, ...] = ()
     execution: bool = False
     mirror_locations: tuple[FieldLocation, ...] = ()
@@ -205,6 +444,13 @@ class ProtectedField:
         )
         if not isinstance(self.execution, bool):
             raise ProfileValidationError("invalid_execution_declaration")
+        if not isinstance(self.state_authority, ProtectedStateAuthority):
+            raise ProfileValidationError("invalid_protected_state_authority")
+        if self.state_authority is ProtectedStateAuthority.EXTERNAL_BROWSER_WORKFLOW:
+            if not isinstance(self.external_transition_policy, ExternalTransitionPolicy):
+                raise ProfileValidationError("missing_external_transition_policy")
+        elif self.external_transition_policy is not None:
+            raise ProfileValidationError("unexpected_external_transition_policy")
 
     def contract_payload(self, *, browser: bool = False) -> dict[str, object]:
         """Project this declaration without duplicating contract field lists."""
@@ -221,6 +467,12 @@ class ProtectedField:
             },
             "currentSchema": self.current_schema,
             "purpose": self.purpose,
+            "stateAuthority": self.state_authority.value,
+            "externalTransitionPolicy": (
+                self.external_transition_policy.contract_payload()
+                if self.external_transition_policy is not None
+                else None
+            ),
             "legacyReaderIds": list(self.legacy_reader_ids),
             "execution": self.execution,
         }
@@ -363,6 +615,25 @@ class RecordDeclaration:
 
 
 @dataclass(frozen=True, slots=True)
+class RecordReferenceMigration:
+    """One declared relocation from an opaque legacy reference to a private record."""
+
+    id: str
+    resource_id: str
+    record_kind: str
+    legacy_binding_id: str
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.id,
+            self.resource_id,
+            self.record_kind,
+            self.legacy_binding_id,
+        ):
+            _validate_stable_id(value)
+
+
+@dataclass(frozen=True, slots=True)
 class SingletonDeclaration:
     """One revisioned protected value whose domain meaning stays product-owned."""
 
@@ -410,6 +681,8 @@ class ArtifactDeclaration:
     retention: ArtifactRetention
     operations: tuple[str, ...]
     media_type: str = "application/octet-stream"
+    payload_mode: ArtifactPayloadMode = ArtifactPayloadMode.BOUNDED_BYTES_V1
+    stream_contract: ArtifactStreamContract | None = None
 
     def __post_init__(self) -> None:
         for value in (
@@ -428,6 +701,15 @@ class ArtifactDeclaration:
             raise ProfileValidationError("invalid_artifact_version")
         if not isinstance(self.retention, ArtifactRetention):
             raise ProfileValidationError("unknown_artifact_retention")
+        if not isinstance(self.payload_mode, ArtifactPayloadMode):
+            raise ProfileValidationError("unknown_artifact_payload_mode")
+        if self.payload_mode is ArtifactPayloadMode.STREAM_V1:
+            if not isinstance(self.stream_contract, ArtifactStreamContract):
+                raise ProfileValidationError("missing_artifact_stream_contract")
+            if self.retention is ArtifactRetention.DURABLE_ADJUNCT:
+                raise ProfileValidationError("unsupported_artifact_stream_retention")
+        elif self.stream_contract is not None:
+            raise ProfileValidationError("unexpected_artifact_stream_contract")
         if not isinstance(self.media_type, str) or _MEDIA_TYPE.fullmatch(
             self.media_type
         ) is None:
@@ -469,6 +751,149 @@ class SafeDiagnosticField:
 
 
 @dataclass(frozen=True, slots=True)
+class OpaqueReferenceKind:
+    """One opaque, RAM-only reference family owned by an operation resource."""
+
+    id: str
+    resource_id: str
+    scope_id: str
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.id)
+        _validate_stable_id(self.resource_id)
+        _validate_stable_id(self.scope_id)
+
+
+@dataclass(frozen=True, slots=True)
+class OperationReferenceInput:
+    """One named opaque reference accepted by an operation."""
+
+    name: str
+    reference_kind_id: str
+    revoke_on_success: bool = False
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.name)
+        _validate_stable_id(self.reference_kind_id)
+        if not isinstance(self.revoke_on_success, bool):
+            raise ProfileValidationError("invalid_operation_reference_input")
+
+
+@dataclass(frozen=True, slots=True)
+class OperationReferenceOutput:
+    """One bounded, ordered opaque-reference output group."""
+
+    reference_kind_id: str
+    minimum: int = 1
+    maximum: int = 1
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.reference_kind_id)
+        if (
+            not isinstance(self.minimum, int)
+            or isinstance(self.minimum, bool)
+            or not isinstance(self.maximum, int)
+            or isinstance(self.maximum, bool)
+            or self.minimum < 0
+            or self.maximum < self.minimum
+            or self.maximum > 256
+        ):
+            raise ProfileValidationError("invalid_operation_reference_output")
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectModeBinding:
+    """One reusable node/input binding for an effective subject mode."""
+
+    id: str
+    scope_id: str
+    input_name: str
+    node_types: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.id)
+        _validate_stable_id(self.scope_id)
+        _validate_stable_id(self.input_name)
+        object.__setattr__(self, "node_types", _normalized_node_types(self.node_types))
+
+
+_SINGLETON_DEPENDENCY_VERBS = frozenset({"status", "reveal", "replace", "delete"})
+_ARTIFACT_DEPENDENCY_VERBS = frozenset(
+    {"write", "read", "retire", "release-owner", "reconcile-owner"}
+)
+
+
+@dataclass(frozen=True, slots=True)
+class RecordOperationDependency:
+    """One exact declared record projection required by a product operation."""
+
+    resource_id: str
+    record_kind: str
+    operation: str
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.resource_id)
+        _validate_stable_id(self.record_kind)
+        _validate_stable_id(self.operation)
+
+
+@dataclass(frozen=True, slots=True)
+class SingletonOperationDependency:
+    """Closed verbs over one exact declared singleton."""
+
+    singleton_id: str
+    verbs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.singleton_id)
+        verbs = _normalized_stable_ids(
+            self.verbs,
+            "duplicate_singleton_dependency_verb",
+        )
+        if not verbs or any(verb not in _SINGLETON_DEPENDENCY_VERBS for verb in verbs):
+            raise ProfileValidationError("invalid_singleton_dependency_verb")
+        object.__setattr__(self, "verbs", verbs)
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactOperationDependency:
+    """Closed verbs over one exact declared artifact kind."""
+
+    artifact_kind: str
+    verbs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.artifact_kind)
+        verbs = _normalized_stable_ids(
+            self.verbs,
+            "duplicate_artifact_dependency_verb",
+        )
+        if not verbs or any(
+            verb not in _ARTIFACT_DEPENDENCY_VERBS and not verb.startswith("lease.")
+            for verb in verbs
+        ):
+            raise ProfileValidationError("invalid_artifact_dependency_verb")
+        if any(verb == "lease." for verb in verbs):
+            raise ProfileValidationError("invalid_artifact_dependency_verb")
+        object.__setattr__(self, "verbs", verbs)
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalOperationBinding:
+    """Bind one operation to an exact browser-owned protected field."""
+
+    field_id: str
+    browser_adapter: str
+    policy: ExternalOperationPolicy = field(default_factory=ExternalOperationPolicy)
+
+    def __post_init__(self) -> None:
+        _validate_stable_id(self.field_id)
+        _validate_stable_id(self.browser_adapter)
+        if not isinstance(self.policy, ExternalOperationPolicy):
+            raise ProfileValidationError("invalid_external_operation_binding")
+
+
+@dataclass(frozen=True, slots=True)
 class ProtectedOperation:
     """A routed product action or backend output protected by shared policy."""
 
@@ -480,6 +905,16 @@ class ProtectedOperation:
     scope_id: str | None = None
     sensitive_fields: tuple[SensitiveFieldDeclaration, ...] = ()
     safe_projection: tuple[SafeDiagnosticField, ...] = ()
+    subject_mode_binding_id: str | None = None
+    reference_inputs: tuple[OperationReferenceInput, ...] = ()
+    reference_outputs: tuple[OperationReferenceOutput | str, ...] = ()
+    returns_lease: bool = False
+    safe_payload_projection_id: str | None = None
+    deferred_ui: bool = False
+    record_dependencies: tuple[RecordOperationDependency, ...] = ()
+    singleton_dependencies: tuple[SingletonOperationDependency, ...] = ()
+    artifact_dependencies: tuple[ArtifactOperationDependency, ...] = ()
+    external_operation_binding: ExternalOperationBinding | None = None
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
@@ -526,8 +961,118 @@ class ProtectedOperation:
                 for item in sensitive_fields
             ):
                 raise ProfileValidationError("missing_sensitive_default")
-        if self.route is None and not safe_projection:
+        if self.safe_payload_projection_id is not None:
+            _validate_stable_id(self.safe_payload_projection_id)
+        if not isinstance(self.deferred_ui, bool):
+            raise ProfileValidationError("invalid_deferred_operation")
+        external_binding = self.external_operation_binding
+        if external_binding is not None and not isinstance(
+            external_binding,
+            ExternalOperationBinding,
+        ):
+            raise ProfileValidationError("invalid_external_operation_binding")
+        has_safe_output = bool(safe_projection or self.safe_payload_projection_id)
+        if self.route is None and not (has_safe_output or self.reference_outputs):
             raise ProfileValidationError("missing_protected_operation_projection")
+        if self.subject_mode_binding_id is not None:
+            _validate_stable_id(self.subject_mode_binding_id)
+            if (
+                self.route is not None
+                or self.scope_id is None
+                or not (has_safe_output or (self.deferred_ui and self.reference_outputs))
+            ):
+                raise ProfileValidationError("invalid_subject_mode_binding")
+        reference_inputs = tuple(self.reference_inputs)
+        if any(not isinstance(item, OperationReferenceInput) for item in reference_inputs):
+            raise ProfileValidationError("invalid_operation_reference_input")
+        input_names = tuple(item.name for item in reference_inputs)
+        if len(input_names) != len(set(input_names)):
+            raise ProfileValidationError("duplicate_operation_reference_input")
+        reference_outputs = tuple(
+            OperationReferenceOutput(item) if isinstance(item, str) else item
+            for item in self.reference_outputs
+        )
+        if any(
+            not isinstance(item, OperationReferenceOutput)
+            for item in reference_outputs
+        ):
+            raise ProfileValidationError("invalid_operation_reference_output")
+        output_kinds = tuple(item.reference_kind_id for item in reference_outputs)
+        if len(output_kinds) != len(set(output_kinds)):
+            raise ProfileValidationError("duplicate_operation_reference_output")
+        if sum(item.maximum for item in reference_outputs) > 256:
+            raise ProfileValidationError("invalid_operation_reference_output")
+        if not isinstance(self.returns_lease, bool):
+            raise ProfileValidationError("invalid_operation_lease_declaration")
+        if (reference_inputs or reference_outputs or self.returns_lease) and self.scope_id is None:
+            raise ProfileValidationError("invalid_typed_operation_declaration")
+        if self.route is None and not self.deferred_ui and external_binding is None and (
+            reference_inputs or reference_outputs or self.returns_lease
+        ):
+            raise ProfileValidationError("invalid_typed_operation_declaration")
+        if self.deferred_ui and (
+            self.route is not None
+            or self.subject_mode_binding_id is None
+            or not (self.safe_payload_projection_id or reference_outputs)
+            or reference_inputs
+            or self.returns_lease
+        ):
+            raise ProfileValidationError("invalid_deferred_operation")
+        if self.returns_lease and len(reference_inputs) != 1:
+            raise ProfileValidationError("invalid_operation_lease_declaration")
+        if external_binding is not None and (
+            self.route is not None
+            or self.method != "POST"
+            or self.scope_id is None
+            or self.subject_mode_binding_id is not None
+            or self.deferred_ui
+            or self.returns_lease
+            or bool(reference_outputs)
+        ):
+            raise ProfileValidationError("invalid_external_operation_binding")
+        record_dependencies = tuple(self.record_dependencies)
+        singleton_dependencies = tuple(self.singleton_dependencies)
+        artifact_dependencies = tuple(self.artifact_dependencies)
+        if any(
+            not isinstance(item, RecordOperationDependency)
+            for item in record_dependencies
+        ):
+            raise ProfileValidationError("invalid_record_operation_dependency")
+        if any(
+            not isinstance(item, SingletonOperationDependency)
+            for item in singleton_dependencies
+        ):
+            raise ProfileValidationError("invalid_singleton_operation_dependency")
+        if any(
+            not isinstance(item, ArtifactOperationDependency)
+            for item in artifact_dependencies
+        ):
+            raise ProfileValidationError("invalid_artifact_operation_dependency")
+        record_keys = tuple(
+            (item.resource_id, item.record_kind, item.operation)
+            for item in record_dependencies
+        )
+        if len(record_keys) != len(set(record_keys)):
+            raise ProfileValidationError("duplicate_record_operation_dependency")
+        singleton_ids = tuple(item.singleton_id for item in singleton_dependencies)
+        if len(singleton_ids) != len(set(singleton_ids)):
+            raise ProfileValidationError("duplicate_singleton_operation_dependency")
+        artifact_kinds = tuple(item.artifact_kind for item in artifact_dependencies)
+        if len(artifact_kinds) != len(set(artifact_kinds)):
+            raise ProfileValidationError("duplicate_artifact_operation_dependency")
+        if (
+            self.returns_lease
+            and artifact_dependencies
+            and not any(
+                any(verb.startswith("lease.") for verb in item.verbs)
+                for item in artifact_dependencies
+            )
+        ):
+            raise ProfileValidationError("invalid_operation_lease_declaration")
+        if (
+            record_dependencies or singleton_dependencies or artifact_dependencies
+        ) and self.scope_id is None:
+            raise ProfileValidationError("missing_operation_dependency_scope")
         object.__setattr__(
             self,
             "sensitive_fields",
@@ -537,6 +1082,36 @@ class ProtectedOperation:
             self,
             "safe_projection",
             tuple(sorted(safe_projection, key=lambda item: item.path)),
+        )
+        object.__setattr__(
+            self,
+            "reference_inputs",
+            tuple(sorted(reference_inputs, key=lambda item: item.name)),
+        )
+        object.__setattr__(self, "reference_outputs", reference_outputs)
+        object.__setattr__(
+            self,
+            "record_dependencies",
+            tuple(
+                sorted(
+                    record_dependencies,
+                    key=lambda item: (
+                        item.resource_id,
+                        item.record_kind,
+                        item.operation,
+                    ),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "singleton_dependencies",
+            tuple(sorted(singleton_dependencies, key=lambda item: item.singleton_id)),
+        )
+        object.__setattr__(
+            self,
+            "artifact_dependencies",
+            tuple(sorted(artifact_dependencies, key=lambda item: item.artifact_kind)),
         )
 
 
@@ -549,6 +1124,7 @@ class SemanticExecutionProjection:
     workflow_resource_id: str
     projection_adapter: str
     dispatch_adapter: str
+    subject_mode_binding_id: str
     input_name: str = "private_execution"
 
     def __post_init__(self) -> None:
@@ -557,6 +1133,7 @@ class SemanticExecutionProjection:
         _validate_stable_id(self.workflow_resource_id)
         _validate_stable_id(self.projection_adapter)
         _validate_stable_id(self.dispatch_adapter)
+        _validate_stable_id(self.subject_mode_binding_id)
         _validate_stable_id(self.input_name)
 
 
@@ -613,7 +1190,7 @@ class PrivacyProfile:
 
     id: str
     distribution: str
-    contract: str = PRIVACY_CONTRACT_V2
+    contract: str = PRIVACY_CONTRACT_V3
     resources: tuple[ProfileResource, ...] = ()
     server_adapters: tuple[AdapterSlot, ...] = ()
     browser_adapters: tuple[AdapterSlot, ...] = ()
@@ -622,10 +1199,14 @@ class PrivacyProfile:
     records: tuple[RecordDeclaration, ...] = ()
     singletons: tuple[SingletonDeclaration, ...] = ()
     artifacts: tuple[ArtifactDeclaration, ...] = ()
+    subject_mode_bindings: tuple[SubjectModeBinding, ...] = ()
     protected_operations: tuple[ProtectedOperation, ...] = ()
     execution_projections: tuple[SemanticExecutionProjection, ...] = ()
     legacy_bindings: tuple[LegacyReaderBinding, ...] = ()
     legacy_key_imports: tuple[LegacyKeyImportBinding, ...] = ()
+    record_reference_migrations: tuple[RecordReferenceMigration, ...] = ()
+    opaque_reference_kinds: tuple[OpaqueReferenceKind, ...] = ()
+    safe_payload_projections: tuple[SafePayloadProjection, ...] = ()
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
@@ -637,8 +1218,12 @@ class PrivacyProfile:
             scopes = tuple(self.scopes)
             protected_fields = tuple(self.protected_fields)
             records = tuple(self.records)
+            record_reference_migrations = tuple(self.record_reference_migrations)
+            opaque_reference_kinds = tuple(self.opaque_reference_kinds)
+            safe_payload_projections = tuple(self.safe_payload_projections)
             singletons = tuple(self.singletons)
             artifacts = tuple(self.artifacts)
+            subject_mode_bindings = tuple(self.subject_mode_bindings)
             protected_operations = tuple(self.protected_operations)
             execution_projections = tuple(self.execution_projections)
             legacy_bindings = tuple(self.legacy_bindings)
@@ -653,8 +1238,28 @@ class PrivacyProfile:
             (scopes, PrivacyScope, "unknown_scope_declaration"),
             (protected_fields, ProtectedField, "unknown_field_declaration"),
             (records, RecordDeclaration, "unknown_record_declaration"),
+            (
+                record_reference_migrations,
+                RecordReferenceMigration,
+                "unknown_record_reference_migration",
+            ),
+            (
+                opaque_reference_kinds,
+                OpaqueReferenceKind,
+                "unknown_opaque_reference_kind",
+            ),
+            (
+                safe_payload_projections,
+                SafePayloadProjection,
+                "unknown_safe_payload_projection",
+            ),
             (singletons, SingletonDeclaration, "unknown_singleton_declaration"),
             (artifacts, ArtifactDeclaration, "unknown_artifact_declaration"),
+            (
+                subject_mode_bindings,
+                SubjectModeBinding,
+                "unknown_subject_mode_binding",
+            ),
             (protected_operations, ProtectedOperation, "unknown_operation_declaration"),
             (
                 execution_projections,
@@ -690,8 +1295,12 @@ class PrivacyProfile:
             ("scopes", scopes),
             ("protected_fields", protected_fields),
             ("records", records),
+            ("record_reference_migrations", record_reference_migrations),
+            ("opaque_reference_kinds", opaque_reference_kinds),
+            ("safe_payload_projections", safe_payload_projections),
             ("singletons", singletons),
             ("artifacts", artifacts),
+            ("subject_mode_bindings", subject_mode_bindings),
             ("protected_operations", protected_operations),
             ("execution_projections", execution_projections),
             ("legacy_bindings", legacy_bindings),
@@ -705,7 +1314,7 @@ class PrivacyProfile:
         self._validate()
 
     def _validate(self) -> None:
-        if self.contract != PRIVACY_CONTRACT_V2:
+        if self.contract != PRIVACY_CONTRACT_V3:
             raise ProfileValidationError("contract_mismatch")
 
         resource_ids = [resource.id for resource in self.resources]
@@ -745,12 +1354,38 @@ class PrivacyProfile:
         scopes = _unique_by_id(self.scopes, "duplicate_scope")
         fields = _unique_by_id(self.protected_fields, "duplicate_protected_field")
         records = _unique_by_id(self.records, "duplicate_record_declaration")
+        reference_migrations = _unique_by_id(
+            self.record_reference_migrations,
+            "duplicate_record_reference_migration",
+        )
+        reference_migration_locations = {
+            (
+                item.resource_id,
+                item.record_kind,
+                item.legacy_binding_id,
+            )
+            for item in reference_migrations.values()
+        }
+        if len(reference_migration_locations) != len(reference_migrations):
+            raise ProfileValidationError("duplicate_record_reference_migration")
         singletons = _unique_by_id(
             self.singletons,
             "duplicate_singleton_declaration",
         )
         artifacts = _unique_by_id(self.artifacts, "duplicate_artifact_declaration")
+        subject_bindings = _unique_by_id(
+            self.subject_mode_bindings,
+            "duplicate_subject_mode_binding",
+        )
         operations = _unique_by_id(self.protected_operations, "duplicate_protected_operation")
+        reference_kinds = _unique_by_id(
+            self.opaque_reference_kinds,
+            "duplicate_opaque_reference_kind",
+        )
+        safe_payload_projections = _unique_by_id(
+            self.safe_payload_projections,
+            "duplicate_safe_payload_projection",
+        )
         projections = _unique_by_id(
             self.execution_projections,
             "duplicate_execution_projection",
@@ -767,6 +1402,24 @@ class PrivacyProfile:
         browser_adapter_ids = {adapter.id for adapter in self.browser_adapters}
         used_server_adapters: set[str] = set()
         used_browser_adapters: set[str] = set()
+
+        for migration in reference_migrations.values():
+            _require_resource_kind(
+                resources,
+                migration.resource_id,
+                ResourceKind.RECORD,
+            )
+            record = records.get(migration.record_kind)
+            if record is None or record.resource_id != migration.resource_id:
+                raise ProfileValidationError("record_reference_migration_record_mismatch")
+            binding = legacy_bindings.get(migration.legacy_binding_id)
+            if (
+                binding is None
+                or binding.location_kind is not LegacyLocationKind.RECORD
+                or binding.resource_id != migration.resource_id
+                or binding.location_id != migration.record_kind
+            ):
+                raise ProfileValidationError("record_reference_migration_binding_mismatch")
 
         for scope in scopes.values():
             resource = _require_resource_kind(
@@ -904,6 +1557,19 @@ class PrivacyProfile:
         if declared_field_readers != bound_field_readers:
             raise ProfileValidationError("legacy_reader_binding_mismatch")
 
+        record_bindings = tuple(
+            binding
+            for binding in legacy_bindings.values()
+            if binding.location_kind is LegacyLocationKind.RECORD
+        )
+        if len(
+            {
+                (binding.location_id, binding.reader_id)
+                for binding in record_bindings
+            }
+        ) != len(record_bindings):
+            raise ProfileValidationError("duplicate_legacy_location_binding")
+
         declared_singleton_readers = {
             (singleton.id, reader_id)
             for singleton in singletons.values()
@@ -957,6 +1623,22 @@ class PrivacyProfile:
             _require_adapter_side(resource, artifact.payload_adapter, server_adapter_ids)
             used_server_adapters.add(artifact.payload_adapter)
 
+        binding_paths: set[tuple[str, str]] = set()
+        for binding in subject_bindings.values():
+            scope = scopes.get(binding.scope_id)
+            if scope is None:
+                raise ProfileValidationError("unknown_scope_reference")
+            if scope.mode_editor_adapter is None:
+                raise ProfileValidationError("subject_mode_adapter_missing")
+            editor = adapters.get(scope.mode_editor_adapter)
+            if editor is None or not set(binding.node_types).issubset(editor.node_types):
+                raise ProfileValidationError("subject_mode_binding_mismatch")
+            for node_type in binding.node_types:
+                path = (node_type, binding.input_name)
+                if path in binding_paths:
+                    raise ProfileValidationError("duplicate_execution_input_binding")
+                binding_paths.add(path)
+
         for operation in operations.values():
             resource = resources.get(operation.resource_id)
             if resource is None:
@@ -971,6 +1653,125 @@ class PrivacyProfile:
             used_server_adapters.add(operation.adapter_slot)
             if operation.scope_id is not None and operation.scope_id not in scopes:
                 raise ProfileValidationError("unknown_scope_reference")
+            has_dependencies = bool(
+                operation.record_dependencies
+                or operation.singleton_dependencies
+                or operation.artifact_dependencies
+            )
+            if (
+                has_dependencies
+                and operation.route is None
+                and operation.external_operation_binding is None
+            ):
+                raise ProfileValidationError("invalid_operation_dependency_dispatch")
+            if operation.external_operation_binding is not None:
+                binding = operation.external_operation_binding
+                field = fields.get(binding.field_id)
+                if (
+                    resource.kind is not ResourceKind.OPERATION
+                    or field is None
+                    or field.scope_id != operation.scope_id
+                    or field.browser_adapter != binding.browser_adapter
+                    or field.state_authority
+                    is not ProtectedStateAuthority.EXTERNAL_BROWSER_WORKFLOW
+                ):
+                    raise ProfileValidationError(
+                        "external_operation_binding_mismatch"
+                    )
+            for dependency in operation.record_dependencies:
+                _require_resource_kind(
+                    resources,
+                    dependency.resource_id,
+                    ResourceKind.RECORD,
+                )
+                record = records.get(dependency.record_kind)
+                if record is None or record.resource_id != dependency.resource_id:
+                    raise ProfileValidationError("record_operation_dependency_mismatch")
+                if dependency.operation not in record.reveal_operations:
+                    raise ProfileValidationError("undeclared_record_dependency_operation")
+                if record.scope_id != operation.scope_id:
+                    raise ProfileValidationError("operation_dependency_scope_mismatch")
+            for dependency in operation.singleton_dependencies:
+                singleton = singletons.get(dependency.singleton_id)
+                if singleton is None:
+                    raise ProfileValidationError("unknown_singleton_dependency")
+                if singleton.scope_id != operation.scope_id:
+                    raise ProfileValidationError("operation_dependency_scope_mismatch")
+            for dependency in operation.artifact_dependencies:
+                artifact = artifacts.get(dependency.artifact_kind)
+                if artifact is None:
+                    raise ProfileValidationError("unknown_artifact_dependency")
+                if artifact.scope_id != operation.scope_id:
+                    raise ProfileValidationError("operation_dependency_scope_mismatch")
+                if (
+                    "reconcile-owner" in dependency.verbs
+                    and artifact.retention is not ArtifactRetention.DURABLE_ADJUNCT
+                ) or (
+                    "write" in dependency.verbs
+                    and artifact.retention is ArtifactRetention.RUN_SCOPED_SPILL
+                ):
+                    raise ProfileValidationError(
+                        "invalid_artifact_dependency_retention"
+                    )
+                for verb in dependency.verbs:
+                    if verb.startswith("lease.") and verb[6:] not in artifact.operations:
+                        raise ProfileValidationError(
+                            "undeclared_artifact_dependency_operation"
+                        )
+            if operation.subject_mode_binding_id is not None:
+                binding = subject_bindings.get(operation.subject_mode_binding_id)
+                if binding is None:
+                    raise ProfileValidationError("unknown_subject_mode_binding")
+                if operation.scope_id != binding.scope_id:
+                    raise ProfileValidationError("subject_mode_binding_scope_mismatch")
+            if operation.safe_payload_projection_id is not None:
+                projection = safe_payload_projections.get(
+                    operation.safe_payload_projection_id
+                )
+                if projection is None:
+                    raise ProfileValidationError("unknown_safe_payload_projection")
+                if projection.operation_id != operation.id:
+                    raise ProfileValidationError("safe_payload_operation_mismatch")
+            if operation.reference_inputs or operation.reference_outputs or operation.returns_lease:
+                if resource.kind is not ResourceKind.OPERATION:
+                    raise ProfileValidationError("typed_operation_resource_mismatch")
+                for reference_input in operation.reference_inputs:
+                    reference_kind = reference_kinds.get(reference_input.reference_kind_id)
+                    if reference_kind is None:
+                        raise ProfileValidationError("unknown_operation_reference_kind")
+                    if (
+                        reference_kind.resource_id != operation.resource_id
+                        or reference_kind.scope_id != operation.scope_id
+                    ):
+                        raise ProfileValidationError("operation_reference_scope_mismatch")
+                for reference_output in operation.reference_outputs:
+                    reference_kind = reference_kinds.get(
+                        reference_output.reference_kind_id
+                    )
+                    if reference_kind is None:
+                        raise ProfileValidationError("unknown_operation_reference_kind")
+                    if (
+                        reference_kind.resource_id != operation.resource_id
+                        or reference_kind.scope_id != operation.scope_id
+                    ):
+                        raise ProfileValidationError("operation_reference_scope_mismatch")
+
+        for reference_kind in reference_kinds.values():
+            _require_resource_kind(
+                resources,
+                reference_kind.resource_id,
+                ResourceKind.OPERATION,
+            )
+            if reference_kind.scope_id not in scopes:
+                raise ProfileValidationError("unknown_scope_reference")
+
+        bound_safe_payloads = {
+            operation.safe_payload_projection_id
+            for operation in operations.values()
+            if operation.safe_payload_projection_id is not None
+        }
+        if bound_safe_payloads != set(safe_payload_projections):
+            raise ProfileValidationError("unused_safe_payload_projection")
 
         for projection in projections.values():
             resource = _require_resource_kind(
@@ -997,6 +1798,48 @@ class PrivacyProfile:
                 (projection.projection_adapter, projection.dispatch_adapter)
             )
 
+            binding = subject_bindings.get(projection.subject_mode_binding_id)
+            if binding is None:
+                raise ProfileValidationError("unknown_subject_mode_binding")
+            execution_fields = tuple(
+                protected_field
+                for protected_field in fields.values()
+                if protected_field.execution
+                and protected_field.workflow_resource_id
+                == projection.workflow_resource_id
+            )
+            if not execution_fields:
+                raise ProfileValidationError("missing_execution_field")
+            field_scopes = {field.scope_id for field in execution_fields}
+            field_node_types = {
+                node_type
+                for field in execution_fields
+                for node_type in field.node_types
+            }
+            if field_scopes != {binding.scope_id}:
+                raise ProfileValidationError("execution_subject_scope_mismatch")
+            if field_node_types != set(binding.node_types):
+                raise ProfileValidationError("execution_subject_node_type_mismatch")
+
+        injected_inputs = set(binding_paths)
+        for projection in projections.values():
+            binding = subject_bindings[projection.subject_mode_binding_id]
+            for node_type in binding.node_types:
+                key = (node_type, projection.input_name)
+                if key in injected_inputs:
+                    raise ProfileValidationError("duplicate_execution_input_binding")
+                injected_inputs.add(key)
+
+        used_binding_ids = {
+            projection.subject_mode_binding_id for projection in projections.values()
+        } | {
+            operation.subject_mode_binding_id
+            for operation in operations.values()
+            if operation.subject_mode_binding_id is not None
+        }
+        if set(subject_bindings) != used_binding_ids:
+            raise ProfileValidationError("unused_subject_mode_binding")
+
         facts_by_kind = {
             ResourceKind.MODE: {scope.mode_resource_id for scope in scopes.values()},
             ResourceKind.WORKFLOW: {
@@ -1009,6 +1852,9 @@ class PrivacyProfile:
             ResourceKind.ARTIFACT: {artifact.resource_id for artifact in artifacts.values()},
             ResourceKind.EXECUTION: {
                 projection.execution_resource_id for projection in projections.values()
+            },
+            ResourceKind.OPERATION: {
+                reference_kind.resource_id for reference_kind in reference_kinds.values()
             },
         }
         for operation in operations.values():
@@ -1034,8 +1880,7 @@ class PrivacyProfile:
                 contracts,
                 scope.mode_source_adapter,
                 "read_declared_mode",
-                "write_declared_mode",
-                *_MODE_TRANSITION_METHODS,
+                *_MODE_SOURCE_TRANSITION_METHODS,
             )
         for field in self.protected_fields:
             _add_contract(
@@ -1045,44 +1890,110 @@ class PrivacyProfile:
                 "normalize",
                 "apply_revealed",
                 "clear_plaintext",
-                *_MODE_TRANSITION_METHODS,
             )
+            if field.state_authority is ProtectedStateAuthority.SERVER_DURABLE:
+                _add_contract(
+                    contracts,
+                    field.state_adapter,
+                    "plan_mode_transition",
+                    "prepare_mode_transition",
+                    "classify_mode_transition",
+                    "verify_mode_transition",
+                    "commit_mode_transition",
+                    "rollback_mode_transition",
+                    "retire_mode_transition",
+                )
+            else:
+                _add_contract(
+                    contracts,
+                    field.state_adapter,
+                    *_SERVER_EXTERNAL_TRANSITION_METHODS,
+                )
         for record in self.records:
             _add_contract(
                 contracts,
                 record.store_adapter,
                 "list_ids",
-                "read_protected",
-                "write_protected",
-                "delete",
-                *_MODE_TRANSITION_METHODS,
+                "read_record",
+                "compare_and_swap_record",
             )
             if record.projections:
                 _add_contract(contracts, record.store_adapter, "project")
             if record.mutation_operations:
                 _add_contract(contracts, record.store_adapter, "mutate")
+        records_by_id = {record.id: record for record in self.records}
+        for migration in self.record_reference_migrations:
+            adapter_id = records_by_id[migration.record_kind].store_adapter
+            _add_contract(
+                contracts,
+                adapter_id,
+                "read_legacy_record",
+                "commit_record_relocation",
+                "read_record_relocation",
+                "rollback_record_relocation",
+                "finalize_legacy_record",
+                "list_record_reference_mapping_ids",
+                "read_record_reference_mapping",
+            )
         for singleton in self.singletons:
             _add_contract(
                 contracts,
                 singleton.store_adapter,
                 "read_singleton",
                 "begin_singleton_replace",
-                *_MODE_TRANSITION_METHODS,
+                "rollback_singleton_replace",
             )
         for artifact in self.artifacts:
+            codec_methods = (
+                ("encode_to", "decode_from")
+                if artifact.payload_mode is ArtifactPayloadMode.STREAM_V1
+                else ("encode", "decode")
+            )
             _add_contract(
                 contracts,
                 artifact.payload_adapter,
-                "encode",
-                "decode",
+                *codec_methods,
                 "purge_plaintext_derivatives",
-                *_MODE_TRANSITION_METHODS,
             )
         for operation in self.protected_operations:
-            if operation.route is not None:
-                _add_contract(contracts, operation.adapter_slot, "invoke")
+            if operation.external_operation_binding is not None:
+                _add_contract(
+                    contracts,
+                    operation.adapter_slot,
+                    *_SERVER_EXTERNAL_OPERATION_METHODS,
+                )
+            elif operation.route is not None:
+                _add_contract(
+                    contracts,
+                    operation.adapter_slot,
+                    (
+                        "invoke_with_dependencies"
+                        if operation.record_dependencies
+                        or operation.singleton_dependencies
+                        or operation.artifact_dependencies
+                        else "invoke"
+                    ),
+                )
             if operation.safe_projection:
                 _add_contract(contracts, operation.adapter_slot, "project")
+            if operation.safe_payload_projection_id is not None:
+                _add_contract(
+                    contracts,
+                    operation.adapter_slot,
+                    "project_safe_payload",
+                )
+            if operation.returns_lease:
+                if not operation.artifact_dependencies:
+                    _add_contract(
+                        contracts,
+                        operation.adapter_slot,
+                        (
+                            "bind_source_with_dependencies"
+                            if operation.record_dependencies
+                            or operation.singleton_dependencies
+                            else "bind_source"
+                        ),
+                    )
         for projection in self.execution_projections:
             _add_contract(contracts, projection.projection_adapter, "project")
             _add_contract(contracts, projection.dispatch_adapter, "dispatch")
@@ -1115,6 +2026,25 @@ class PrivacyProfile:
                 "reconcileNodeDefinition",
                 "writeProtected",
             )
+            if field.state_authority is ProtectedStateAuthority.EXTERNAL_BROWSER_WORKFLOW:
+                _add_contract(
+                    contracts,
+                    field.browser_adapter,
+                    *_BROWSER_EXTERNAL_TRANSITION_METHODS,
+                )
+            if field.legacy_reader_ids:
+                _add_contract(
+                    contracts,
+                    field.browser_adapter,
+                    "writeWorkflowProjection",
+                )
+        for operation in self.protected_operations:
+            if operation.external_operation_binding is not None:
+                _add_contract(
+                    contracts,
+                    operation.external_operation_binding.browser_adapter,
+                    *_BROWSER_EXTERNAL_OPERATION_METHODS,
+                )
         for adapter_id in tuple(contracts):
             _add_contract(contracts, adapter_id, "onPrivacySessionChange")
         return {adapter_id: tuple(sorted(methods)) for adapter_id, methods in contracts.items()}
@@ -1132,10 +2062,11 @@ class PrivacyProfile:
         return hashlib.sha256(canonical).hexdigest()
 
     def _canonical_value(self) -> dict[str, object]:
-        return {
+        value = {
             "id": self.id,
             "distribution": self.distribution,
             "contract": self.contract,
+            "modeTransitionProtocol": MODE_TRANSITION_PROTOCOL,
             "resources": [
                 {
                     "id": resource.id,
@@ -1226,29 +2157,35 @@ class PrivacyProfile:
                     "retention": artifact.retention.value,
                     "operations": list(artifact.operations),
                     "mediaType": artifact.media_type,
+                    "payloadMode": artifact.payload_mode.value,
+                    "streamContract": (
+                        {
+                            "codecSchema": artifact.stream_contract.codec_schema,
+                            "codecVersion": artifact.stream_contract.codec_version,
+                            "maxPlaintextBytes": artifact.stream_contract.max_plaintext_bytes,
+                            "maxOwnerPlaintextBytes": artifact.stream_contract.max_owner_plaintext_bytes,
+                            "decodedOutput": artifact.stream_contract.decoded_output.value,
+                            "maxMaterializedOutputBytes": (
+                                artifact.stream_contract.max_materialized_output_bytes
+                            ),
+                        }
+                        if artifact.stream_contract is not None
+                        else None
+                    ),
                 }
                 for artifact in self.artifacts
             ],
-            "protectedOperations": [
+            "subjectModeBindings": [
                 {
-                    "id": operation.id,
-                    "resourceId": operation.resource_id,
-                    "adapterSlot": operation.adapter_slot,
-                    "route": operation.route,
-                    "method": operation.method,
-                    "scopeId": operation.scope_id,
-                    "sensitiveFields": [
-                        {
-                            "path": field.path,
-                            "class": field.field_class.value,
-                        }
-                        for field in operation.sensitive_fields
-                    ],
-                    "safeProjection": [
-                        {"path": field.path, "kind": field.kind.value}
-                        for field in operation.safe_projection
-                    ],
+                    "id": binding.id,
+                    "scopeId": binding.scope_id,
+                    "inputName": binding.input_name,
+                    "nodeTypes": list(binding.node_types),
                 }
+                for binding in self.subject_mode_bindings
+            ],
+            "protectedOperations": [
+                _canonical_protected_operation(operation)
                 for operation in self.protected_operations
             ],
             "executionProjections": [
@@ -1258,11 +2195,46 @@ class PrivacyProfile:
                     "workflowResourceId": projection.workflow_resource_id,
                     "projectionAdapter": projection.projection_adapter,
                     "dispatchAdapter": projection.dispatch_adapter,
+                    "subjectModeBindingId": projection.subject_mode_binding_id,
                     "inputName": projection.input_name,
                 }
                 for projection in self.execution_projections
             ],
         }
+        if self.record_reference_migrations:
+            value["recordReferenceMigrations"] = [
+                {
+                    "id": migration.id,
+                    "resourceId": migration.resource_id,
+                    "recordKind": migration.record_kind,
+                    "legacyBindingId": migration.legacy_binding_id,
+                }
+                for migration in self.record_reference_migrations
+            ]
+        if self.opaque_reference_kinds:
+            value["opaqueReferenceKinds"] = [
+                {
+                    "id": item.id,
+                    "resourceId": item.resource_id,
+                    "scopeId": item.scope_id,
+                }
+                for item in self.opaque_reference_kinds
+            ]
+        if self.safe_payload_projections:
+            value["safePayloadProjections"] = [
+                {
+                    "id": item.id,
+                    "operationId": item.operation_id,
+                    "schema": item.schema,
+                    "purpose": item.purpose,
+                    "safeLeaves": [
+                        {"path": leaf.path, "kind": leaf.kind.value}
+                        for leaf in item.safe_leaves
+                    ],
+                }
+                for item in self.safe_payload_projections
+            ]
+        return value
 
 
 def _canonical_adapter(slot: AdapterSlot) -> dict[str, object]:
@@ -1272,6 +2244,87 @@ def _canonical_adapter(slot: AdapterSlot) -> dict[str, object]:
         "resourceId": slot.resource_id,
         "nodeTypes": list(slot.node_types),
     }
+
+
+def _canonical_protected_operation(operation: ProtectedOperation) -> dict[str, object]:
+    value: dict[str, object] = {
+        "id": operation.id,
+        "resourceId": operation.resource_id,
+        "adapterSlot": operation.adapter_slot,
+        "route": operation.route,
+        "method": operation.method,
+        "scopeId": operation.scope_id,
+        "sensitiveFields": [
+            {"path": field.path, "class": field.field_class.value}
+            for field in operation.sensitive_fields
+        ],
+        "safeProjection": [
+            {"path": field.path, "kind": field.kind.value}
+            for field in operation.safe_projection
+        ],
+        "subjectModeBindingId": operation.subject_mode_binding_id,
+    }
+    if operation.reference_inputs or operation.reference_outputs or operation.returns_lease:
+        value.update(
+            {
+                "referenceInputs": [
+                    {
+                        "name": item.name,
+                        "referenceKindId": item.reference_kind_id,
+                        "revokeOnSuccess": item.revoke_on_success,
+                    }
+                    for item in operation.reference_inputs
+                ],
+                "referenceOutputs": [
+                    {
+                        "referenceKindId": item.reference_kind_id,
+                        "minimum": item.minimum,
+                        "maximum": item.maximum,
+                    }
+                    for item in operation.reference_outputs
+                ],
+                "returnsLease": operation.returns_lease,
+            }
+        )
+    if operation.safe_payload_projection_id is not None or operation.deferred_ui:
+        value.update(
+            {
+                "safePayloadProjectionId": operation.safe_payload_projection_id,
+                "deferredUi": operation.deferred_ui,
+            }
+        )
+    if operation.record_dependencies:
+        value["recordDependencies"] = [
+            {
+                "resourceId": item.resource_id,
+                "recordKind": item.record_kind,
+                "operation": item.operation,
+            }
+            for item in operation.record_dependencies
+        ]
+    if operation.singleton_dependencies:
+        value["singletonDependencies"] = [
+            {
+                "singletonId": item.singleton_id,
+                "verbs": list(item.verbs),
+            }
+            for item in operation.singleton_dependencies
+        ]
+    if operation.artifact_dependencies:
+        value["artifactDependencies"] = [
+            {
+                "artifactKind": item.artifact_kind,
+                "verbs": list(item.verbs),
+            }
+            for item in operation.artifact_dependencies
+        ]
+    if operation.external_operation_binding is not None:
+        value["externalOperationBinding"] = {
+            "fieldId": operation.external_operation_binding.field_id,
+            "browserAdapter": operation.external_operation_binding.browser_adapter,
+            "policy": operation.external_operation_binding.policy.contract_payload(),
+        }
+    return value
 
 
 def _is_stable_id(value: object) -> bool:

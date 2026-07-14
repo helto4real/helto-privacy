@@ -22,7 +22,7 @@ from ._suite_codec import (
     typed_tuple,
     verify_canonical_record_signature,
 )
-from .profile import PRIVACY_CONTRACT_V2
+from .profile import PRIVACY_CONTRACT_V3
 
 
 PRIVACY_SUITE_MANIFEST_V1 = "helto.privacy.suite.v1"
@@ -147,7 +147,7 @@ class SuiteManifest:
     previous_suite_id: str | None
     rollback: RollbackClass
     schema: str = PRIVACY_SUITE_MANIFEST_V1
-    contract: str = PRIVACY_CONTRACT_V2
+    contract: str = PRIVACY_CONTRACT_V3
 
     def __post_init__(self) -> None:
         _validate_stable_id(self.id)
@@ -155,7 +155,7 @@ class SuiteManifest:
             _validate_stable_id(self.previous_suite_id)
         if self.schema != PRIVACY_SUITE_MANIFEST_V1:
             raise SuiteManifestError("suite_schema_mismatch")
-        if self.contract != PRIVACY_CONTRACT_V2:
+        if self.contract != PRIVACY_CONTRACT_V3:
             raise SuiteManifestError("privacy_contract_mismatch")
         if not isinstance(self.acceptance, AcceptanceEvidence):
             raise SuiteManifestError("invalid_acceptance_evidence")

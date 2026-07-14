@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -505,3 +506,130 @@ class RootBoundSourceLeasePublisher:
                 "PRIVACY_ARTIFACT_SOURCE_REJECTED"
             ) from None
         return PublishedSourceLease(lease)
+
+
+class _ProfileBoundSourceLeasePublisher:
+    """Compiled operation-bound source publisher; constructed only by a pack handle."""
+
+    def __init__(self, installation, declaration, adapter) -> None:
+        self._installation = installation
+        self._declaration = declaration
+        self._adapter = adapter
+
+    async def publish(
+        self,
+        reference_id: object,
+        authorization: object,
+    ) -> PublishedSourceLease:
+        from .opaque_references import (
+            OpaqueReferenceError,
+            release_resolved_claims,
+            resolve_operation_references,
+            revoke_resolved_on_success,
+        )
+        from .guard import require_current_authorization
+        from .mode_runtime import (
+            acquire_bound_mode_work_admission,
+            release_bound_mode_work_admission,
+        )
+        from .runtime import ReadinessHandle
+        from .suite_runtime import require_active_process_suite
+
+        declaration = self._declaration
+        if not declaration.returns_lease or len(declaration.reference_inputs) != 1:
+            raise ArtifactPublicationError("PRIVACY_ARTIFACT_PUBLICATION_INVALID")
+        reference_input = declaration.reference_inputs[0]
+        has_dependencies = bool(
+            declaration.record_dependencies
+            or declaration.singleton_dependencies
+            or declaration.artifact_dependencies
+        )
+        resolved = None
+        dependencies = None
+        admission = None
+        succeeded = False
+        try:
+            ReadinessHandle(self._installation).require_ready()
+            require_active_process_suite()
+            require_current_authorization(
+                authorization,
+                declaration.id,
+                pack_id=self._installation.profile.id,
+            )
+            admission = acquire_bound_mode_work_admission(
+                self._installation,
+                (declaration.scope_id,),
+            )
+            resolved = resolve_operation_references(
+                profile=self._installation.profile,
+                declaration=declaration,
+                authorization=authorization,
+                references={reference_input.name: reference_id},
+            )
+            bind_source = getattr(
+                self._adapter,
+                (
+                    "bind_source_with_dependencies"
+                    if has_dependencies
+                    else "bind_source"
+                ),
+                None,
+            )
+            if not callable(bind_source):
+                raise OpaqueReferenceError()
+            if has_dependencies:
+                from .operation_dependencies import build_operation_dependencies
+
+                dependencies = build_operation_dependencies(
+                    self._installation,
+                    declaration,
+                    authorization,
+                )
+                try:
+                    candidate = bind_source(
+                        resolved[reference_input.name],
+                        declaration,
+                        dependencies,
+                    )
+                    source = (
+                        await candidate
+                        if inspect.isawaitable(candidate)
+                        else candidate
+                    )
+                finally:
+                    from .operation_dependencies import (
+                        expire_operation_dependencies,
+                    )
+
+                    expire_operation_dependencies(dependencies)
+                    dependencies = None
+            else:
+                source = await run_blocking_adapter(
+                    bind_source,
+                    resolved[reference_input.name],
+                    declaration,
+                )
+            if not isinstance(source, RootBoundSource):
+                raise OpaqueReferenceError()
+            lease = await issue_root_bound_source_lease(
+                pack_id=self._installation.profile.id,
+                operation_id=declaration.id,
+                source=source,
+                authorization=authorization,
+            )
+            revoke_resolved_on_success(declaration, resolved)
+            succeeded = True
+            return PublishedSourceLease(lease)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ArtifactPublicationError("PRIVACY_ARTIFACT_SOURCE_REJECTED") from None
+        finally:
+            if dependencies is not None:
+                from .operation_dependencies import expire_operation_dependencies
+
+                expire_operation_dependencies(dependencies)
+            if not succeeded:
+                release_resolved_claims(resolved)
+            if admission is not None:
+                release_bound_mode_work_admission(admission)

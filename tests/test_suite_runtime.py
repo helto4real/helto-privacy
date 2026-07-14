@@ -3,6 +3,7 @@ import types
 from dataclasses import replace
 
 import pytest
+from tests.mode_protocol_fixtures import MutableModeSourceFixture
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 from helto_privacy.suite import sign_suite_manifest, sign_suite_promotion, verify_suite_release
@@ -27,7 +28,7 @@ from helto_privacy.suite_runtime import (
     register_process_suite,
     require_active_process_suite,
 )
-from test_suite_manifest import suite_manifest
+from tests.test_suite_manifest import suite_manifest
 
 
 def _release(*, ready, manifest=None):
@@ -106,13 +107,7 @@ def _install_manifest_profiles(manifest, monkeypatch):
         runtime.install(
             profile,
             {
-                "mode-source": types.SimpleNamespace(
-                    read_declared_mode=lambda: None,
-                    write_declared_mode=lambda: None,
-                    prepare_mode_transition=lambda *_args: None,
-                    commit_mode_transition=lambda *_args: None,
-                    rollback_mode_transition=lambda *_args: None,
-                )
+                "mode-source": MutableModeSourceFixture()
             },
         )
         identities.append(

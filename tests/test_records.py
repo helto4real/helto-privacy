@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import copy
+import threading
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture
+
 import helto_privacy.keystore as keystore
+import helto_privacy.migration as migration
+import helto_privacy.records as records
 import helto_privacy.runtime as runtime
 from helto_privacy import (
     LockedRecordShell,
@@ -12,6 +17,7 @@ from helto_privacy import (
     RecordError,
     RecordMutationReceipt,
     RecordProjectionResult,
+    RecordSnapshot,
     RevealedRecord,
     confirm_record_mutation,
     generate_private_record_id,
@@ -22,6 +28,8 @@ from helto_privacy.envelope import PrivacyEnvelopeCodec
 from helto_privacy.guard import PrivacyAuthorizationError, authorize_privacy_request
 from helto_privacy.profile import (
     AdapterSlot,
+    LegacyLocationKind,
+    LegacyReaderBinding,
     PrivacyProfile,
     PrivacyScope,
     ProfileResource,
@@ -35,7 +43,7 @@ RECORD_ID = "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
 SECOND_RECORD_ID = "hp-rec-Q1w2E3r4T5y6U7i8O9p0A1s2D3f4G5h6"
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, _scope_id):
         return "private"
 
@@ -61,6 +69,7 @@ class RecordStore:
         self.read_calls = 0
         self.project_calls = 0
         self.records = {}
+        self.revisions = {}
         self.retained_plaintext = None
         self.extra_projection = {}
         self.deleted = []
@@ -73,13 +82,20 @@ class RecordStore:
     def list_ids(self):
         return tuple(dict.fromkeys((*self.ids, *self.records)))
 
-    def read_protected(self, record_id):
+    def read_record(self, record_id):
         self.read_calls += 1
-        return self.records[record_id]
+        return RecordSnapshot(
+            self.revisions.get(record_id, 1 if record_id in self.records else 0),
+            self.records.get(record_id),
+        )
 
-    def write_protected(self, record_id, value):
+    def compare_and_swap_record(self, record_id, expected, replacement):
         if self.failure:
             raise RuntimeError(self.failure)
+        current = self.read_record(record_id)
+        if current != expected:
+            return False
+        value = replacement.protected
         self.written.append((record_id, value))
         if self.corrupt_next_write:
             self.corrupt_next_write = False
@@ -88,14 +104,14 @@ class RecordStore:
                 ("A" if value["ciphertext"][0] != "A" else "B")
                 + value["ciphertext"][1:]
             )
-        self.records[record_id] = value
-
-    def delete(self, record_id):
-        if self.failure:
-            raise RuntimeError(self.failure)
-        self.deleted.append(record_id)
-        self.records.pop(record_id, None)
-        self.ids = tuple(item for item in self.ids if item != record_id)
+        self.revisions[record_id] = replacement.revision
+        if value is None:
+            self.deleted.append(record_id)
+            self.records.pop(record_id, None)
+            self.ids = tuple(item for item in self.ids if item != record_id)
+        else:
+            self.records[record_id] = value
+        return True
 
     def project(self, value, operation):
         self.project_calls += 1
@@ -125,7 +141,26 @@ class RecordStore:
         return None
 
 
-def _profile(*, reveal: bool = False, mutations: bool = False) -> PrivacyProfile:
+class LegacyRecordReader:
+    def __init__(self) -> None:
+        self.probe_calls = 0
+        self.read_calls = 0
+
+    def probe(self, source, _context):
+        self.probe_calls += 1
+        return isinstance(source, dict) and source.get("schema") == "legacy.record.v1"
+
+    def read(self, source, _context):
+        self.read_calls += 1
+        return copy.deepcopy(source["record"])
+
+
+def _profile(
+    *,
+    reveal: bool = False,
+    mutations: bool = False,
+    legacy: bool = False,
+) -> PrivacyProfile:
     return PrivacyProfile(
         id="helto.record-test",
         distribution="comfyui-record-test",
@@ -157,6 +192,15 @@ def _profile(*, reveal: bool = False, mutations: bool = False) -> PrivacyProfile
                 ) if mutations else (),
             ),
         ),
+        legacy_bindings=(
+            LegacyReaderBinding(
+                "prompt-record-v1-binding",
+                "prompt-record-v1",
+                "library",
+                LegacyLocationKind.RECORD,
+                "prompt-record",
+            ),
+        ) if legacy else (),
     )
 
 
@@ -169,6 +213,12 @@ def record_pack(monkeypatch):
         lambda: None,
     )
     store = RecordStore()
+    keystore.initialize_keystore("synthetic record listing password")
+    for record_id in store.ids:
+        store.records[record_id] = PrivacyEnvelopeCodec(
+            "helto.record-test.v1"
+        ).encrypt_state({"prompt": "private", "summary": "private"})
+    keystore.lock_keystore()
     pack = runtime.install(_profile(), {"mode": ModeAdapter(), "records": store})
     return pack, store
 
@@ -221,7 +271,47 @@ def mutation_pack(monkeypatch):
     return pack, store, Request(token)
 
 
-def test_locked_listing_returns_only_minimal_shells_without_reading_records(
+@pytest.fixture
+def legacy_record_pack(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        migration.MIGRATION_STATE_ENV,
+        str(tmp_path / "migration" / "state.json"),
+    )
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        "helto_privacy.suite_runtime.require_active_process_suite",
+        lambda: None,
+    )
+    migration.reset_migration_runtime_for_tests()
+    reader = LegacyRecordReader()
+    migration.register_legacy_reader_units(
+        (
+            migration.LegacyReaderUnit(
+                "prompt-record-v1",
+                "Legacy prompt record",
+                reader,
+            ),
+        )
+    )
+    store = RecordStore()
+    store.ids = (RECORD_ID,)
+    store.records[RECORD_ID] = {
+        "schema": "legacy.record.v1",
+        "record": {
+            "prompt": "SYNTHETIC_LEGACY_PROMPT",
+            "summary": "SYNTHETIC_LEGACY_SUMMARY",
+        },
+    }
+    pack = runtime.install(
+        _profile(reveal=True, mutations=True, legacy=True),
+        {"mode": ModeAdapter(), "records": store},
+    )
+    token = keystore.initialize_keystore("synthetic legacy record password")["token"]
+    return pack, store, reader, Request(token), tmp_path
+
+
+def test_locked_listing_returns_only_minimal_shells_without_decrypting_records(
     record_pack,
 ):
     pack, store = record_pack
@@ -252,8 +342,297 @@ def test_locked_listing_returns_only_minimal_shells_without_reading_records(
             "label": "Private record",
         },
     ]
-    assert store.read_calls == 0
+    assert store.read_calls == 2
     assert "A1b2C3d4" not in repr(shells[0])
+
+
+def test_legacy_listing_blocks_unclassified_storage_without_probing(
+    legacy_record_pack,
+):
+    pack, store, reader, _request, tmp_path = legacy_record_pack
+
+    with pytest.raises(RecordError) as blocked:
+        pack.records("library").list_shells("prompt-record")
+
+    assert blocked.value.code == "PRIVACY_RECORD_MODE_BLOCKED"
+    assert store.read_calls == 1
+    assert reader.probe_calls == 0
+    assert reader.read_calls == 0
+    assert not (tmp_path / "migration" / "state.json").exists()
+
+
+def test_generic_migration_handle_cannot_reveal_record_plaintext(
+    legacy_record_pack,
+):
+    pack, store, reader, request, _tmp_path = legacy_record_pack
+    authorization = authorize_privacy_request(
+        request,
+        "migration.read",
+        pack_id=pack.profile.id,
+    )
+
+    with pytest.raises(migration.MigrationError) as blocked:
+        pack.migration.discover_and_read(
+            "prompt-record-v1-binding",
+            store.records[RECORD_ID],
+            authorization,
+        )
+
+    assert blocked.value.code == "typed_migration_operation_required"
+    with pytest.raises(migration.MigrationError) as bound_blocked:
+        migration.discover_bound_legacy(
+            pack.profile,
+            "prompt-record-v1-binding",
+            store.records[RECORD_ID],
+            authorization,
+            operation_id="migration.read",
+        )
+    assert bound_blocked.value.code == "typed_migration_operation_required"
+    assert reader.probe_calls == 0
+    assert reader.read_calls == 0
+
+
+@pytest.mark.parametrize("operation_id", ["record.audit", "record.use"])
+def test_record_authorization_cannot_invoke_raw_migration_bridge(
+    legacy_record_pack,
+    operation_id,
+):
+    pack, store, reader, request, _tmp_path = legacy_record_pack
+
+    with pytest.raises(migration.MigrationError) as blocked:
+        migration.discover_bound_legacy(
+            pack.profile,
+            "prompt-record-v1-binding",
+            store.records[RECORD_ID],
+            authorize_privacy_request(
+                request,
+                operation_id,
+                pack_id=pack.profile.id,
+            ),
+            operation_id=operation_id,
+        )
+
+    assert blocked.value.code == "typed_migration_operation_required"
+    assert reader.probe_calls == 0
+    assert reader.read_calls == 0
+
+
+def test_generic_migration_handle_cannot_complete_record_obligation(
+    legacy_record_pack,
+):
+    pack, store, _reader, request, _tmp_path = legacy_record_pack
+    original = copy.deepcopy(store.records[RECORD_ID])
+    store.extra_projection = {"path": "/SYNTHETIC/PRIVATE/PATH"}
+
+    with pytest.raises(RecordError):
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+    obligation_id = next(iter(migration._load_state()["obligations"]))
+    transaction = records._RecordMigrationTransaction(
+        store,
+        RECORD_ID,
+        "helto.record-test.v1",
+        original=store.read_record(RECORD_ID),
+    )
+
+    authorization = authorize_privacy_request(
+        request,
+        "migration.complete",
+        pack_id=pack.profile.id,
+    )
+    with pytest.raises(migration.MigrationError) as blocked:
+        pack.migration.complete(
+            obligation_id,
+            {"prompt": "SYNTHETIC_BYPASS"},
+            transaction,
+            authorization,
+        )
+
+    assert blocked.value.code == "typed_migration_operation_required"
+    with pytest.raises(migration.MigrationError) as bound_blocked:
+        migration.complete_bound_legacy(
+            pack.profile,
+            "prompt-record-v1-binding",
+            obligation_id,
+            {"prompt": "SYNTHETIC_BYPASS"},
+            transaction,
+            authorization,
+            operation_id="migration.complete",
+            recovery_locator=RECORD_ID,
+        )
+    assert bound_blocked.value.code == "typed_migration_operation_required"
+    with pytest.raises(migration.MigrationError) as record_blocked:
+        migration.complete_bound_legacy(
+            pack.profile,
+            "prompt-record-v1-binding",
+            obligation_id,
+            {"prompt": "SYNTHETIC_BYPASS"},
+            transaction,
+            authorize_privacy_request(
+                request,
+                "record.audit",
+                pack_id=pack.profile.id,
+            ),
+            operation_id="record.audit",
+            recovery_locator=RECORD_ID,
+        )
+    assert record_blocked.value.code == "typed_migration_operation_required"
+    assert store.records[RECORD_ID] == original
+    assert pack.migration.status()[0].unresolved == 1
+
+
+def test_generic_migration_handle_cannot_recover_record_transaction(
+    legacy_record_pack,
+    monkeypatch,
+):
+    pack, store, reader, request, _tmp_path = legacy_record_pack
+    original_commit = records._RecordMigrationTransaction.commit
+
+    class SyntheticProcessStop(BaseException):
+        pass
+
+    def stop_after_write(transaction):
+        original_commit(transaction)
+        raise SyntheticProcessStop()
+
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "commit",
+        stop_after_write,
+    )
+    with pytest.raises(SyntheticProcessStop):
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+    obligation_id = next(iter(migration._load_state()["obligations"]))
+    transaction = records._RecordMigrationTransaction(
+        store,
+        RECORD_ID,
+        "helto.record-test.v1",
+    )
+
+    authorization = authorize_privacy_request(
+        request,
+        "migration.recover",
+        pack_id=pack.profile.id,
+    )
+    with pytest.raises(migration.MigrationError) as blocked:
+        pack.migration.recover_pending(
+            obligation_id,
+            transaction,
+            authorization,
+        )
+
+    assert blocked.value.code == "typed_migration_operation_required"
+    with pytest.raises(migration.MigrationError) as bound_blocked:
+        migration.recover_bound_legacy(
+            pack.profile,
+            ("prompt-record-v1-binding",),
+            RECORD_ID,
+            transaction,
+            authorization,
+            operation_id="migration.recover",
+        )
+    state = migration._load_state()
+    assert bound_blocked.value.code == "typed_migration_operation_required"
+    with pytest.raises(migration.MigrationError) as record_blocked:
+        migration.recover_bound_legacy(
+            pack.profile,
+            ("prompt-record-v1-binding",),
+            RECORD_ID,
+            transaction,
+            authorize_privacy_request(
+                request,
+                "record.audit",
+                pack_id=pack.profile.id,
+            ),
+            operation_id="record.audit",
+        )
+    assert record_blocked.value.code == "typed_migration_operation_required"
+    assert len(state["transactions"]) == 1
+    assert PrivacyEnvelopeCodec("helto.record-test.v1").is_encrypted_payload(
+        store.records[RECORD_ID]
+    )
+    assert reader.read_calls == 1
+
+
+def test_typed_record_audit_checks_scope_without_returning_plaintext(
+    legacy_record_pack,
+):
+    pack, _store, reader, request, _tmp_path = legacy_record_pack
+    pack.migration.declare_audit_scope(
+        "legacy-records",
+        "prompt-record-v1",
+        (migration.AuditItem("record-a", migration.AuditItemKind.LIBRARY),),
+        authorize_privacy_request(
+            request,
+            "migration.audit.declare",
+            pack_id=pack.profile.id,
+        ),
+    )
+
+    matched = pack.records("library").audit_legacy(
+        "prompt-record",
+        RECORD_ID,
+        "legacy-records",
+        "record-a",
+        "prompt-record-v1-binding",
+        authorize_privacy_request(
+            request,
+            "record.audit",
+            pack_id=pack.profile.id,
+        ),
+    )
+
+    assert matched is True
+    assert reader.read_calls == 1
+    with pytest.raises(migration.MigrationError) as unresolved:
+        pack.migration.confirm_retirement_seal(
+            "legacy-records",
+            "prompt-record-v1",
+            authorize_privacy_request(
+                request,
+                "migration.audit.seal",
+                pack_id=pack.profile.id,
+            ),
+        )
+    assert unresolved.value.code == "audit_scope_has_unresolved_migrations"
+
+    pack.records("library").reveal(
+        "prompt-record",
+        RECORD_ID,
+        "use",
+        authorize_privacy_request(
+            request,
+            "record.use",
+            pack_id=pack.profile.id,
+        ),
+    )
+    seal = pack.migration.confirm_retirement_seal(
+        "legacy-records",
+        "prompt-record-v1",
+        authorize_privacy_request(
+            request,
+            "migration.audit.seal",
+            pack_id=pack.profile.id,
+        ),
+    )
+    assert seal.valid is True
 
 
 def test_locked_listing_rejects_nonopaque_consumer_ids(record_pack):
@@ -309,6 +688,120 @@ def test_authorized_reveal_returns_only_allowlisted_product_projection(reveal_pa
     assert store.read_calls == 1
     assert store.project_calls == 1
     assert store.retained_plaintext == {}
+
+
+def test_authorized_legacy_reveal_rewrites_verifies_and_receipts(
+    legacy_record_pack,
+):
+    pack, store, reader, request, tmp_path = legacy_record_pack
+
+    revealed = pack.records("library").reveal(
+        "prompt-record",
+        RECORD_ID,
+        "use",
+        authorize_privacy_request(request, "record.use", pack_id=pack.profile.id),
+    )
+
+    assert revealed.value == {"prompt": "SYNTHETIC_LEGACY_PROMPT"}
+    assert PrivacyEnvelopeCodec("helto.record-test.v1").decrypt_state(
+        store.records[RECORD_ID]
+    ) == {
+        "prompt": "SYNTHETIC_LEGACY_PROMPT",
+        "summary": "SYNTHETIC_LEGACY_SUMMARY",
+    }
+    assert reader.probe_calls == 2
+    assert reader.read_calls == 1
+    status = pack.migration.status()
+    assert status[0].discovered == 1
+    assert status[0].resolved == 1
+    assert status[0].unresolved == 0
+    assert "SYNTHETIC" not in repr(revealed)
+    assert "SYNTHETIC" not in (tmp_path / "migration" / "state.json").read_text()
+
+
+def test_legacy_reveal_replacement_becomes_the_verified_current_state(
+    legacy_record_pack,
+):
+    pack, store, _reader, request, _tmp_path = legacy_record_pack
+    store.project_replacement = {
+        "prompt": "SYNTHETIC_LEGACY_PROMPT",
+        "summary": "SYNTHETIC_LEGACY_SUMMARY",
+        "last_used_at": "2030-01-01T00:00:00Z",
+    }
+
+    revealed = pack.records("library").reveal(
+        "prompt-record",
+        RECORD_ID,
+        "use",
+        authorize_privacy_request(request, "record.use", pack_id=pack.profile.id),
+    )
+
+    assert revealed.value == {"prompt": "SYNTHETIC_LEGACY_PROMPT"}
+    assert PrivacyEnvelopeCodec("helto.record-test.v1").decrypt_state(
+        store.records[RECORD_ID]
+    )["last_used_at"] == "2030-01-01T00:00:00Z"
+    assert pack.migration.status()[0].resolved == 1
+
+
+def test_unauthorized_legacy_reveal_never_invokes_the_reader(legacy_record_pack):
+    pack, store, reader, _request, _tmp_path = legacy_record_pack
+
+    with pytest.raises(PrivacyAuthorizationError):
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            object(),
+        )
+
+    assert store.read_calls == 0
+    assert reader.probe_calls == 0
+    assert reader.read_calls == 0
+
+
+def test_unauthorized_legacy_mutation_never_invokes_the_reader(legacy_record_pack):
+    pack, store, reader, _request, _tmp_path = legacy_record_pack
+
+    with pytest.raises(PrivacyAuthorizationError):
+        pack.records("library").mutate(
+            "prompt-record",
+            "patch",
+            {"record": {"summary": "SYNTHETIC_UNAUTHORIZED"}},
+            object(),
+            record_id=RECORD_ID,
+        )
+
+    assert store.read_calls == 0
+    assert reader.probe_calls == 0
+    assert reader.read_calls == 0
+
+
+def test_corrupt_current_record_never_falls_back_to_a_legacy_reader(
+    legacy_record_pack,
+):
+    pack, store, reader, request, _tmp_path = legacy_record_pack
+    store.records[RECORD_ID] = {
+        "schema": "helto.record-test.v1",
+        "encrypted": True,
+        "algorithm": "AES-256-GCM",
+        "ciphertext": "corrupt-current-envelope",
+    }
+
+    with pytest.raises(RecordError) as failed:
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+
+    assert failed.value.code == "PRIVACY_RECORD_DECRYPT_FAILED"
+    assert reader.probe_calls == 0
+    assert reader.read_calls == 0
 
 
 def test_record_declaration_exposes_strict_shell_and_mutation_contract():
@@ -418,6 +911,553 @@ def test_failed_mutation_readback_restores_the_original_envelope(mutation_pack):
     assert "SYNTHETIC" not in repr(failed.value)
 
 
+def test_legacy_projection_failure_keeps_original_and_obligation_unresolved(
+    legacy_record_pack,
+):
+    pack, store, _reader, request, _tmp_path = legacy_record_pack
+    original = copy.deepcopy(store.records[RECORD_ID])
+    store.extra_projection = {"path": "/SYNTHETIC/PRIVATE/PATH"}
+
+    with pytest.raises(RecordError) as failed:
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+
+    assert failed.value.code == "PRIVACY_RECORD_PROJECTION_INVALID"
+    assert store.records[RECORD_ID] == original
+    status = pack.migration.status()[0]
+    assert status.discovered == 1
+    assert status.resolved == 0
+    assert status.unresolved == 1
+    assert "SYNTHETIC" not in repr(failed.value)
+
+
+def test_legacy_readback_failure_restores_exact_original_and_stays_unresolved(
+    legacy_record_pack,
+):
+    pack, store, _reader, request, _tmp_path = legacy_record_pack
+    original = copy.deepcopy(store.records[RECORD_ID])
+    store.corrupt_next_write = True
+
+    with pytest.raises(RecordError) as failed:
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+
+    assert failed.value.code == "PRIVACY_RECORD_VERIFICATION_FAILED"
+    assert store.records[RECORD_ID] == original
+    status = pack.migration.status()[0]
+    assert status.resolved == 0
+    assert status.unresolved == 1
+
+
+@pytest.mark.parametrize("operation", ["patch", "replace"])
+def test_legacy_in_place_mutations_commit_current_and_resolve(
+    legacy_record_pack,
+    operation,
+):
+    pack, store, _reader, request, _tmp_path = legacy_record_pack
+
+    receipt = pack.records("library").mutate(
+        "prompt-record",
+        operation,
+        {"record": {"summary": f"SYNTHETIC_{operation.upper()}"}},
+        authorize_privacy_request(
+            request,
+            f"record.{operation}",
+            pack_id=pack.profile.id,
+        ),
+        record_id=RECORD_ID,
+    )
+
+    assert receipt.record_id == RECORD_ID
+    assert PrivacyEnvelopeCodec("helto.record-test.v1").decrypt_state(
+        store.records[RECORD_ID]
+    ) == {
+        "prompt": "SYNTHETIC_LEGACY_PROMPT",
+        "summary": f"SYNTHETIC_{operation.upper()}",
+    }
+    status = pack.migration.status()[0]
+    assert status.resolved == 1
+    assert status.unresolved == 0
+
+
+def test_legacy_duplicate_migrates_source_before_creating_current_target(
+    legacy_record_pack,
+    monkeypatch,
+):
+    pack, store, _reader, request, _tmp_path = legacy_record_pack
+    monkeypatch.setattr(
+        records,
+        "generate_private_record_id",
+        lambda: SECOND_RECORD_ID,
+    )
+
+    receipt = pack.records("library").mutate(
+        "prompt-record",
+        "duplicate",
+        {"record": {"summary": "SYNTHETIC_DUPLICATE"}},
+        authorize_privacy_request(
+            request,
+            "record.duplicate",
+            pack_id=pack.profile.id,
+        ),
+        record_id=RECORD_ID,
+    )
+
+    codec = PrivacyEnvelopeCodec("helto.record-test.v1")
+    assert receipt.record_id == SECOND_RECORD_ID
+    assert codec.decrypt_state(store.records[RECORD_ID]) == {
+        "prompt": "SYNTHETIC_LEGACY_PROMPT",
+        "summary": "SYNTHETIC_LEGACY_SUMMARY",
+    }
+    assert codec.decrypt_state(store.records[SECOND_RECORD_ID]) == {
+        "prompt": "SYNTHETIC_LEGACY_PROMPT",
+        "summary": "SYNTHETIC_DUPLICATE",
+    }
+    assert pack.migration.status()[0].resolved == 1
+
+
+def test_legacy_duplicate_target_failure_keeps_truthful_source_receipt(
+    legacy_record_pack,
+    monkeypatch,
+):
+    pack, store, _reader, request, _tmp_path = legacy_record_pack
+    monkeypatch.setattr(records, "generate_private_record_id", lambda: SECOND_RECORD_ID)
+    original_compare_and_swap = store.compare_and_swap_record
+
+    def fail_target(record_id, expected, replacement):
+        if record_id == SECOND_RECORD_ID:
+            raise OSError("synthetic target failure")
+        return original_compare_and_swap(record_id, expected, replacement)
+
+    monkeypatch.setattr(store, "compare_and_swap_record", fail_target)
+
+    with pytest.raises(RecordError):
+        pack.records("library").mutate(
+            "prompt-record",
+            "duplicate",
+            {"record": {"summary": "SYNTHETIC_DUPLICATE"}},
+            authorize_privacy_request(
+                request,
+                "record.duplicate",
+                pack_id=pack.profile.id,
+            ),
+            record_id=RECORD_ID,
+        )
+
+    assert PrivacyEnvelopeCodec("helto.record-test.v1").is_encrypted_payload(
+        store.records[RECORD_ID]
+    )
+    assert SECOND_RECORD_ID not in store.records
+    status = pack.migration.status()[0]
+    assert status.resolved == 1
+    assert status.unresolved == 0
+
+
+def test_next_authorized_reveal_recovers_prepared_record_transaction(
+    legacy_record_pack,
+    monkeypatch,
+):
+    pack, store, reader, request, _tmp_path = legacy_record_pack
+    original_commit = records._RecordMigrationTransaction.commit
+
+    class SyntheticProcessStop(BaseException):
+        pass
+
+    def stop_after_write(transaction):
+        original_commit(transaction)
+        raise SyntheticProcessStop()
+
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "commit",
+        stop_after_write,
+    )
+    with pytest.raises(SyntheticProcessStop):
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+    assert PrivacyEnvelopeCodec("helto.record-test.v1").is_encrypted_payload(
+        store.records[RECORD_ID]
+    )
+
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "commit",
+        original_commit,
+    )
+    revealed = pack.records("library").reveal(
+        "prompt-record",
+        RECORD_ID,
+        "use",
+        authorize_privacy_request(request, "record.use", pack_id=pack.profile.id),
+    )
+
+    assert revealed.value == {"prompt": "SYNTHETIC_LEGACY_PROMPT"}
+    assert reader.read_calls == 1
+    assert pack.migration.status()[0].resolved == 1
+
+
+def test_next_authorized_reveal_finishes_finalize_pending_receipt(
+    legacy_record_pack,
+    monkeypatch,
+):
+    pack, _store, reader, request, _tmp_path = legacy_record_pack
+    original_finalize = records._RecordMigrationTransaction.finalize
+
+    def fail_finalize(_transaction, _original):
+        raise OSError("synthetic process interruption")
+
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "finalize",
+        fail_finalize,
+    )
+    with pytest.raises(RecordError) as pending:
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+    assert pending.value.code == "PRIVACY_RECORD_VERIFICATION_FAILED"
+    assert pack.migration.status()[0].resolved == 1
+
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "finalize",
+        original_finalize,
+    )
+    revealed = pack.records("library").reveal(
+        "prompt-record",
+        RECORD_ID,
+        "use",
+        authorize_privacy_request(request, "record.use", pack_id=pack.profile.id),
+    )
+
+    assert revealed.value == {"prompt": "SYNTHETIC_LEGACY_PROMPT"}
+    assert reader.read_calls == 1
+    assert pack.migration.status()[0].resolved == 1
+
+
+@pytest.mark.parametrize("phase", ["prepared", "finalize-pending"])
+@pytest.mark.parametrize("destructive_operation", ["delete", "replace"])
+def test_pending_migration_never_undoes_locked_destructive_record_change(
+    legacy_record_pack,
+    monkeypatch,
+    phase,
+    destructive_operation,
+):
+    pack, store, reader, request, _tmp_path = legacy_record_pack
+    original_commit = records._RecordMigrationTransaction.commit
+    original_finalize = records._RecordMigrationTransaction.finalize
+
+    class SyntheticProcessStop(BaseException):
+        pass
+
+    if phase == "prepared":
+        def stop_after_write(transaction):
+            original_commit(transaction)
+            raise SyntheticProcessStop()
+
+        monkeypatch.setattr(
+            records._RecordMigrationTransaction,
+            "commit",
+            stop_after_write,
+        )
+        expected_failure = SyntheticProcessStop
+    else:
+        def stop_before_finalize(_transaction, _original):
+            raise OSError("synthetic finalize interruption")
+
+        monkeypatch.setattr(
+            records._RecordMigrationTransaction,
+            "finalize",
+            stop_before_finalize,
+        )
+        expected_failure = RecordError
+
+    with pytest.raises(expected_failure):
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "commit",
+        original_commit,
+    )
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "finalize",
+        original_finalize,
+    )
+
+    replacement = PrivacyEnvelopeCodec("helto.record-test.v1").encrypt_state(
+        {
+            "prompt": "SYNTHETIC_CONFIRMED_REPLACEMENT",
+            "summary": "SYNTHETIC_REPLACEMENT_SUMMARY",
+        }
+    )
+    keystore.lock_keystore()
+    confirmation = confirm_record_mutation(
+        pack_id=pack.profile.id,
+        resource_id="library",
+        record_kind="prompt-record",
+        record_id=RECORD_ID,
+        operation=destructive_operation,
+        confirmed=True,
+    )
+    if destructive_operation == "delete":
+        pack.records("library").delete(
+            "prompt-record",
+            RECORD_ID,
+            confirmation,
+        )
+    else:
+        pack.records("library").replace(
+            "prompt-record",
+            RECORD_ID,
+            replacement,
+            confirmation,
+        )
+
+    next_token = keystore.unlock_keystore(
+        "synthetic legacy record password"
+    )["token"]
+    next_authorization = authorize_privacy_request(
+        Request(next_token),
+        "record.use",
+        pack_id=pack.profile.id,
+    )
+    if destructive_operation == "delete":
+        with pytest.raises(RecordError) as missing:
+            pack.records("library").reveal(
+                "prompt-record",
+                RECORD_ID,
+                "use",
+                next_authorization,
+            )
+            assert missing.value.code == "PRIVACY_RECORD_READ_FAILED"
+        assert RECORD_ID not in store.records
+    else:
+        revealed = pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            next_authorization,
+        )
+        assert revealed.value == {"prompt": "SYNTHETIC_CONFIRMED_REPLACEMENT"}
+        assert PrivacyEnvelopeCodec("helto.record-test.v1").decrypt_state(
+            store.records[RECORD_ID]
+        )["prompt"] == "SYNTHETIC_CONFIRMED_REPLACEMENT"
+
+    state = migration._load_state()
+    obligation = next(iter(state["obligations"].values()))
+    assert state["transactions"] == {}
+    status = pack.migration.status()[0]
+    if phase == "prepared":
+        assert obligation["disposition"] == "unresolved"
+        assert state["receipts"] == {}
+        assert status.resolved == 0
+        assert status.unresolved == 1
+    else:
+        assert obligation["disposition"] == "migrated"
+        assert len(state["receipts"]) == 1
+        assert status.resolved == 1
+        assert status.unresolved == 0
+    assert reader.read_calls == 1
+
+
+@pytest.mark.parametrize("phase", ["prepared", "finalize-pending"])
+@pytest.mark.parametrize(
+    "divergent_value",
+    (
+        None,
+        {
+            "schema": "helto.record-test.v1",
+            "encrypted": True,
+            "algorithm": "AES-256-GCM",
+            "ciphertext": "unrecognized-current-value",
+        },
+    ),
+)
+def test_recovery_preserves_unexplained_record_divergence(
+    legacy_record_pack,
+    monkeypatch,
+    phase,
+    divergent_value,
+):
+    pack, store, reader, request, _tmp_path = legacy_record_pack
+    original_commit = records._RecordMigrationTransaction.commit
+    original_finalize = records._RecordMigrationTransaction.finalize
+
+    class SyntheticProcessStop(BaseException):
+        pass
+
+    if phase == "prepared":
+        def stop_after_write(transaction):
+            original_commit(transaction)
+            raise SyntheticProcessStop()
+
+        monkeypatch.setattr(
+            records._RecordMigrationTransaction,
+            "commit",
+            stop_after_write,
+        )
+        expected_failure = SyntheticProcessStop
+    else:
+        def stop_before_finalize(_transaction, _original):
+            raise OSError("synthetic finalize interruption")
+
+        monkeypatch.setattr(
+            records._RecordMigrationTransaction,
+            "finalize",
+            stop_before_finalize,
+        )
+        expected_failure = RecordError
+
+    with pytest.raises(expected_failure):
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "commit",
+        original_commit,
+    )
+    monkeypatch.setattr(
+        records._RecordMigrationTransaction,
+        "finalize",
+        original_finalize,
+    )
+    store.records[RECORD_ID] = copy.deepcopy(divergent_value)
+
+    with pytest.raises(RecordError):
+        pack.records("library").reveal(
+            "prompt-record",
+            RECORD_ID,
+            "use",
+            authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            ),
+        )
+
+    assert store.records[RECORD_ID] == divergent_value
+    state = migration._load_state()
+    obligation = next(iter(state["obligations"].values()))
+    assert state["transactions"] == {}
+    if phase == "prepared":
+        assert obligation["disposition"] == "unresolved"
+        assert state["receipts"] == {}
+    else:
+        assert obligation["disposition"] == "migrated"
+        assert len(state["receipts"]) == 1
+    assert reader.read_calls == 1
+
+
+def test_concurrent_legacy_reveals_share_one_verified_migration(
+    legacy_record_pack,
+    monkeypatch,
+):
+    pack, _store, reader, request, _tmp_path = legacy_record_pack
+    barrier = threading.Barrier(3)
+    entered = threading.Event()
+    release = threading.Event()
+    failed = threading.Event()
+    results = []
+    failures = []
+    original_read = reader.read
+
+    def blocking_read(source, context):
+        entered.set()
+        assert release.wait(timeout=5)
+        return original_read(source, context)
+
+    monkeypatch.setattr(reader, "read", blocking_read)
+
+    def reveal():
+        try:
+            authorization = authorize_privacy_request(
+                request,
+                "record.use",
+                pack_id=pack.profile.id,
+            )
+            barrier.wait(timeout=5)
+            results.append(
+                pack.records("library").reveal(
+                    "prompt-record",
+                    RECORD_ID,
+                    "use",
+                    authorization,
+                ).value
+            )
+        except Exception as exc:  # pragma: no cover - asserted below.
+            failures.append(exc)
+            failed.set()
+
+    threads = [threading.Thread(target=reveal) for _index in range(2)]
+    for thread in threads:
+        thread.start()
+    barrier.wait(timeout=5)
+    assert entered.wait(timeout=5)
+    assert failed.wait(timeout=5)
+    release.set()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert len(failures) == 1
+    assert isinstance(failures[0], RecordError)
+    assert failures[0].code == "PRIVACY_RECORD_VERIFICATION_FAILED"
+    assert len(results) == 1
+    assert all(result == {"prompt": "SYNTHETIC_LEGACY_PROMPT"} for result in results)
+    assert reader.read_calls == 1
+    status = pack.migration.status()[0]
+    assert status.discovered == 1
+    assert status.resolved == 1
+
+
 def test_authorized_use_can_persist_product_activity_under_shared_crypto(reveal_pack):
     pack, store, record_id, request = reveal_pack
     store.project_replacement = {
@@ -504,7 +1544,7 @@ def test_locked_reveal_fails_before_read_or_projection(reveal_pack):
     assert store.project_calls == 0
 
 
-def test_decrypt_failure_keeps_shell_listable_and_blocks_projection(reveal_pack):
+def test_decrypt_failure_blocks_listing_and_projection(reveal_pack):
     pack, store, record_id, request = reveal_pack
     tampered = dict(store.records[record_id])
     tampered["ciphertext"] = (
@@ -528,7 +1568,9 @@ def test_decrypt_failure_keeps_shell_listable_and_blocks_projection(reveal_pack)
 
     assert failed.value.code == "PRIVACY_RECORD_DECRYPT_FAILED"
     assert store.project_calls == 0
-    assert pack.records("library").list_shells("prompt-record")[0].id == record_id
+    with pytest.raises(RecordError) as blocked:
+        pack.records("library").list_shells("prompt-record")
+    assert blocked.value.code == "PRIVACY_RECORD_MODE_BLOCKED"
 
 
 def test_confirmed_delete_remains_available_while_locked_without_reading(record_pack):
@@ -555,7 +1597,7 @@ def test_confirmed_delete_remains_available_while_locked_without_reading(record_
     assert receipt.operation == "delete"
     assert receipt.correlation_id.startswith("hp-record-")
     assert store.deleted == [record_id]
-    assert store.read_calls == 0
+    assert store.read_calls == 3
     with pytest.raises(RecordError) as reused:
         pack.records("library").delete(
             "prompt-record",
@@ -589,7 +1631,7 @@ def test_confirmed_protected_replacement_works_while_locked_and_rejects_plaintex
 
     assert receipt.operation == "replace"
     assert store.written == [(record_id, protected)]
-    assert store.read_calls == 0
+    assert store.read_calls == 3
 
     invalid_confirmation = confirm_record_mutation(
         pack_id=pack.profile.id,
@@ -641,7 +1683,7 @@ def test_destructive_failures_use_fresh_value_free_errors(record_pack):
     assert errors[0].correlation_id != errors[1].correlation_id
     assert "SYNTHETIC" not in repr(errors)
     assert "user-authored" not in repr(errors)
-    assert store.read_calls == 0
+    assert store.read_calls == 4
 
 
 def test_record_handle_has_no_locked_duplicate_merge_or_edit_escape_hatch(record_pack):

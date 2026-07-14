@@ -7,7 +7,7 @@ from helto_privacy.suite_maintenance import (
 from helto_privacy.suite_runtime import (
     SuiteInstallation,
 )
-from test_suite_runtime import _inventory, _release
+from tests.test_suite_runtime import _inventory, _release
 
 
 class SyntheticMaintenanceBackend:

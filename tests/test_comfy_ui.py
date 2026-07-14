@@ -15,7 +15,7 @@ from helto_privacy.comfy_ui import (
 )
 from helto_privacy.envelope import PrivacyEnvelopeCodec
 from helto_privacy.keystore import KEYSTORE_CRYPTO_AVAILABLE
-from _legacy_envelope_fixture import write_legacy_state_fixture
+from tests._legacy_envelope_fixture import write_legacy_state_fixture
 
 pytestmark = pytest.mark.skipif(
     not KEYSTORE_CRYPTO_AVAILABLE,
@@ -51,6 +51,14 @@ class _FakeRoutes:
 class _FakePromptServer:
     def __init__(self):
         self.routes = _FakeRoutes()
+        self.app = _FakeApp()
+
+
+class _FakeApp:
+    def __init__(self):
+        self.middlewares = []
+        self.pre_frozen = False
+        self.frozen = False
 
 
 def _legacy_key_file(directory, codec_schema="helto.test-pack"):
@@ -68,14 +76,48 @@ def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path, monkeypatch):
     monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
     server = _FakePromptServer()
     assert register_helto_privacy_ui(tmp_path / "pack_a", prompt_server=server) is True
+    assert server.app.middlewares[0].__name__ == "_prompt_submission_middleware"
     first_count = len(server.routes.paths)
     assert first_count >= 6
     assert ("GET", comfy_ui.UI_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.CLIENT_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.ARTIFACTS_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.SNAPSHOT_MODULE_ROUTE) in server.routes.paths
+    assert ("GET", comfy_ui.SUBMISSION_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.PROFILE_MODULE_ROUTE) in server.routes.paths
     assert ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}") in server.routes.paths
+    assert (
+        "POST",
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/subject-modes/"
+        "{binding_id}/prepare",
+    ) in server.routes.paths
+    external_base = (
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes/"
+        "{scope_id}/transition"
+    )
+    assert ("POST", f"{external_base}/reserve") in server.routes.paths
+    assert ("POST", f"{external_base}/client-heartbeat") in server.routes.paths
+    assert ("POST", f"{external_base}/rebase") in server.routes.paths
+    assert ("GET", f"{external_base}/status") in server.routes.paths
+    for phase in ("prepare", "resume", "apply-ack", "verify", "finalize", "rollback"):
+        assert (
+            "POST",
+            f"{external_base}/{{transition_id}}/{phase}",
+        ) in server.routes.paths
+    external_operation_base = (
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/operations/"
+        "{operation_id}/external"
+    )
+    assert ("POST", f"{external_operation_base}/prepare") in server.routes.paths
+    assert (
+        "GET",
+        f"{external_operation_base}/{{transaction_id}}/status",
+    ) in server.routes.paths
+    for phase in ("resume", "apply", "rollback"):
+        assert (
+            "POST",
+            f"{external_operation_base}/{{transaction_id}}/{phase}",
+        ) in server.routes.paths
 
     # A second pack registering only contributes its legacy dir.
     assert register_helto_privacy_ui(tmp_path / "pack_b", prompt_server=server) is True
@@ -183,12 +225,16 @@ def test_ui_module_ships_in_package():
 
     profile_source = (comfy_ui._WEB_DIR / "privacy_profile.js").read_text(encoding="utf-8")
     assert "export async function connectPrivacyPack" in profile_source
-    assert 'export const PRIVACY_CONTRACT_V2 = "helto.privacy.v2"' in profile_source
+    assert 'export const PRIVACY_CONTRACT_V3 = "helto.privacy.v3"' in profile_source
 
     snapshot_source = (comfy_ui._WEB_DIR / "privacy_snapshot.js").read_text(
         encoding="utf-8"
     )
     assert "createPrivacySnapshotCoordinator" in snapshot_source
+    submission_source = (comfy_ui._WEB_DIR / "privacy_submission.js").read_text(
+        encoding="utf-8"
+    )
+    assert "createPrivacyPromptSubmissionService" in submission_source
 
 
 def test_register_survives_missing_prompt_server():

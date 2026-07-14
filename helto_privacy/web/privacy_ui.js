@@ -24,7 +24,7 @@ import {
   unlockPrivacyKeystore,
 } from "./privacy_client.js";
 
-export { redactPrivateRecordShell } from "./privacy_records.js";
+export { normalizeRecordShell, redactPrivateRecordShell } from "./privacy_records.js";
 export {
   PrivacyArtifactLeaseError,
   normalizeArtifactLease,

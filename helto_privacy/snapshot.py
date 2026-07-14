@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -42,6 +43,43 @@ class DispositionResult:
     identity: str | None = None
     migration_obligation_id: str | None = None
     replacement_envelope: dict[str, Any] | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        is_legacy = self.disposition is EnvelopeDisposition.READABLE_LEGACY
+        obligation = self.migration_obligation_id
+        replacement = self.replacement_envelope
+        if is_legacy:
+            expected_keys = {
+                "version",
+                "schema",
+                "encrypted",
+                "algorithm",
+                "keyId",
+                "nonce",
+                "ciphertext",
+            }
+            if (
+                not isinstance(obligation, str)
+                or re.fullmatch(r"hp-obligation-[A-Za-z0-9_-]+", obligation) is None
+                or not isinstance(replacement, Mapping)
+                or set(replacement) != expected_keys
+                or replacement.get("version") != ENVELOPE_VERSION
+                or replacement.get("encrypted") is not True
+                or not all(
+                    isinstance(replacement.get(key), str) and replacement.get(key)
+                    for key in (
+                        "schema",
+                        "algorithm",
+                        "keyId",
+                        "nonce",
+                        "ciphertext",
+                    )
+                )
+            ):
+                raise ValueError("Readable legacy disposition is incomplete.")
+            object.__setattr__(self, "replacement_envelope", copy.deepcopy(dict(replacement)))
+        elif obligation is not None or replacement is not None:
+            raise ValueError("Migration staging is only valid for readable legacy data.")
 
 
 @dataclass(frozen=True, slots=True)

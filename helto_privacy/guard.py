@@ -111,7 +111,7 @@ def authorize_privacy_request(
     if (declassification_scope_id is None) != (declassification_target is None):
         raise PrivacyAuthorizationError("PRIVACY_OPERATION_INVALID", 400)
     if declassification_scope_id is not None and (
-        operation_id != "mode.transition"
+        operation_id not in {"mode.transition", "mode.transition.reserve"}
         or not isinstance(declassification_scope_id, str)
         or not _OPERATION_ID.fullmatch(declassification_scope_id)
         or not isinstance(declassification_target, str)
@@ -185,6 +185,33 @@ def require_current_authorization(
         _session_fingerprint(current),
     ):
         raise PrivacyAuthorizationError("PRIVACY_AUTHORIZATION_EXPIRED", 401)
+
+
+def _derive_operation_dependency_authorization(
+    authorization: AuthorizedPrivacyRequest,
+    parent_operation_id: str,
+    child_operation_id: str,
+    *,
+    pack_id: str,
+) -> AuthorizedPrivacyRequest:
+    """Derive one internal child capability without exposing parent authority."""
+
+    require_current_authorization(
+        authorization,
+        parent_operation_id,
+        pack_id=pack_id,
+    )
+    if not isinstance(child_operation_id, str) or not _OPERATION_ID.fullmatch(
+        child_operation_id
+    ):
+        raise PrivacyAuthorizationError("PRIVACY_AUTHORIZATION_INVALID", 403)
+    return AuthorizedPrivacyRequest(
+        child_operation_id,
+        pack_id,
+        authorization._session_fingerprint,
+        None,
+        _marker=_AUTHORIZED_REQUEST_MARKER,
+    )
 
 
 def require_declassification_confirmation(

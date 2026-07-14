@@ -2,7 +2,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from privacy_js_test_support import write_privacy_client_dependencies
+from tests.privacy_js_test_support import write_privacy_client_dependencies
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -241,6 +241,21 @@ def test_shared_surface_mounts_once_and_exposes_complete_accessible_controls(tmp
         });
         assert(Object.isFrozen(shell));
         assert(!JSON.stringify(shell).includes("SYNTHETIC"));
+        const publicShell = privacy.normalizeRecordShell({
+          id: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          kind: "prompt-record",
+          private: false,
+          label: "SYNTHETIC_PUBLIC_LABEL_CANARY",
+          path: "/SYNTHETIC/PUBLIC/PATH",
+        });
+        assert.deepEqual(publicShell, {
+          id: "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6",
+          kind: "prompt-record",
+          private: false,
+          label: "Public record",
+        });
+        assert(Object.isFrozen(publicShell));
+        assert(!JSON.stringify(publicShell).includes("SYNTHETIC"));
         assert.equal(privacy.redactPrivateRecordShell({ id: "user-authored-name" }), null);
         assert.equal(privacy.redactPrivateRecordShell({
           id: "0123456789abcdef0123456789abcdef",

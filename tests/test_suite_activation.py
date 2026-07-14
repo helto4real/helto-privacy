@@ -15,7 +15,7 @@ from helto_privacy.suite_runtime import (
     register_process_suite,
     require_active_process_suite,
 )
-from test_suite_runtime import _inventory, _release
+from tests.test_suite_runtime import _inventory, _release
 
 
 def test_explicit_digest_bound_activation_persists_rollback_boundary(

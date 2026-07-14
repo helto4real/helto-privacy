@@ -6,7 +6,10 @@ import json
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture, ProductStateProtocolFixture
+
 import helto_privacy.keystore as keystore
+import helto_privacy.execution as execution
 import helto_privacy.runtime as runtime
 from helto_privacy import (
     EXECUTION_REFERENCE_SCHEMA,
@@ -24,15 +27,52 @@ from helto_privacy.profile import (
     FieldLocationKind,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     ProfileResource,
     ResourceKind,
     SemanticExecutionProjection,
+    SubjectModeBinding,
 )
 from helto_privacy.runtime import ProfileConflictError
 
 
 PASSWORD = "synthetic execution password"
+_ORIGINAL_HANDLE_PREPARE = runtime.ExecutionHandle.prepare
+_ORIGINAL_HANDLE_DISPATCH = runtime.ExecutionHandle.dispatch
+
+
+@pytest.fixture(autouse=True)
+def bind_existing_execution_tests_to_subject(monkeypatch):
+    """Keep existing behavior tests focused while production requires subject IDs."""
+
+    def prepare(self, projection_id, protected_fields, authorization, *, subject_id="node-7"):
+        return _ORIGINAL_HANDLE_PREPARE(
+            self,
+            projection_id,
+            protected_fields,
+            authorization,
+            subject_id=subject_id,
+        )
+
+    def dispatch(
+        self,
+        reference,
+        context=None,
+        *,
+        subject_id="node-7",
+        cache_discriminator=None,
+    ):
+        return _ORIGINAL_HANDLE_DISPATCH(
+            self,
+            reference,
+            context,
+            subject_id=subject_id,
+            cache_discriminator=cache_discriminator,
+        )
+
+    monkeypatch.setattr(runtime.ExecutionHandle, "prepare", prepare)
+    monkeypatch.setattr(runtime.ExecutionHandle, "dispatch", dispatch)
 
 
 class Request:
@@ -41,7 +81,7 @@ class Request:
         self.cookies = {}
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, _scope_id):
         return "private"
 
@@ -58,7 +98,7 @@ class ModeAdapter:
         return None
 
 
-class StateAdapter:
+class StateAdapter(ProductStateProtocolFixture):
     def capture(self):
         return {}
 
@@ -139,7 +179,7 @@ def _profile(
         id=pack_id,
         distribution=distribution,
         resources=(
-            ProfileResource("privacy-mode", ResourceKind.MODE, ("mode",)),
+            ProfileResource("privacy-mode", ResourceKind.MODE, ("mode", "mode-ui")),
             ProfileResource("state", ResourceKind.WORKFLOW, ("state", "state-ui")),
             ProfileResource(
                 "dispatch",
@@ -155,13 +195,26 @@ def _profile(
         ),
         browser_adapters=(
             AdapterSlot(
+                "mode-ui",
+                ResourceKind.MODE,
+                "privacy-mode",
+                ("SyntheticNode",),
+            ),
+            AdapterSlot(
                 "state-ui",
                 ResourceKind.WORKFLOW,
                 "state",
                 ("SyntheticNode",),
             ),
         ),
-        scopes=(PrivacyScope("main", "privacy-mode", "mode"),),
+        scopes=(
+            PrivacyScope(
+                "main",
+                "privacy-mode",
+                "mode",
+                mode_editor_adapter="mode-ui",
+            ),
+        ),
         protected_fields=(
             ProtectedField(
                 "private-state",
@@ -173,7 +226,16 @@ def _profile(
                 FieldLocation(FieldLocationKind.WIDGET, "state"),
                 "helto.execution-test.v1",
                 "execution-state",
+                ProtectedStateAuthority.SERVER_DURABLE,
                 execution=True,
+            ),
+        ),
+        subject_mode_bindings=(
+            SubjectModeBinding(
+                "execution-mode",
+                "main",
+                "privacy_mode_reference",
+                ("SyntheticNode",),
             ),
         ),
         execution_projections=(
@@ -183,6 +245,7 @@ def _profile(
                 "state",
                 "projection",
                 "dispatcher",
+                "execution-mode",
             ),
         ),
     )
@@ -207,10 +270,10 @@ def execution_pack(monkeypatch):
     return pack, projection, dispatcher, Request(token)
 
 
-def _authorization(pack, request):
+def _authorization(pack, request, operation="execution.prepare"):
     return authorize_privacy_request(
         request,
-        "execution.prepare",
+        operation,
         pack_id=pack.profile.id,
     )
 
@@ -261,6 +324,184 @@ def test_prepare_and_single_use_dispatch_keep_plaintext_inside_product_lifetime(
     with pytest.raises(ExecutionError) as replay:
         handle.dispatch(prepared.reference, {"request": "replay"})
     assert replay.value.code == "PRIVACY_EXECUTION_GRANT_INVALID"
+
+
+def test_pending_reference_validation_does_not_consume_grant(execution_pack):
+    pack, _projection, _dispatcher, request = execution_pack
+    handle = pack.execution("dispatch")
+    prepared = handle.prepare(
+        "product-execution",
+        {"private-state": _protected("validate then dispatch")},
+        _authorization(pack, request),
+    )
+
+    assert execution.validate_pending_execution_reference(
+        prepared.reference,
+        pack_id=pack.profile.id,
+        execution_resource_id="dispatch",
+        projection_id="product-execution",
+        workflow_resource_id="state",
+        subject_id="node-7",
+    ) is True
+    assert execution.validate_pending_execution_reference(
+        prepared.reference,
+        pack_id=pack.profile.id,
+        execution_resource_id="dispatch",
+        projection_id="other-projection",
+        workflow_resource_id="state",
+        subject_id="node-7",
+    ) is False
+    assert handle.dispatch(
+        prepared.reference,
+        {"request": "after-validation"},
+    ).value["result"] == (
+        "VALIDATE THEN DISPATCH"
+    )
+
+
+def test_execution_reference_is_exactly_subject_bound_and_wrong_dispatch_consumes(
+    execution_pack,
+):
+    pack, _projection, _dispatcher, request = execution_pack
+    handle = pack.execution("dispatch")
+    raw_subject = "SYNTHETIC_PRIVATE_NODE_ID"
+    prepared = handle.prepare(
+        "product-execution",
+        {"private-state": _protected("subject bound")},
+        _authorization(pack, request),
+        subject_id=raw_subject,
+    )
+    serialized = json.dumps(prepared.reference)
+    assert raw_subject not in serialized
+    assert raw_subject not in repr(prepared)
+    assert prepared.reference["version"] == 2
+    assert len(prepared.reference["subject"]) == 64
+    assert execution.validate_pending_execution_reference(
+        prepared.reference,
+        pack_id=pack.profile.id,
+        execution_resource_id="dispatch",
+        projection_id="product-execution",
+        workflow_resource_id="state",
+        subject_id="other-node",
+    ) is False
+
+    with pytest.raises(ExecutionError) as mismatch:
+        _ORIGINAL_HANDLE_DISPATCH(
+            handle,
+            prepared.reference,
+            {"request": "wrong-subject"},
+            subject_id="other-node",
+        )
+    assert mismatch.value.code == "PRIVACY_EXECUTION_REFERENCE_MISMATCH"
+    assert raw_subject not in repr(mismatch.value)
+    with pytest.raises(ExecutionError) as consumed:
+        _ORIGINAL_HANDLE_DISPATCH(
+            handle,
+            prepared.reference,
+            {"request": "correct-after-mismatch"},
+            subject_id=raw_subject,
+        )
+    assert consumed.value.code == "PRIVACY_EXECUTION_GRANT_INVALID"
+
+
+def test_execution_handle_requires_subject_and_rejects_version_drift(execution_pack):
+    pack, _projection, _dispatcher, request = execution_pack
+    handle = pack.execution("dispatch")
+    with pytest.raises(TypeError):
+        _ORIGINAL_HANDLE_PREPARE(
+            handle,
+            "product-execution",
+            {"private-state": _protected("missing subject")},
+            _authorization(pack, request),
+        )
+    prepared = handle.prepare(
+        "product-execution",
+        {"private-state": _protected("version drift")},
+        _authorization(pack, request),
+        subject_id="node-7",
+    )
+    with pytest.raises(TypeError):
+        _ORIGINAL_HANDLE_DISPATCH(handle, prepared.reference, {})
+    drifted = copy.deepcopy(prepared.reference)
+    drifted["version"] = 1
+    with pytest.raises(ExecutionError) as invalid:
+        _ORIGINAL_HANDLE_DISPATCH(
+            handle,
+            drifted,
+            {},
+            subject_id="node-7",
+        )
+    assert invalid.value.code == "PRIVACY_EXECUTION_REFERENCE_INVALID"
+
+
+def test_pending_execution_grants_are_bounded_and_expire(execution_pack, monkeypatch):
+    pack, _projection, _dispatcher, request = execution_pack
+    handle = pack.execution("dispatch")
+    authorization = _authorization(pack, request)
+    clock = [100.0]
+    monkeypatch.setattr(execution.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(execution, "_GRANT_TTL_SECONDS", 1.0)
+    monkeypatch.setattr(execution, "_MAX_GRANTS", 1)
+
+    first = handle.prepare(
+        "product-execution",
+        {"private-state": _protected("first")},
+        authorization,
+    )
+    with pytest.raises(ExecutionError) as bounded:
+        handle.prepare(
+            "product-execution",
+            {"private-state": _protected("second")},
+            authorization,
+        )
+    assert bounded.value.code == "PRIVACY_EXECUTION_GRANT_INVALID"
+
+    clock[0] += 2.0
+    second = handle.prepare(
+        "product-execution",
+        {"private-state": _protected("second")},
+        authorization,
+    )
+    with pytest.raises(ExecutionError) as expired:
+        handle.dispatch(first.reference, {})
+    assert expired.value.code == "PRIVACY_EXECUTION_GRANT_INVALID"
+    assert second.reference["grant"] != first.reference["grant"]
+
+
+def test_execution_grant_revoke_is_exact_idempotent_and_frees_capacity(
+    execution_pack,
+    monkeypatch,
+):
+    pack, _projection, _dispatcher, request = execution_pack
+    handle = pack.execution("dispatch")
+    monkeypatch.setattr(execution, "_MAX_GRANTS", 1)
+    prepared = handle.prepare(
+        "product-execution",
+        {"private-state": _protected("revoke")},
+        _authorization(pack, request),
+    )
+    revoke_authorization = _authorization(
+        pack,
+        request,
+        "submission-grants.revoke",
+    )
+    tampered = dict(prepared.reference)
+    tampered["projectionId"] = "tampered-projection"
+    with pytest.raises(ExecutionError):
+        handle.revoke(tampered, revoke_authorization)
+
+    assert handle.revoke(prepared.reference, revoke_authorization) is True
+    assert handle.revoke(prepared.reference, revoke_authorization) is False
+    with pytest.raises(ExecutionError) as revoked:
+        handle.dispatch(prepared.reference, {})
+    assert revoked.value.code == "PRIVACY_EXECUTION_GRANT_INVALID"
+    for index in range(5):
+        next_prepared = handle.prepare(
+            "product-execution",
+            {"private-state": _protected(f"revoke-{index}")},
+            _authorization(pack, request),
+        )
+        assert handle.revoke(next_prepared.reference, revoke_authorization) is True
 
 
 def test_semantic_identity_and_private_cache_are_session_bound(execution_pack):
@@ -317,6 +558,98 @@ def test_semantic_identity_and_private_cache_are_session_bound(execution_pack):
     fresh = handle.dispatch(fresh_prepared.reference, {"request": "fresh"})
     assert fresh.cache_identity != first.cache_identity
     assert handle.cache_load(first.cache_identity) is None
+
+
+def test_cache_discriminator_separates_context_dependent_results(execution_pack):
+    pack, _projection, dispatcher, request = execution_pack
+    handle = pack.execution("dispatch")
+    authorization = _authorization(pack, request)
+
+    first = handle.dispatch(
+        handle.prepare(
+            "product-execution",
+            {"private-state": _protected("same semantic prompt")},
+            authorization,
+        ).reference,
+        {"request": "seed-one"},
+        cache_discriminator={"seed": 1, "reroll": 0},
+    )
+    handle.cache_store(first.cache_identity, {"private": "seed-one"})
+
+    second = handle.dispatch(
+        handle.prepare(
+            "product-execution",
+            {"private-state": _protected("same semantic prompt")},
+            authorization,
+        ).reference,
+        {"request": "seed-two"},
+        cache_discriminator={"seed": 2, "reroll": 0},
+    )
+    assert second.cache_identity != first.cache_identity
+    assert second.value != {"private": "seed-one"}
+    assert dispatcher.dispatch_count == 2
+
+    cached = handle.dispatch(
+        handle.prepare(
+            "product-execution",
+            {"private-state": _protected("same semantic prompt")},
+            authorization,
+        ).reference,
+        {"request": "seed-one-cache-hit"},
+        cache_discriminator={"seed": 1, "reroll": 0},
+    )
+    assert cached.value == {"private": "seed-one"}
+    assert cached.cache_identity == first.cache_identity
+    assert dispatcher.dispatch_count == 2
+
+    for invalid_discriminator in (
+        {"value": "x" * 4_097},
+        (1, 2),
+        {1: "numeric-key"},
+        {"number": float("nan")},
+        [[[[[[[[["too-deep"]]]]]]]]],
+    ):
+        prepared = handle.prepare(
+            "product-execution",
+            {"private-state": _protected("same semantic prompt")},
+            authorization,
+        )
+        with pytest.raises(ExecutionError) as invalid:
+            handle.dispatch(
+                prepared.reference,
+                {"request": "invalid-discriminator"},
+                cache_discriminator=invalid_discriminator,
+            )
+        assert invalid.value.code == (
+            "PRIVACY_EXECUTION_CACHE_DISCRIMINATOR_INVALID"
+        )
+        with pytest.raises(ExecutionError):
+            handle.dispatch(
+                prepared.reference,
+                {"request": "grant-was-consumed"},
+            )
+
+    tuple_prepared = handle.prepare(
+        "product-execution",
+        {"private-state": _protected("same semantic prompt")},
+        authorization,
+    )
+    with pytest.raises(ExecutionError):
+        handle.dispatch(
+            tuple_prepared.reference,
+            {"request": "tuple-is-not-json"},
+            cache_discriminator=(1, 2),
+        )
+    list_result = handle.dispatch(
+        handle.prepare(
+            "product-execution",
+            {"private-state": _protected("same semantic prompt")},
+            authorization,
+        ).reference,
+        {"request": "list-is-json"},
+        cache_discriminator=[1, 2],
+    )
+    assert list_result.value["request"] == "list-is-json"
 
 
 def test_key_rotation_revokes_grants_and_private_cache(execution_pack):

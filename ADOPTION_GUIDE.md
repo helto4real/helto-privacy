@@ -4,6 +4,11 @@ Instructions for an agent migrating a ComfyUI node pack from a local
 plaintext key file (`config/privacy_key.json`) to this shared package.
 Migration is part of adoption — do not treat them as separate projects.
 
+For typed records and singleton pack state that must follow an effective public
+or private scope, see [Dual-mode records and singletons](docs/dual-mode-records-singletons.md).
+Its representation hooks are building blocks for the coordinated transition
+service; consumers must not call them as an independent privacy toggle.
+
 Read `README.md` first for the file contract. The finished reference
 implementation is `~/git/comfyui-helto-director` (commit `dd669d9`,
 "Use shared privacy package and refresh media tokens"); when in doubt, copy
@@ -381,17 +386,26 @@ executable payload or its expired grants directly.
 ## Step 7 — Move private execution behind grants
 
 For every product input that affects a private result, set `execution=True` on
-its `ProtectedField` and declare one `SemanticExecutionProjection`. Bind an
-execution resource to two server adapters:
+its `ProtectedField`, declare one `SubjectModeBinding`, and link one
+`SemanticExecutionProjection`. The binding scope must name a browser
+mode-editor adapter whose node types cover the binding. Bind an execution
+resource to two server adapters:
 
 ```python
+SubjectModeBinding(
+    id="generation-mode",
+    scope_id="generate",
+    input_name="privacy_mode_reference",
+    node_types=("HeltoGenerate",),
+),
 SemanticExecutionProjection(
-    "generate-image",
-    "generation",
-    "prompt-state",
-    "generation-projection",
-    "generation-dispatch",
-)
+    id="generate-image",
+    execution_resource_id="generation",
+    workflow_resource_id="prompt-state",
+    projection_adapter="generation-projection",
+    dispatch_adapter="generation-dispatch",
+    subject_mode_binding_id="generation-mode",
+),
 ```
 
 The projection adapter implements `project(fields, declaration)` and returns
@@ -413,13 +427,30 @@ const prepared = await privacy.workflow("prompt-state").runWithSnapshot(
 queueInput.private_execution = prepared.reference;
 ```
 
+The shared browser coordinator prepares one version-2 subject-mode reference
+per matching node and binding. It injects the protected execution reference
+only when that binding resolves private; public mode forbids an execution
+reference. Both references are output-only and must never be copied into the
+persisted workflow.
+
 `prepare()` rejects calls outside an active execution-bearing transaction. Do
 not call the canonical prepare route directly; it is the fixed internal
 transport for the typed browser handle, not a second queue path.
 
-The backend product boundary calls
-`resolved = privacy.execution("generation").dispatch(reference, context)` and
-uses `resolved.value`. A reference is single-use and current-session-only.
+The backend product boundary calls:
+
+```python
+resolved = privacy.execution("generation").dispatch(
+    reference,
+    context,
+    subject_id=unique_id,
+)
+```
+
+It then uses `resolved.value`. A reference is single-use,
+current-session-only, and bound to the exact node identity without placing the
+raw ID in the reference. Declare ComfyUI's hidden `UNIQUE_ID` input and pass it
+through; never derive or accept a caller-selected replacement.
 Preparation remains ciphertext-only; decryption, semantic projection, and the
 opaque identity are created at dispatch immediately before product logic.
 Missing metadata, lock, unsupported state, decrypt failure, tampering, profile
@@ -434,6 +465,12 @@ identity is opaque and session-keyed; it is not a persistent cache key. Lock,
 key rotation, session replacement, process restart, or profile invalidation
 clears the partition and revokes pending grants. Public-mode execution remains
 on the consumer's normal public path.
+
+If product output also depends on dispatch context outside the protected
+semantic projection, pass a bounded JSON `cache_discriminator` to
+`dispatch(...)`. Include every result-changing value (for example seed and
+reroll). Omitting it means the consumer is declaring that the protected
+semantic projection alone determines the cached result.
 
 Delete the pack's local token resolver, unkeyed semantic hash, persistent
 private cache, decrypt-to-default fallback, and replay reuse. The shared route,
@@ -464,6 +501,19 @@ extra or wrongly typed diagnostic. Remove consumer encryption, request-derived
 privacy authority, debug omission, and one-off redaction only after this handle
 is active in the coordinated profile.
 
+If the operation belongs to a specific node, set its
+`subject_mode_binding_id`, consume the node's subject reference with
+`privacy.subject_modes(binding_id).consume(reference, unique_id)`, and pass the
+active lease as `subject_mode=` to `project`. A linked operation cannot use the
+global mode path. Close the lease after all linked consumers finish; lock,
+session replacement, profile invalidation, or expiry also revokes it.
+
+Consume every bound node invocation exactly once with a context manager. This
+also applies when the node resolves public and when its binding is used only by
+an execution projection: run the ordinary public path inside the context, then
+close the otherwise-unused lease. Never leave a validated subject reference
+pending for replay until its TTL.
+
 ## Step 8 — Move private record libraries behind minimal shells
 
 Declare each private record kind on its typed record resource. Mint IDs with
@@ -488,13 +538,21 @@ RecordDeclaration(
 )
 ```
 
-The store implements `list_ids`, `read_protected`, `write_protected`, and
-`delete`, plus the mode-transition methods. Mutation-capable stores also
+The store implements `list_ids`, `read_record(id) -> RecordSnapshot`, and
+`compare_and_swap_record(id, expected_snapshot, replacement_snapshot) -> bool`,
+plus the mode-transition methods. The compare-and-swap compares the exact
+revision and protected representation atomically, advances the revision by one,
+and returns `False` without changing storage on conflict. A delete commits a
+revisioned tombstone; do not physically erase its revision. Adapters with only
+blind `read_protected`/`write_protected`/`delete` methods fail installation.
+Mutation-capable stores also
 implement `mutate(current, operation, value)` and return one complete normalized
 record; the shared handle owns opaque ID generation, encryption, atomic
 write/read-back verification, rollback, and generic errors. Reveal-capable stores also
-implement `project(value, operation)`. `list_ids` must not read or decrypt a
-record. `project` returns canonical JSON and every returned top-level field must
+implement `project(value, operation)`. Listing reads only opaque snapshots to
+classify every representation against the effective mode; it never decrypts.
+Public, private, malformed, or mixed-mode drift blocks the whole listing.
+`project` returns canonical JSON and every returned top-level field must
 appear in that operation's `RecordRevealProjection.safe_fields`; omission means
 sensitive. Do not put names,
 descriptions, tags, timestamps, counts, paths, filenames, hashes, media facts,
@@ -522,6 +580,33 @@ resource or retain local crypto, shell-building, record-token, raw-error, or
 decrypt-to-default routes. Product naming, payload normalization, and document
 persistence remain in the adapter.
 
+Bind each historical record format with an exact
+`LegacyReaderBinding(..., LegacyLocationKind.RECORD, record_kind)`. Do not probe
+or migrate while listing. The first authorized reveal, patch, replace, or
+duplicate recovers any interrupted protected journal, reads through the exact
+registered reader, writes the current record schema, and resolves the
+obligation only after decrypting and comparing the read-back value. A malformed
+current-schema envelope is a current failure and must never fall through to a
+legacy reader. Keep legacy readers read-only; the store adapter continues to
+own only opaque persistence and product normalization.
+
+Audit declared record inventory items through
+`records(RECORD_RESOURCE_ID).audit_legacy(...)` with a `record.audit`
+authorization. This typed path returns only whether the exact reader matched;
+it never returns raw record plaintext. Resolve any discovered obligation by a
+normal authorized reveal or mutation before sealing the reader's audit scope.
+Generic `migration.*` operations reject record bindings.
+
+Shared privacy serializes legacy-bound record writes in migration-lock then
+record-lock order. Do not mutate the same store outside the bound handle: doing
+so can race verified rollback. Duplicate first migrates the source, then creates
+the new current target. Locked delete and confirmed protected replacement stay
+available without decrypting and do not claim a migration receipt.
+If either operation supersedes an interrupted journal, later recovery preserves
+the newer store state without fabricating discard evidence. A prepared
+obligation remains unresolved; an already verified finalize-pending receipt
+remains valid.
+
 Use `private_record_response_headers()` for private media/record responses and
 `safe_record_diagnostic()` for coarse diagnostics. Never include an original
 filename, path, prompt, name, tag, exception string, token, workflow value, or
@@ -539,8 +624,12 @@ product update rules in the consumer adapter.
 The store adapter returns `SingletonSnapshot` from `read_singleton(id)` and
 creates an atomic compare-and-swap transaction from
 `begin_singleton_replace(id, expected_revision, replacement)`. That transaction
-implements `commit() -> bool`, `read_back()`, and `rollback()`; the store
-adapter also implements the normal mode-transition methods. Never expose
+implements `commit() -> bool` and `read_back()`. The store adapter also
+implements `rollback_singleton_replace(id, exact_committed_snapshot,
+restored_snapshot) -> bool` as an atomic exact-snapshot compare-and-swap, plus
+the normal mode-transition methods. A successful rollback writes the original
+protected representation at a new monotonic revision; `False` means a
+concurrent writer won and authoritative state was unchanged. Never expose
 plaintext to the transaction: the replacement snapshot already contains only
 a current shared envelope or a revisioned tombstone.
 `commit() is False` is the atomic compare-and-swap conflict signal and must

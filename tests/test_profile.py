@@ -1,16 +1,20 @@
 import pytest
 
 from helto_privacy.profile import (
-    PRIVACY_CONTRACT_V2,
+    PRIVACY_CONTRACT_V3,
     AdapterSlot,
     ArtifactDeclaration,
     ArtifactRetention,
+    ExternalOperationBinding,
+    ExternalOperationPolicy,
+    ExternalTransitionPolicy,
     FieldLocation,
     FieldLocationKind,
     LegacyLocationKind,
     LegacyReaderBinding,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     ProtectedOperation,
     ProfileValidationError,
@@ -23,6 +27,256 @@ from helto_privacy.profile import (
     SensitiveFieldClass,
     SensitiveFieldDeclaration,
 )
+
+
+def _protected_field(**overrides):
+    values = {
+        "id": "workflow-state",
+        "workflow_resource_id": "workflow",
+        "scope_id": "main",
+        "state_adapter": "workflow-state",
+        "browser_adapter": "workflow-ui",
+        "node_types": ("WorkflowNode",),
+        "location": FieldLocation(FieldLocationKind.WIDGET, "state"),
+        "current_schema": "helto.workflow.v1",
+        "purpose": "workflow-state",
+        "state_authority": ProtectedStateAuthority.SERVER_DURABLE,
+    }
+    values.update(overrides)
+    return ProtectedField(**values)
+
+
+def _external_authority_profile():
+    return PrivacyProfile(
+        id="helto.external-authority",
+        distribution="comfyui-external-authority",
+        resources=(
+            ProfileResource("privacy-mode", ResourceKind.MODE, ("mode-source",)),
+            ProfileResource("workflow", ResourceKind.WORKFLOW, ("workflow-state", "workflow-ui")),
+        ),
+        server_adapters=(
+            AdapterSlot("mode-source", ResourceKind.MODE, "privacy-mode"),
+            AdapterSlot("workflow-state", ResourceKind.WORKFLOW, "workflow"),
+        ),
+        browser_adapters=(
+            AdapterSlot("workflow-ui", ResourceKind.WORKFLOW, "workflow", ("WorkflowNode",)),
+        ),
+        scopes=(PrivacyScope("main", "privacy-mode", "mode-source"),),
+        protected_fields=(
+            _protected_field(
+                state_authority=ProtectedStateAuthority.EXTERNAL_BROWSER_WORKFLOW,
+                external_transition_policy=ExternalTransitionPolicy(
+                    max_owners=7,
+                    max_original_bytes_per_owner=2048,
+                    max_target_bytes_per_owner=4096,
+                    max_total_bytes=16384,
+                    lease_seconds=90,
+                ),
+            ),
+        ),
+    )
+
+
+def test_protected_field_requires_explicit_state_authority():
+    with pytest.raises(TypeError):
+        ProtectedField(
+            "workflow-state",
+            "workflow",
+            "main",
+            "workflow-state",
+            "workflow-ui",
+            ("WorkflowNode",),
+            FieldLocation(FieldLocationKind.WIDGET, "state"),
+            "helto.workflow.v1",
+            "workflow-state",
+        )
+
+
+def test_external_authority_requires_policy_and_server_authority_forbids_it():
+    with pytest.raises(ProfileValidationError) as missing:
+        _protected_field(
+            state_authority=ProtectedStateAuthority.EXTERNAL_BROWSER_WORKFLOW,
+        )
+    assert missing.value.code == "missing_external_transition_policy"
+
+    with pytest.raises(ProfileValidationError) as unexpected:
+        _protected_field(external_transition_policy=ExternalTransitionPolicy())
+    assert unexpected.value.code == "unexpected_external_transition_policy"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"owner_identity": "graph-node-v0"},
+        {"max_owners": 0},
+        {"max_owners": 4097},
+        {"max_original_bytes_per_owner": 1023},
+        {"max_original_bytes_per_owner": 16 * 1024 * 1024 + 1},
+        {"max_target_bytes_per_owner": 1023},
+        {"max_target_bytes_per_owner": 16 * 1024 * 1024 + 1},
+        {"max_total_bytes": 1023},
+        {"max_total_bytes": 64 * 1024 * 1024 + 1},
+        {"lease_seconds": 29},
+        {"lease_seconds": 901},
+    ],
+)
+def test_external_transition_policy_rejects_every_out_of_bounds_field(overrides):
+    with pytest.raises(ProfileValidationError) as invalid:
+        ExternalTransitionPolicy(**overrides)
+    assert invalid.value.code == "invalid_external_transition_policy"
+
+
+def test_external_authority_contract_attests_distinct_exact_bounds_and_adapter_seams():
+    profile = _external_authority_profile()
+    field = profile.protected_fields[0]
+
+    assert field.contract_payload()["externalTransitionPolicy"] == {
+        "ownerIdentity": "graph-node-field-v1",
+        "maxOwners": 7,
+        "maxOriginalBytesPerOwner": 2048,
+        "maxTargetBytesPerOwner": 4096,
+        "maxTotalBytes": 16384,
+        "leaseSeconds": 90,
+    }
+    assert {
+        "classify_mode_transition_representation",
+        "decode_mode_transition_representation",
+        "normalize_mode_transition_value",
+        "encode_public_mode_transition",
+    }.issubset(profile.server_adapter_contracts["workflow-state"])
+    assert {
+        "settleModeTransition",
+        "inventoryModeTransitionOwners",
+        "readModeTransitionOwnerExact",
+        "applyModeTransitionOwnerExact",
+        "extractDetachedModeTransitionOwnerExact",
+        "restoreModeTransitionOwnerExact",
+        "reloadModeTransitionRuntime",
+        "reconcileModeTransitionRuntime",
+    }.issubset(profile.browser_adapter_contracts["workflow-ui"])
+    assert "planModeTransition" not in profile.browser_adapter_contracts["workflow-ui"]
+
+
+def _external_operation_profile():
+    base = _external_authority_profile()
+    return PrivacyProfile(
+        id=base.id,
+        distribution=base.distribution,
+        resources=(
+            *base.resources,
+            ProfileResource(
+                "operations",
+                ResourceKind.OPERATION,
+                ("operation-adapter",),
+            ),
+        ),
+        server_adapters=(
+            *base.server_adapters,
+            AdapterSlot(
+                "operation-adapter",
+                ResourceKind.OPERATION,
+                "operations",
+            ),
+        ),
+        browser_adapters=base.browser_adapters,
+        scopes=base.scopes,
+        protected_fields=base.protected_fields,
+        protected_operations=(
+            ProtectedOperation(
+                "associate-captured-take",
+                "operations",
+                "operation-adapter",
+                None,
+                scope_id="main",
+                sensitive_fields=(
+                    SensitiveFieldDeclaration(
+                        "*",
+                        SensitiveFieldClass.CONSUMER_DERIVED,
+                    ),
+                ),
+                safe_projection=(
+                    SafeDiagnosticField("items", SafeDiagnosticKind.COUNT),
+                ),
+                external_operation_binding=ExternalOperationBinding(
+                    "workflow-state",
+                    "workflow-ui",
+                    ExternalOperationPolicy(
+                        max_identity_bytes=2048,
+                        max_original_bytes=4096,
+                        max_target_bytes=8192,
+                        lease_seconds=60,
+                    ),
+                ),
+            ),
+        ),
+    )
+
+
+def test_external_operation_binding_is_canonical_and_compiles_fixed_adapters():
+    profile = _external_operation_profile()
+    operation = profile._canonical_value()["protectedOperations"][0]
+
+    assert operation["route"] is None
+    assert operation["externalOperationBinding"] == {
+        "fieldId": "workflow-state",
+        "browserAdapter": "workflow-ui",
+        "policy": {
+            "ownerIdentity": "graph-node-v1",
+            "maxIdentityBytes": 2048,
+            "maxOriginalBytes": 4096,
+            "maxTargetBytes": 8192,
+            "leaseSeconds": 60,
+        },
+    }
+    assert {
+        "capture_external_operation",
+        "classify_external_operation",
+        "prepare_external_operation",
+        "finalize_external_operation",
+        "rollback_external_operation",
+    }.issubset(profile.server_adapter_contracts["operation-adapter"])
+    assert {
+        "settleExternalOperation",
+        "identifyExternalOperationOwner",
+        "resolveExternalOperationOwner",
+        "readExternalOperationExact",
+        "applyExternalOperation",
+        "restoreExternalOperationExact",
+        "reloadExternalOperationRuntime",
+        "reconcileExternalOperationRuntime",
+    }.issubset(profile.browser_adapter_contracts["workflow-ui"])
+
+
+def test_external_operation_requires_an_external_browser_field_and_no_normal_route():
+    base = _external_operation_profile()
+    operation = base.protected_operations[0]
+
+    with pytest.raises(ProfileValidationError) as routed:
+        ProtectedOperation(
+            operation.id,
+            operation.resource_id,
+            operation.adapter_slot,
+            "/director/capture",
+            scope_id=operation.scope_id,
+            sensitive_fields=operation.sensitive_fields,
+            safe_projection=operation.safe_projection,
+            external_operation_binding=operation.external_operation_binding,
+        )
+    assert routed.value.code == "invalid_external_operation_binding"
+
+    server_field = _protected_field()
+    with pytest.raises(ProfileValidationError) as authority:
+        PrivacyProfile(
+            id=base.id,
+            distribution=base.distribution,
+            resources=base.resources,
+            server_adapters=base.server_adapters,
+            browser_adapters=base.browser_adapters,
+            scopes=base.scopes,
+            protected_fields=(server_field,),
+            protected_operations=base.protected_operations,
+        )
+    assert authority.value.code == "external_operation_binding_mismatch"
 
 
 def test_artifact_operations_must_use_the_typed_lease_contract():
@@ -63,6 +317,51 @@ def test_artifact_operations_must_use_the_typed_lease_contract():
         )
 
     assert generic.value.code == "artifact_operation_must_use_typed_contract"
+
+
+def test_duplicate_record_reader_binding_is_rejected():
+    binding = LegacyReaderBinding(
+        "record-v1-binding",
+        "record-v1",
+        "library",
+        LegacyLocationKind.RECORD,
+        "prompt-record",
+    )
+    with pytest.raises(ProfileValidationError) as duplicate:
+        PrivacyProfile(
+            id="helto.record-binding-test",
+            distribution="comfyui-record-binding-test",
+            resources=(
+                ProfileResource("privacy-mode", ResourceKind.MODE, ("mode",)),
+                ProfileResource("library", ResourceKind.RECORD, ("records",)),
+            ),
+            server_adapters=(
+                AdapterSlot("mode", ResourceKind.MODE, "privacy-mode"),
+                AdapterSlot("records", ResourceKind.RECORD, "library"),
+            ),
+            scopes=(PrivacyScope("main", "privacy-mode", "mode"),),
+            records=(
+                RecordDeclaration(
+                    "prompt-record",
+                    "library",
+                    "main",
+                    "helto.record.v2",
+                    "records",
+                ),
+            ),
+            legacy_bindings=(
+                binding,
+                LegacyReaderBinding(
+                    "record-v1-binding-copy",
+                    binding.reader_id,
+                    binding.resource_id,
+                    binding.location_kind,
+                    binding.location_id,
+                ),
+            ),
+        )
+
+    assert duplicate.value.code == "duplicate_legacy_location_binding"
 
 
 def test_only_run_scoped_spills_may_omit_browser_operations():
@@ -259,7 +558,7 @@ def test_profile_fingerprint_is_stable_and_order_independent():
     profile = PrivacyProfile(
         id="helto.director",
         distribution="comfyui-helto-director",
-        contract=PRIVACY_CONTRACT_V2,
+        contract=PRIVACY_CONTRACT_V3,
         resources=(
             ProfileResource(
                 id="privacy-mode",
@@ -310,6 +609,7 @@ def test_profile_fingerprint_is_stable_and_order_independent():
                 location=FieldLocation(FieldLocationKind.WIDGET, "timeline_data"),
                 current_schema="helto.director.timeline.v2",
                 purpose="timeline-state",
+                state_authority=ProtectedStateAuthority.SERVER_DURABLE,
                 legacy_reader_ids=("director-timeline-v1",),
                 execution=True,
             ),
@@ -326,13 +626,13 @@ def test_profile_fingerprint_is_stable_and_order_independent():
     )
 
     assert profile.fingerprint == (
-        "de5654bfbc7a7c0e9a47e4854e82a3f707d1db21cca5d9e03a6b730371776d67"
+        "82881492a8dd012c4abbe9c7335b359d4183b5850d53e849eea9e2d5aa3e6f5c"
     )
 
     reordered = PrivacyProfile(
         id="helto.director",
         distribution="comfyui-helto-director",
-        contract=PRIVACY_CONTRACT_V2,
+        contract=PRIVACY_CONTRACT_V3,
         resources=(
             ProfileResource(
                 id="privacy-mode",
@@ -356,20 +656,24 @@ def test_profile_fingerprint_is_stable_and_order_independent():
 
     assert profile.server_adapter_contracts == {
         "privacy-mode-runtime": (
-            "commit_mode_transition",
-            "prepare_mode_transition",
+            "classify_mode_source",
+            "compare_and_set_mode_source",
             "read_declared_mode",
-            "rollback_mode_transition",
-            "write_declared_mode",
+            "read_mode_source",
+            "rollback_mode_source",
         ),
         "timeline-runtime": (
             "apply_revealed",
             "capture",
+            "classify_mode_transition",
             "clear_plaintext",
             "commit_mode_transition",
             "normalize",
+            "plan_mode_transition",
             "prepare_mode_transition",
+            "retire_mode_transition",
             "rollback_mode_transition",
+            "verify_mode_transition",
         ),
     }
 
@@ -385,6 +689,7 @@ def test_protected_field_declares_sorted_distinct_mirror_locations():
         location=FieldLocation(FieldLocationKind.PROPERTY, "protected_text"),
         current_schema="helto.display",
         purpose="display-text",
+        state_authority=ProtectedStateAuthority.SERVER_DURABLE,
         mirror_locations=(
             FieldLocation(FieldLocationKind.WIDGET, "encrypted_text_state"),
         ),
@@ -405,6 +710,7 @@ def test_protected_field_declares_sorted_distinct_mirror_locations():
             location=FieldLocation(FieldLocationKind.PROPERTY, "protected_text"),
             current_schema="helto.display",
             purpose="display-text",
+            state_authority=ProtectedStateAuthority.SERVER_DURABLE,
             mirror_locations=(
                 FieldLocation(FieldLocationKind.PROPERTY, "protected_text"),
             ),
@@ -416,6 +722,7 @@ def test_protected_field_declares_sorted_distinct_mirror_locations():
     ("profile_kwargs", "error_code"),
     [
         ({"contract": "consumer-selectable-contract"}, "contract_mismatch"),
+        ({"contract": "helto.privacy.v2"}, "contract_mismatch"),
         (
             {
                 "resources": (
@@ -522,6 +829,7 @@ def test_profile_rejects_protected_field_without_matching_browser_binding():
                     FieldLocation(FieldLocationKind.WIDGET, "state"),
                     "helto.editor.v1",
                     "editor-state",
+                    ProtectedStateAuthority.SERVER_DURABLE,
                 ),
             ),
         )

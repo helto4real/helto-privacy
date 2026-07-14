@@ -20,13 +20,54 @@ If deleting ciphertext is interrupted, the ledger still forgets the complete
 old group so its references become unreadable immediately; startup orphan sweep
 finishes the physical cleanup.
 
+Durable producers that may discover several artifacts for one logical owner use
+`ArtifactHandle.reconcile_owner(kind, owner_id, keep=(reference, ...))`. The
+shared ledger first proves every kept reference is a current, authoritative
+artifact for that exact pack, resource, kind, and owner, then retires every
+other matching artifact, including durable adjuncts. Duplicate, foreign,
+missing, cleanup-pending, and stale kept references reject the whole operation
+without partial reconciliation. The result is only a retired count; paths and
+loser identifiers are never returned. Revocation is committed before physical
+deletion, so cleanup failures and interruptions remain unreadable and retryable
+through the normal reconciliation or sweep path.
+
 `RunScopedArtifactPublicationService` is the pause/replay spill seam. It opens
 one exactly-once cleanup session over `ArtifactHandle.run()`, sanitizes
 read/write/cleanup failures, invalidates every reference when the session
 closes, and leaves interruption recovery to the shared startup sweep. A
 run-scoped spill may declare no browser operation because it is read only by its
 own server-side run; all other retention classes must still declare at least one
-typed lease operation.
+typed lease operation. The run captures server-resolved mode once. Private,
+missing, inherited, or malformed declarations use the encrypted `.hpa` path;
+only explicit public mode uses an opaque plaintext `.spill` with `0600` file and
+`0700` directory permissions. Public spills remain ledger-bound and
+process-epoch-stale, never receive browser leases, and are swept with encrypted
+spills before readiness. Active runs block scope transitions, while cleanup
+continues after lock. Failed public-spill cleanup keeps the run admitted, marks
+the ledger entry cleanup-pending, blocks reads and mode transitions, and permits
+an explicit cleanup retry before admission is released.
+
+Non-spill artifacts capture the stable effective mode on write. Private values
+use authenticated `.hpa`; public values use the exact digest-checked `.hpu`
+container without consulting the keystore. The ledger owns the full `.hpu`
+SHA-256, and a public lease retains the validated no-follow descriptor identity
+until consumption so a path replacement invalidates the lease. Durable
+adjuncts keep their opaque
+reference while a non-destructive transition stages and verifies the opposite
+representation. Regenerable caches and served transients instead stage logical
+retirement and regenerate in the target mode after commit. Public leases remain
+typed, opaque, one-use, revision-bound, and restart-local, but do not require a
+privacy session. Declaration drift, staged entries, or ledger/file mode drift
+blocks without trying the other representation.
+
+`stream-v1` declarations are limited to run-scoped spills, regenerable caches,
+and served transients. Durable adjuncts still use `bounded-bytes-v1`: their mode
+transition preserves the reference by converting between private and public
+representations, and the shared service does not yet provide a bounded
+stream-to-stream durable conversion. Rejecting that declaration in both the
+server profile and browser attestation keeps an impossible transition contract
+from reaching runtime. Regenerable and served stream artifacts remain safe
+because mode transition retires them instead of converting them.
 
 `RootBoundSourceLeasePublisher` is the existing-file seam. Consumers remain
 responsible for deciding which roots and media formats are valid and return a

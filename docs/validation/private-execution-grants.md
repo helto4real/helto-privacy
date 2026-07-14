@@ -24,7 +24,9 @@ credentials.
   synchronous completion, asynchronous completion, and cancellation.
 - Private cache entries are isolated copies held only in process RAM. Unknown
   identities are rejected; lock, session replacement, key rotation, and profile
-  conflict clear their partitions.
+  conflict clear their partitions. Bounded cache discriminators separate
+  result-changing dispatch context without placing that context in the opaque
+  identity.
 - The canonical ComfyUI prepare route returns `Cache-Control: no-store` and the
   protected single-use reference. Its tested response contains neither a
   dispatch identity nor semantic plaintext.

@@ -11,11 +11,13 @@ from helto_privacy.profile import (
     FieldLocationKind,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     RecordDeclaration,
     ProfileResource,
     ResourceKind,
     SemanticExecutionProjection,
+    SubjectModeBinding,
 )
 from helto_privacy.runtime import (
     AdapterBindingError,
@@ -47,7 +49,11 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
             (
                 (f"{resource_id}-adapter", "editor-state-browser")
                 if resource_id == "editor-state"
-                else (f"{resource_id}-adapter",)
+                else (
+                    (f"{resource_id}-adapter", "privacy-mode-browser")
+                    if resource_id == "privacy-mode"
+                    else (f"{resource_id}-adapter",)
+                )
             ),
         )
         for resource_id, kind in (
@@ -69,6 +75,12 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
         server_adapters=slots,
         browser_adapters=(
             AdapterSlot(
+                "privacy-mode-browser",
+                ResourceKind.MODE,
+                "privacy-mode",
+                ("HeltoTest",),
+            ),
+            AdapterSlot(
                 "editor-state-browser",
                 ResourceKind.WORKFLOW,
                 "editor-state",
@@ -80,6 +92,15 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
                 "test-scope",
                 "privacy-mode",
                 "privacy-mode-adapter",
+                mode_editor_adapter="privacy-mode-browser",
+            ),
+        ),
+        subject_mode_bindings=(
+            SubjectModeBinding(
+                "test-execution-mode",
+                "test-scope",
+                "privacy_mode_reference",
+                ("HeltoTest",),
             ),
         ),
         protected_fields=(
@@ -93,6 +114,7 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
                 FieldLocation(FieldLocationKind.WIDGET, "state"),
                 "helto.test.state.v1",
                 "editor-state",
+                ProtectedStateAuthority.SERVER_DURABLE,
                 execution=True,
             ),
         ),
@@ -124,6 +146,7 @@ def _profile(pack_id="helto.test", distribution="comfyui-helto-test"):
                 "editor-state",
                 "dispatch-adapter",
                 "dispatch-adapter",
+                "test-execution-mode",
             ),
         ),
     )
@@ -245,7 +268,9 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
     assert public_state == {
         "id": "helto.first",
         "distribution": "comfyui-helto-test",
-        "contract": "helto.privacy.v2",
+            "contract": "helto.privacy.v3",
+                "modeTransitionProtocol": "recoverable-v1",
+                "serverBootEpoch": runtime.SERVER_BOOT_EPOCH,
         "fingerprint": first.fingerprint,
         "status": "ready",
         "requiredBrowserAdapters": [
@@ -263,6 +288,17 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                     "writeProtected",
                 ],
             },
+            {
+                "id": "privacy-mode-browser",
+                "nodeTypes": ["HeltoTest"],
+                "methods": [
+                    "onPrivacySessionChange",
+                    "readDeclaredMode",
+                    "reconcileNode",
+                    "reconcileNodeDefinition",
+                    "writeDeclaredMode",
+                ],
+            },
         ],
         "resources": [
             {"id": "preview", "kind": "artifact"},
@@ -275,7 +311,7 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 {
                     "id": "test-scope",
                     "modeResourceId": "privacy-mode",
-                    "modeEditorAdapter": None,
+                    "modeEditorAdapter": "privacy-mode-browser",
                 },
         ],
         "protectedFields": [
@@ -287,7 +323,9 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 "nodeTypes": ["HeltoTest"],
                 "location": {"kind": "widget", "name": "state"},
                 "currentSchema": "helto.test.state.v1",
-                "purpose": "editor-state",
+                    "purpose": "editor-state",
+                        "stateAuthority": "server-durable",
+                        "externalTransitionPolicy": None,
                 "legacyReaderIds": [],
                 "execution": True,
             },
@@ -297,9 +335,10 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
         "executionProjections": [
                 {
                     "id": "test-dispatch",
-                    "executionResourceId": "dispatch",
-                    "workflowResourceId": "editor-state",
-                    "inputName": "private_execution",
+                        "executionResourceId": "dispatch",
+                        "workflowResourceId": "editor-state",
+                        "subjectModeBindingId": "test-execution-mode",
+                        "inputName": "private_execution",
                 },
         ],
         "records": [
@@ -319,12 +358,22 @@ def test_late_prompt_server_reconciliation_makes_all_packs_ready(monkeypatch):
                 "id": "test-preview",
                 "resourceId": "preview",
                 "scopeId": "test-scope",
-                "retention": "regenerable-cache",
-                "operations": ["preview"],
-                "mediaType": "application/octet-stream",
-            },
+                    "retention": "regenerable-cache",
+                    "operations": ["preview"],
+                    "mediaType": "application/octet-stream",
+                    "payloadMode": "bounded-bytes-v1",
+                    "streamContract": None,
+                },
         ],
         "protectedOperations": [],
+        "subjectModeBindings": [
+            {
+                "id": "test-execution-mode",
+                "scopeId": "test-scope",
+                "inputName": "privacy_mode_reference",
+                "nodeTypes": ["HeltoTest"],
+            },
+        ],
         "suiteStatus": "incomplete",
         "suiteManifestDigest": None,
         "suiteIssueCodes": ["suite_not_configured"],

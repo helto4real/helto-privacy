@@ -72,7 +72,7 @@ if (!status.ok || status.suiteStatus !== "active" || !status.suiteManifestDigest
 }
 const {
   connectPrivacyPack,
-  PRIVACY_CONTRACT_V2,
+  PRIVACY_CONTRACT_V3,
 } = await import(
   `/helto_privacy/ui/privacy_profile/${status.suiteManifestDigest}.js`
 );
@@ -80,7 +80,7 @@ const {
 const privacy = await connectPrivacyPack({
   app,
   packId: "helto.example",
-  contract: PRIVACY_CONTRACT_V2,
+  contract: PRIVACY_CONTRACT_V3,
   profileFingerprint,
   suiteManifestDigest: status.suiteManifestDigest,
   adapters: { "mode-editor": editorAdapter },
@@ -113,6 +113,9 @@ privacy.session.subscribe(({ state, revision }) => {
 });
 
 const mode = await privacy.mode("privacy-mode").resolve("example");
+// For a node-local declaration, pass the owner so the attested mode adapter's
+// declaration and facts are included in the server resolution.
+const nodeMode = await privacy.mode("privacy-mode").resolve("example", node);
 ```
 
 The profile declaration fixes each operation's same-origin route and HTTP
@@ -270,9 +273,13 @@ The keystore format is intentionally stable:
   transition IDs/status, and adapter IDs; it never stores product values,
   credentials, keys, or decrypted content.
 - Managed artifact root: beside the keystore as `privacy_artifacts/`, or
-  `HELTO_PRIVACY_ARTIFACT_ROOT`. It contains private-permission encrypted
-  artifacts and a path-free lifecycle ledger; generated plaintext is never
-  staged as a named file.
+  `HELTO_PRIVACY_ARTIFACT_ROOT`. It contains private `.hpa`, public `.hpu`, and
+  run-spill representations plus a path-free revisioned lifecycle ledger.
+  Public `.hpu` files use an exact purpose/schema/size/digest header, are bound
+  to their ledger entry by a full-file SHA-256, and work without a keystore
+  session. An explicitly public run-scoped spill remains a
+  random opaque raw `0600` `.spill` file that is never browser-leased and is
+  removed when the run ends or startup recovery detects an old process epoch.
 - Keystore schema: `helto.privacy-keystore`, version `1`.
 - Key-wrap AAD: `helto.privacy-keystore|1|<keyId>`.
 - Files are written through a temporary file and atomic replace; keystore and
@@ -380,17 +387,26 @@ plaintext projection. Mark each protected field that affects execution with
 `execution=True` and declare the consumer-owned semantic projection:
 
 ```python
-from helto_privacy import SemanticExecutionProjection
+from helto_privacy import SemanticExecutionProjection, SubjectModeBinding
 
 profile = PrivacyProfile(
     # resources, adapters, scopes, and protected fields omitted
+    subject_mode_bindings=(
+        SubjectModeBinding(
+            id="generation-mode",
+            scope_id="generate",
+            input_name="privacy_mode_reference",
+            node_types=("HeltoGenerate",),
+        ),
+    ),
     execution_projections=(
         SemanticExecutionProjection(
-            "generate-image",
-            "generation",
-            "prompt-state",
-            "generation-projection",
-            "generation-dispatch",
+            id="generate-image",
+            execution_resource_id="generation",
+            workflow_resource_id="prompt-state",
+            projection_adapter="generation-projection",
+            dispatch_adapter="generation-dispatch",
+            subject_mode_binding_id="generation-mode",
         ),
     ),
 )
@@ -436,7 +452,11 @@ The product execution boundary consumes the reference once:
 
 ```python
 execution = privacy.execution("generation")
-resolved = execution.dispatch(protected_reference, product_context)
+resolved = execution.dispatch(
+    protected_reference,
+    product_context,
+    subject_id=unique_id,
+)
 result = resolved.value
 execution.cache_store(resolved.cache_identity, result)  # Optional RAM cache.
 ```
@@ -448,6 +468,12 @@ identity derivation occur together at dispatch immediately before product
 logic. The returned public identity is an opaque, domain-separated HMAC of the
 semantic projection and unlocked session; it is not plaintext, a path, an
 envelope fingerprint, or an unkeyed content hash.
+
+The ephemeral execution reference is also bound to a domain-separated hash of
+the exact ComfyUI node identity. The browser derives that identity from the
+attested coordinator owner; backend nodes pass their `unique_id` as
+`subject_id`. The raw ID is never placed in the reference or error text, and a
+reference moved between two nodes of the same type is rejected before dispatch.
 `execution.cache_store(identity, value)` and `cache_load(identity)` accept only
 identities issued in the current unlocked session, keep isolated copies in
 process RAM, and clear on lock, key rotation/session replacement, process
@@ -458,6 +484,20 @@ projection returns the shared RAM entry before invoking product logic.
 Public-mode product execution continues through the consumer's ordinary public
 path. Do not send plaintext through the protected-reference route and do not
 catch `PRIVACY_EXECUTION_*` failures to execute defaults or stale state.
+
+Backend-only operations that must use the same node-local decision declare
+`subject_mode_binding_id` and accept the active `SubjectModeLease` returned by
+`privacy.subject_modes(binding_id).consume(reference, subject_id)`. The lease
+is reusable only by operations linked to that binding, and is revoked on close,
+lock, session replacement, or profile invalidation. It never exposes the raw
+subject or unencrypted product state.
+
+Every backend invocation covered by a subject-mode binding must consume its
+reference exactly once in a context manager, even when the effective mode is
+public or the binding exists only for an execution projection. Keep that lease
+open across every linked operation, then let the context manager close it.
+Public execution continues through the ordinary product path inside that
+context; it must not leave the reference pending for replay until its TTL.
 
 ## Sensitive-by-default operation projections
 
@@ -487,6 +527,12 @@ ProtectedOperation(
 )
 ```
 
+The binding scope must declare a browser mode-editor adapter whose node types
+cover the binding. One fresh version-2 subject-mode reference is prepared per
+matching node and binding. A private effective mode additionally requires the
+linked execution reference; a public effective mode forbids it. Both inputs are
+injected only into execution output and never into the persisted workflow.
+
 The product adapter implements `project(value, declaration)` and returns only
 candidate coarse facts. `privacy.operations("generation").project(...)`
 resolves effective mode from the bound server adapter. Public mode returns an
@@ -496,7 +542,7 @@ non-negative integer counts; missing declarations, extra fields, strings,
 lists, paths, names, warnings, debug values, and malformed counts fail closed.
 The adapter never receives or decides a privacy-mode flag.
 
-## Private Records and Redaction
+## Mode-captured records and redaction
 
 Private record libraries declare their protected schema, fixed reveal
 operations, and exact projection-field allowlist. Every undeclared field is
@@ -506,6 +552,7 @@ sensitive:
 from helto_privacy import (
     RecordDeclaration,
     RecordRevealProjection,
+    RecordSnapshot,
     confirm_record_mutation,
     generate_private_record_id,
 )
@@ -532,9 +579,9 @@ profile = PrivacyProfile(
 
 class PromptStore:
     def list_ids(self): ...                  # Opaque generated IDs only.
-    def read_protected(self, record_id): ... # Current encrypted envelope.
-    def write_protected(self, record_id, value): ...
-    def delete(self, record_id): ...
+    def read_record(self, record_id) -> RecordSnapshot: ...
+    def compare_and_swap_record(self, record_id, expected, replacement):
+        ...  # Exact atomic CAS; False means no write on conflict.
 
     def mutate(self, current, operation, value):
         # Validate product meaning and return the full normalized record.
@@ -548,14 +595,19 @@ class PromptStore:
 record_id = generate_private_record_id()
 ```
 
-`records.list_shells("prompt-record")` never calls `read_protected`. It returns
-only opaque ID, record kind, `private: true`, and the fixed label
-`Private record`. Names, descriptions, tags, timestamps, counts, paths,
-filenames, hashes, media details, and diagnostics cannot enter a locked shell.
+In effective private mode, `records.list_shells("prompt-record")` reads each
+opaque `RecordSnapshot` only to classify its representation; it never decrypts.
+It returns only opaque ID, record kind, `private: true`, and
+the fixed label `Private record`. In explicit public mode it validates the
+exact public representation and returns the same closed shell shape with
+`private: false` and `Public record`; it does not copy record fields into the
+listing. Names, descriptions, tags, timestamps, counts, paths, filenames,
+hashes, media details, and diagnostics cannot enter a shell.
 
-An authorized reveal decrypts only after the current session and stable mode
-scope validate, runs the consumer projection, rejects every non-allowlisted
-field, returns an isolated JSON value, and clears mutable plaintext:
+A private reveal decrypts only after the current session and stable mode scope
+validate. A public reveal needs no unlocked privacy session. Both paths run the
+same consumer projection, reject every non-allowlisted field, return an isolated
+JSON value, and clear mutable plaintext:
 
 ```python
 authorization = privacy.authorization.authorize_request(request, "record.use")
@@ -565,10 +617,32 @@ revealed = privacy.records("library").reveal(
 use_prompt(revealed.value["prompt"])
 ```
 
-Authorized plaintext mutations go through the same typed handle. The consumer
-adapter owns domain normalization; shared privacy mints opaque IDs, encrypts the
-normalized value, commits it, reopens and decrypts it, compares canonical JSON,
-and rolls back on any mismatch:
+Legacy record readers are bound with `LegacyLocationKind.RECORD`. Listing never
+probes, decrypts, or creates migration obligations; a legacy or otherwise
+unclassified representation blocks the listing. On an authorized reveal or mutation, shared privacy first recovers
+any protected migration journal for the opaque record ID. An exact current
+schema is decrypted normally and a corrupt current envelope never falls back to
+a legacy reader. A matched legacy reader creates its obligation before reveal,
+then the shared record transaction writes the normalized current envelope,
+reopens and decrypts it, compares canonical state, and issues a receipt only
+after verification. Projection, mutation, write, read-back, journal, or rollback
+failure keeps the obligation unresolved and restores the exact legacy value.
+If a later locked delete or confirmed protected replacement diverges from an
+interrupted journal, recovery preserves that newer store state: a prepared
+obligation stays unresolved, while an already verified finalize-pending receipt
+remains valid. Recovery never invents a discard from store divergence.
+
+Record retirement audits use the typed
+`records("library").audit_legacy(...)` path with `record.audit` authorization.
+It checks the declared audit item through the exact record binding, creates any
+matching obligation, clears reader plaintext internally, and returns only a
+boolean match result. Generic `migration.*` reads, completion, recovery, and
+audit cannot operate on record bindings.
+
+Typed mutations go through the same handle. The consumer adapter owns domain
+normalization; shared privacy mints opaque IDs, writes the normalized value in
+the effective mode's exact representation, reads it back, compares canonical
+JSON, and rolls back on any mismatch:
 
 ```python
 created = privacy.records("library").mutate(
@@ -585,9 +659,16 @@ authorized activity field can return `RecordProjectionResult(value,
 replacement)`. Shared privacy encrypts and verifies the replacement before the
 projection is returned.
 
+For a legacy `duplicate`, the source record is first migrated and receipted as
+current, then the new current-format target is created. A later target failure
+does not invalidate the truthful source receipt. Locked delete and confirmed
+protected replacement remain non-decrypting and never manufacture migration
+receipts.
+
 Delete and protected replacement remain available while locked, but require a
 one-use confirmation bound to the exact pack, resource, kind, ID, and action.
-Replacement accepts only a current protected envelope—never plaintext:
+Replacement accepts only a current typed representation for the effective
+mode—never an unwrapped plaintext mapping:
 
 ```python
 confirmation = confirm_record_mutation(
@@ -604,12 +685,42 @@ privacy.records("library").delete("prompt-record", record_id, confirmation)
 The attested browser handle exposes `list`, `reveal`, `create`, `mutate`,
 `delete`, and protected-envelope `replace`.
 It owns a generic Helto-styled destructive confirmation modal and rebuilds every shell with
-`redactPrivateRecordShell()`, discarding extra server/consumer metadata rather
-than masking or retaining it. Generic protected operations cannot target a
+`normalizeRecordShell()`, discarding extra server/consumer metadata rather
+than masking or retaining it. `redactPrivateRecordShell()` remains the strict
+private-only primitive. Generic protected operations cannot target a
 record resource. Duplicate, replace, and patch can be registered only through
 the declaration's fixed mutation operations and the shared verified mutation
 path; arbitrary merge, metadata-reveal, and product-local route escape hatches
 cannot be registered.
+
+Routed protected operations that need an existing shared privacy primitive must
+declare that dependency in the immutable profile. Their adapter implements
+`invoke_with_dependencies(input, references, declaration, dependencies)` and
+receives only invocation-scoped record, singleton, or artifact capabilities for
+the exact declared targets and verbs. The bundle is nonserializable, bound to
+the dispatch task and current session/scope, and expires as soon as the adapter
+returns or is cancelled; it does not contain the pack, installation,
+authorization, or adapter registry. Artifact dependency verbs also follow the
+declared retention lifecycle: `reconcile-owner` is available only for durable
+adjuncts, while direct `write` is unavailable for run-scoped spills, which must
+be created through an `ArtifactRun`.
+
+A source-lease operation follows the same rule. With no declared dependencies,
+its adapter implements `bind_source(resolved, declaration)`. If the operation
+declares any dependency, the required method is instead
+`bind_source_with_dependencies(resolved, declaration, dependencies)`; there is
+no fallback to the unrestricted binder. Shared policy holds stable-scope work
+admission across reference resolution, dependency use, root binding, and lease
+issuance, then expires the dependency bundle before issuing the lease. This lets
+a source binder recheck an encrypted singleton such as an allowed-root registry
+without receiving the singleton store or raw pack authority.
+
+This is a least-authority boundary for supported APIs inside a trusted Python
+process, not a sandbox for hostile in-process code. Consumer adapters must not
+inspect or replace private `helto_privacy` module internals. An adapter that is
+allowed to inspect frames, traverse interpreter state, or monkey-patch private
+modules already shares the process's memory and requires a separate process or
+equivalent isolation boundary.
 
 Record responses use `Cache-Control: private, no-store`, `nosniff`,
 `no-referrer`, a fresh opaque correlation ID, and generic download names from
@@ -617,13 +728,13 @@ Record responses use `Cache-Control: private, no-store`, `nosniff`,
 fixed stage plus coarse integer count and boolean flag. Raw exceptions, paths,
 record values, and original filenames are never response or diagnostic fields.
 
-## Revisioned Protected Singletons
+## Revisioned mode-captured singletons
 
 Pack-managed queue state and provider credentials use typed singleton resources
 instead of private-record IDs or product-local encryption. The consumer keeps
 domain normalization, SQLite/JSON schema, and update meaning; the shared handle
-owns encryption, authorization, revision checks, verified read-back, rollback,
-and generic status:
+owns the exact public/private representation, private authorization, revision
+checks, verified read-back, rollback, and generic status:
 
 ```python
 from helto_privacy import SingletonDeclaration, SingletonPayloadKind
@@ -646,10 +757,13 @@ profile = PrivacyProfile(
 
 The store adapter implements `read_singleton(id) -> SingletonSnapshot` and
 `begin_singleton_replace(id, expected_revision, replacement)`. The returned
-transaction implements `commit() -> bool`, `read_back()`, and `rollback()`;
+transaction implements `commit() -> bool` and `read_back()`;
 commit must be one atomic compare-and-swap in the consumer-owned storage
 schema. Shared code accepts a revision only after exact protected read-back and
-restores the prior snapshot on every partial write or verification failure.
+uses adapter
+`rollback_singleton_replace(id, exact_committed_snapshot, restored_snapshot)`
+for an exact atomic rollback CAS. A rollback restores the prior protected
+representation at a new revision; it never reuses the stale revision.
 `False` is reserved for a compare-and-swap conflict and must mean the
 transaction made no authoritative change; shared code will not roll back over
 the concurrent writer.
@@ -669,13 +783,16 @@ receipt = singletons.replace_field(
 ```
 
 Field singletons accept canonical JSON mappings; blob singletons accept bytes
-and bind them to the declared purpose. Reveals require `singleton.reveal`;
-replacement and deletion require `singleton.replace` and
-`singleton.delete`. Status never decrypts and exposes only existence,
-monotonic revision, private/current-format flags. Deletion writes a revisioned
-tombstone, preventing stale create-after-delete updates. Locked, malformed,
-partially written, stale-revision, failed-read-back, and failed-rollback states
-block without resetting or returning defaults.
+and bind them to the declared purpose. Private reveals and mutations require
+their declared `singleton.*` privacy authorization; explicitly public values
+operate without an unlocked keystore. Status never decrypts and exposes only
+existence, monotonic revision, captured-private, and current-format flags.
+Deletion writes a revisioned tombstone, preventing stale create-after-delete
+updates. Locked private, malformed, mixed-mode, partially written,
+stale-revision, failed-read-back, and failed-rollback states block without
+resetting or returning defaults. Representation transition hooks and their
+coordinator boundary are documented in
+[Dual-mode records and singletons](docs/dual-mode-records-singletons.md).
 
 ## Managed Encrypted Artifacts and Opaque Leases
 
@@ -702,16 +819,26 @@ ArtifactDeclaration(
 
 The codec adapter implements `encode`, `decode`, and
 `purge_plaintext_derivatives`; it also participates in the normal mode
-transition contract. The shared runtime encrypts before atomic exposure, uses
-`0700` directories and `0600` files, binds authentication to pack, kind,
-purpose, and format version, and keeps blocking codec/filesystem work off the
-event loop behind bounded admission.
+transition contract. The shared runtime writes the server-authoritative
+representation before atomic exposure, uses `0700` directories and `0600`
+files, binds it to pack, kind, purpose, and format version, and keeps blocking
+codec/filesystem work off the event loop behind bounded admission. Private
+artifacts use authenticated `.hpa` files. Public non-spill artifacts use exact
+digest-checked `.hpu` files and require no privacy keystore session. Reads
+verify the full representation against ledger authority before returning
+payload bytes; leases retain that validated no-follow file identity through
+consumption and fail if the authoritative path moves.
 
-Consumers choose one lifecycle: durable adjuncts survive until owner release,
-regenerable caches expire/evict and are discarded when unreadable, run-scoped
-spills clean up exactly once through `async with artifacts.run()`, and served
-transients retire on replacement, expiry, consumption, owner release, or
-startup recovery. Use opaque owners from `generate_artifact_owner_id()`:
+Consumers choose one lifecycle: durable adjuncts survive until owner release
+and can transition between exact public/private representations; regenerable
+caches expire/evict and retire then regenerate across mode transitions;
+run-scoped spills clean up exactly once through `async with artifacts.run()`;
+and served transients retire on replacement, expiry, consumption, owner
+release, startup recovery, or mode transition. A run fixes server-resolved mode
+at creation: only an explicit public declaration produces a plaintext ephemeral
+spill; missing, inherited, malformed, or private declarations remain
+encrypted. Active runs block scope mode transitions. Use opaque owners from
+`generate_artifact_owner_id()`:
 
 ```python
 owner = generate_artifact_owner_id()
@@ -722,6 +849,17 @@ async with media.run() as run:
     spill_reference = await run.write("render-spill", spill_bytes)
     await render_from(spill_reference)
 ```
+
+For `stream-v1`, the profile must also attest the consumer's real operational
+capacity. `max_plaintext_bytes` bounds one encoded artifact and
+`max_owner_plaintext_bytes` bounds all live artifacts retained by one owner. A
+codec that joins chunks into a tensor, image, archive, or other final product
+declares `decoded_output=ArtifactDecodedOutput.MATERIALIZED` and a truthful
+`max_materialized_output_bytes`; this includes a downstream stitch path that
+cannot stream. A codec that returns a forward-only stream declares
+`decoded_output=ArtifactDecodedOutput.STREAM` and no materialized-output bound.
+The declaration is canonical profile evidence, so omitting or contradicting
+the output capacity rejects the profile before installation.
 
 For node-produced previews, compose one bound resource handle with
 `ArtifactPublicationService`. It coordinates all declared media kinds, replaces
@@ -808,6 +946,27 @@ product-data-free bootstrap surfaces. State-changing bootstrap routes reject
 cross-site or mismatched-origin requests and require `application/json`. The
 browser session cookie uses `SameSite=Strict`; protected routes still require
 the current header or cookie token as declared by their operation.
+
+### Prompt submission boundary
+
+Route registration also installs one app-scoped aiohttp middleware at index
+zero, before ComfyUI's `/prompt` handler, its `/api` alias, prompt hooks, queue
+observers, and all previously registered middleware. For exact JSON `POST`
+requests to `/prompt` and `/api/prompt`, it validates the cached incoming body
+without rewriting it. Helto-bearing submissions require the declared workflow
+metadata, an active exact suite, ready installed profiles, no structurally
+recognized legacy value, and exact live subject/execution references at their
+declared node inputs. Validation is bounded and non-consuming; rejected
+requests receive an empty `400` with `Cache-Control: no-store`, and the route,
+hooks, and queue are never reached.
+
+This boundary guarantees validation of the incoming request before the first
+handler or queue observer. Code that runs after the middleware remains trusted:
+a later ComfyUI middleware, prompt hook, route implementation, or consumer can
+still mutate the already-validated object. The shared package deliberately
+does not install `add_on_prompt_handler`, patch ComfyUI core, or claim to make
+trusted downstream mutation impossible. Downstream exceptions retain
+ComfyUI's normal handling and are not converted into privacy validation errors.
 
 New integrations declare exact reader units, locations, and historical-key
 imports through the shared migration contract. This keeps retirement evidence

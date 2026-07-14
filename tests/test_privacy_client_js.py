@@ -2,7 +2,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from privacy_js_test_support import write_privacy_client_dependencies
+from tests.privacy_js_test_support import write_privacy_client_dependencies
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -365,6 +365,8 @@ def test_snapshot_transport_uses_only_attested_fixed_field_routes(tmp_path):
               scopeId: "global",
               browserAdapter: "state-ui",
               nodeTypes: ["SyntheticNode"],
+              stateAuthority: "server-durable",
+              externalTransitionPolicy: null,
             }],
             modeScopes: [],
           });
@@ -425,19 +427,38 @@ def test_execution_transport_uses_only_attested_fixed_prepare_route(tmp_path):
               browserAdapter: "state-ui",
               nodeTypes: ["SyntheticNode"],
               execution: true,
+              stateAuthority: "server-durable",
+              externalTransitionPolicy: null,
             }],
             executionProjections: [{
               id: "product-execution",
               executionResourceId: "dispatch",
               workflowResourceId: "state",
+              subjectModeBindingId: "product-mode",
+              inputName: "private_execution",
             }],
-            modeScopes: [],
+            subjectModeBindings: [{
+              id: "product-mode",
+              scopeId: "global",
+              inputName: "privacy_mode_reference",
+              nodeTypes: ["SyntheticNode"],
+            }],
+            modeScopes: [{
+              id: "global",
+              modeResourceId: "privacy-mode",
+              modeEditorAdapter: "mode-ui",
+            }],
+            requiredBrowserAdapters: [{
+              id: "mode-ui",
+              nodeTypes: ["SyntheticNode"],
+              methods: [],
+            }],
           });
           if (target.endsWith("/suite/browser-attestation")) return response({ ok: true });
           calls.push({ target, options });
           return response({
             ok: true,
-            reference: { schema: "helto.private-execution-reference", version: 1 },
+            reference: { schema: "helto.private-execution-reference", version: 2 },
           });
         };
         const transport = await client.connectAttestedPrivacyProfileClient({
@@ -449,24 +470,64 @@ def test_execution_transport_uses_only_attested_fixed_prepare_route(tmp_path):
         await transport.execution.prepare(
           "dispatch",
           "product-execution",
+          "node-7",
           [{ fieldId: "private-state", protectedValue: "SYNTHETIC_CIPHERTEXT" }],
         );
+        const reference = {
+          schema: "helto.private-execution-reference",
+          version: 2,
+          packId: "helto.test",
+          executionResourceId: "dispatch",
+          projectionId: "product-execution",
+          workflowResourceId: "state",
+          subject: "a".repeat(64),
+          grant: "opaque-grant",
+          fields: [{
+            fieldId: "private-state",
+            protectedValue: "SYNTHETIC_CIPHERTEXT",
+          }],
+        };
+        assert.throws(
+          () => transport.submissionGrants.revoke([{
+            schema: "helto.subject-mode-reference",
+            version: 2,
+            packId: "helto.test",
+            profileFingerprint: "a".repeat(64),
+            bindingId: "product-mode",
+            scopeId: "global",
+            grant: "subject-grant-without-subject-hash",
+          }]),
+          (error) => error.code === "PRIVACY_SUBMISSION_GRANTS_INVALID",
+        );
+        await transport.submissionGrants.revoke([reference]);
 
-        assert.equal(calls.length, 1);
+        assert.equal(calls.length, 2);
         assert.equal(
           calls[0].target,
           "/helto_privacy/profiles/helto.test/executions/dispatch/prepare",
         );
         assert.deepEqual(JSON.parse(calls[0].options.body), {
           projectionId: "product-execution",
+          subjectId: "node-7",
           fields: [{
             fieldId: "private-state",
             protectedValue: "SYNTHETIC_CIPHERTEXT",
           }],
         });
         assert(!calls[0].target.includes("SYNTHETIC"));
+        assert.equal(
+          calls[1].target,
+          "/helto_privacy/profiles/helto.test/submission-grants/revoke",
+        );
+        assert.deepEqual(JSON.parse(calls[1].options.body), {
+          references: [reference],
+        });
+        assert.equal(
+          calls[1].options.headers["X-Helto-Privacy-Operation"],
+          "submission-grants.revoke",
+        );
         assert.throws(
-          () => transport.execution.prepare("missing", "product-execution", []),
+          () => transport.execution.prepare("missing", "product-execution", "node-7", []),
           (error) => error.code === "PRIVACY_EXECUTION_PROJECTION_INVALID",
         );
         assert.equal(typeof transport.execution.request, "undefined");
@@ -607,6 +668,8 @@ def test_attested_artifact_transport_issues_only_opaque_fixed_leases(tmp_path):
               retention: "regenerable-cache",
               operations: ["preview"],
               mediaType: "image/webp",
+              payloadMode: "bounded-bytes-v1",
+              streamContract: null,
             }],
             modeScopes: [],
           });
@@ -662,6 +725,57 @@ def test_attested_artifact_transport_issues_only_opaque_fixed_leases(tmp_path):
             id: "0123456789abcdef0123456789abcdef",
           }, "preview"),
           (error) => error.code === "PRIVACY_ARTIFACT_REFERENCE_INVALID",
+        );
+        """,
+    )
+
+
+def test_attested_client_rejects_durable_stream_artifact_declaration(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        globalThis.localStorage = { getItem: () => "", setItem() {}, removeItem() {} };
+        globalThis.document = { cookie: "" };
+        globalThis.fetch = async (url) => {
+          const target = String(url);
+          if (target.endsWith("/profiles/helto.test")) return response({
+            ok: true,
+            id: "helto.test",
+            fingerprint: "a".repeat(64),
+            suiteManifestDigest: "b".repeat(64),
+            protectedOperations: [],
+            protectedFields: [],
+            executionProjections: [],
+            records: [],
+            artifacts: [{
+              id: "segment",
+              resourceId: "media",
+              scopeId: "global",
+              retention: "durable-adjunct",
+              operations: ["use"],
+              mediaType: "application/octet-stream",
+              payloadMode: "stream-v1",
+              streamContract: {
+                codecSchema: "raw-segment-v1",
+                codecVersion: 1,
+                maxPlaintextBytes: 1024,
+                maxOwnerPlaintextBytes: 4096,
+                decodedOutput: "materialized",
+                maxMaterializedOutputBytes: 1024,
+              },
+            }],
+            modeScopes: [],
+          });
+          return response({ ok: true });
+        };
+        await assert.rejects(
+          () => client.connectAttestedPrivacyProfileClient({
+            packId: "helto.test",
+            profileFingerprint: "a".repeat(64),
+            suiteManifestDigest: "b".repeat(64),
+            promptUnlock: async () => null,
+          }),
+          (error) => error.code === "PRIVACY_ARTIFACT_DECLARATION_INVALID",
         );
         """,
     )

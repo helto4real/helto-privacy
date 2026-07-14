@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture, ProductStateProtocolFixture
+
 import helto_privacy.keystore as keystore
 import helto_privacy.migration as migration
 import helto_privacy.runtime as runtime
@@ -22,6 +24,7 @@ from helto_privacy import (
     PrivacyEnvelopeCodec,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     ProfileResource,
     ResourceKind,
@@ -441,7 +444,7 @@ class Request:
         self.cookies = {}
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, *_args):
         return "private"
 
@@ -458,7 +461,7 @@ class ModeAdapter:
         return None
 
 
-class StateAdapter:
+class StateAdapter(ProductStateProtocolFixture):
     def capture(self, *_args):
         return None
 
@@ -515,6 +518,7 @@ def _profile() -> PrivacyProfile:
                 FieldLocation(FieldLocationKind.WIDGET, "selected_images"),
                 "helto.comfyui-utils.selector",
                 "selected-images",
+                ProtectedStateAuthority.SERVER_DURABLE,
                 legacy_reader_ids=(raw_reader_id, reader_id),
             ),
         ),

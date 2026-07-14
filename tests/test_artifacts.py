@@ -1,17 +1,25 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
+import os
 import stat
 import threading
+import time as wall_time
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture
 
 import helto_privacy.artifacts as artifacts
 import helto_privacy.concurrency as concurrency
 import helto_privacy.keystore as keystore
 import helto_privacy.runtime as runtime
+import helto_privacy.mode_runtime as mode_runtime
 from helto_privacy import (
     ArtifactDeclaration,
     ArtifactError,
@@ -20,6 +28,7 @@ from helto_privacy import (
     generate_artifact_owner_id,
 )
 from helto_privacy.guard import PrivacyAuthorizationError, authorize_privacy_request
+from helto_privacy.mode import EffectivePrivacyMode, ModeTransitionError
 from helto_privacy.profile import (
     AdapterSlot,
     PrivacyProfile,
@@ -27,9 +36,10 @@ from helto_privacy.profile import (
     ProfileResource,
     ResourceKind,
 )
+from helto_privacy.suite_runtime import SuiteBlockedError
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, _scope_id):
         return "private"
 
@@ -44,6 +54,19 @@ class ModeAdapter:
 
     def rollback_mode_transition(self, *_args):
         return None
+
+
+class PublicModeAdapter(ModeAdapter):
+    def read_declared_mode(self, _scope_id):
+        return "public"
+
+
+class MutableModeAdapter(ModeAdapter):
+    def __init__(self, mode):
+        self.mode = mode
+
+    def read_declared_mode(self, _scope_id):
+        return self.mode
 
 
 class ArtifactAdapter:
@@ -389,6 +412,725 @@ def test_retention_classes_replace_expire_sweep_and_release_by_owner(
     assert result["released"] == 1
 
 
+def test_release_artifact_owner_is_constrained_to_exact_artifact_kind(artifact_pack):
+    pack, _root, _token = artifact_pack
+    handle = pack.artifacts("media")
+    owner = generate_artifact_owner_id()
+
+    async def exercise():
+        durable = await handle.write("durable-mask", owner, b"DURABLE")
+        thumbnail = await handle.write("thumbnail", owner, b"THUMBNAIL")
+        retired = await artifacts.release_artifact_owner(
+            profile=pack.profile,
+            resource_id="media",
+            artifact_kind="thumbnail",
+            owner_id=owner,
+        )
+        with pytest.raises(ArtifactError) as thumbnail_released:
+            await handle.read("thumbnail", thumbnail)
+        return retired, await handle.read("durable-mask", durable), thumbnail_released.value
+
+    retired, durable_value, released_error = asyncio.run(exercise())
+    assert retired == 1
+    assert durable_value == b"DURABLE"
+    assert released_error.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+
+
+def test_reconcile_owner_keeps_canonical_and_deletes_all_other_owner_artifacts(
+    artifact_pack,
+):
+    pack, _root, _token = artifact_pack
+    handle = pack.artifacts("media")
+    owner = generate_artifact_owner_id()
+    empty_owner = generate_artifact_owner_id()
+
+    async def exercise():
+        canonical = await handle.write("durable-mask", owner, b"CANONICAL")
+        losers = (
+            await handle.write("durable-mask", owner, b"LOSER_A"),
+            await handle.write("durable-mask", owner, b"LOSER_B"),
+        )
+        empty_losers = (
+            await handle.write("durable-mask", empty_owner, b"EMPTY_A"),
+            await handle.write("durable-mask", empty_owner, b"EMPTY_B"),
+        )
+        retired = await handle.reconcile_owner(
+            "durable-mask",
+            owner,
+            keep=(canonical,),
+        )
+        emptied = await handle.reconcile_owner("durable-mask", empty_owner)
+        assert await handle.read("durable-mask", canonical) == b"CANONICAL"
+        for reference in (*losers, *empty_losers):
+            with pytest.raises(ArtifactError) as removed:
+                await handle.read("durable-mask", reference)
+            assert removed.value.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+
+        for non_durable_kind in ("thumbnail", "spill", "replay"):
+            with pytest.raises(ArtifactError) as rejected:
+                await handle.reconcile_owner(
+                    non_durable_kind,
+                    generate_artifact_owner_id(),
+                )
+            assert rejected.value.code == "PRIVACY_ARTIFACT_RETENTION_INVALID"
+        return retired, emptied
+
+    assert asyncio.run(exercise()) == (2, 2)
+
+
+def test_reconcile_owner_requires_active_suite_and_exact_stable_scope(
+    artifact_pack,
+    monkeypatch,
+):
+    pack, root, _token = artifact_pack
+    handle = pack.artifacts("media")
+    owner = generate_artifact_owner_id()
+
+    async def create():
+        return (
+            await handle.write("durable-mask", owner, b"CANONICAL"),
+            await handle.write("durable-mask", owner, b"LOSER"),
+        )
+
+    canonical, loser = asyncio.run(create())
+    before = (root / "ledger.json").read_bytes()
+
+    def suite_blocked():
+        raise SuiteBlockedError("suite_incomplete")
+
+    with monkeypatch.context() as blocked_suite:
+        blocked_suite.setattr(
+            artifacts,
+            "require_active_process_suite",
+            suite_blocked,
+        )
+        with pytest.raises(SuiteBlockedError) as rejected:
+            asyncio.run(
+                handle.reconcile_owner(
+                    "durable-mask",
+                    owner,
+                    keep=(canonical,),
+                )
+            )
+        assert rejected.value.code == "suite_incomplete"
+    assert (root / "ledger.json").read_bytes() == before
+
+    checked_scopes = []
+
+    def transition_blocked(_installation, scope_id):
+        checked_scopes.append(scope_id)
+        raise ModeTransitionError("PRIVACY_TRANSITION_BLOCKED")
+
+    with monkeypatch.context() as blocked_transition:
+        blocked_transition.setattr(
+            mode_runtime,
+            "require_stable_bound_scope",
+            transition_blocked,
+        )
+        with pytest.raises(ArtifactError) as rejected:
+            asyncio.run(
+                handle.reconcile_owner(
+                    "durable-mask",
+                    owner,
+                    keep=(canonical,),
+                )
+            )
+        assert rejected.value.code == "PRIVACY_ARTIFACT_MODE_BLOCKED"
+    assert checked_scopes == ["main"]
+    assert (root / "ledger.json").read_bytes() == before
+    assert asyncio.run(handle.read("durable-mask", loser)) == b"LOSER"
+
+    entered_reconcile = threading.Event()
+    reconcile_results = []
+    failures = []
+    original_reconcile = artifacts._reconcile_owner_locked
+
+    def observe_reconcile(*args):
+        entered_reconcile.set()
+        return original_reconcile(*args)
+
+    def reconcile_worker():
+        try:
+            reconcile_results.append(
+                asyncio.run(
+                    handle.reconcile_owner(
+                        "durable-mask",
+                        owner,
+                        keep=(canonical,),
+                    )
+                )
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    with monkeypatch.context() as ordered:
+        ordered.setattr(
+            artifacts,
+            "_reconcile_owner_locked",
+            observe_reconcile,
+        )
+        with mode_runtime._TRANSITION_LOCK:
+            worker = threading.Thread(target=reconcile_worker)
+            worker.start()
+            assert entered_reconcile.wait(timeout=0.05) is False
+        worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+    assert failures == []
+    assert reconcile_results == [1]
+
+
+def test_reconcile_owner_blocks_inflight_lease_registration(
+    artifact_pack,
+    monkeypatch,
+):
+    pack, _root, token = artifact_pack
+    handle = pack.artifacts("media")
+    owner = generate_artifact_owner_id()
+    request = Request(token)
+
+    async def create():
+        return (
+            await handle.write("durable-mask", owner, b"CANONICAL"),
+            await handle.write("durable-mask", owner, b"LOSER"),
+        )
+
+    canonical, loser = asyncio.run(create())
+    authorization = authorize_privacy_request(
+        request,
+        "artifact.use",
+        pack_id=pack.profile.id,
+    )
+    entered_registration = threading.Event()
+    release_registration = threading.Event()
+    original_register = artifacts._register_artifact_lease
+
+    def pause_registration(*args):
+        entered_registration.set()
+        assert release_registration.wait(timeout=5)
+        return original_register(*args)
+
+    leases = []
+    failures = []
+
+    def issue_lease():
+        try:
+            leases.append(
+                asyncio.run(
+                    handle.lease(
+                        "durable-mask",
+                        loser,
+                        "use",
+                        authorization,
+                    )
+                )
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    with monkeypatch.context() as concurrent:
+        concurrent.setattr(
+            artifacts,
+            "_register_artifact_lease",
+            pause_registration,
+        )
+        worker = threading.Thread(target=issue_lease)
+        worker.start()
+        assert entered_registration.wait(timeout=5)
+        assert asyncio.run(
+            handle.reconcile_owner(
+                "durable-mask",
+                owner,
+                keep=(canonical,),
+            )
+        ) == 1
+        release_registration.set()
+        worker.join(timeout=5)
+
+    assert worker.is_alive() is False
+    assert leases == []
+    assert len(failures) == 1
+    assert isinstance(failures[0], ArtifactError)
+    assert failures[0].code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+    assert artifacts._LEASES == {}
+
+
+def test_reconcile_owner_rejects_duplicate_foreign_and_stale_kept_references(
+    artifact_pack,
+):
+    pack, root, _token = artifact_pack
+    handle = pack.artifacts("media")
+    owner = generate_artifact_owner_id()
+    foreign_owner = generate_artifact_owner_id()
+
+    async def create():
+        return {
+            "canonical": await handle.write("durable-mask", owner, b"CANONICAL"),
+            "loser": await handle.write("durable-mask", owner, b"LOSER"),
+            "owner": await handle.write(
+                "durable-mask",
+                foreign_owner,
+                b"FOREIGN_OWNER",
+            ),
+            "kind": await handle.write("thumbnail", owner, b"FOREIGN_KIND"),
+            "stale": await handle.write("durable-mask", owner, b"STALE"),
+        }
+
+    references = asyncio.run(create())
+    declaration = next(
+        item for item in pack.profile.artifacts if item.id == "durable-mask"
+    )
+    foreign_pack = ArtifactReference(artifacts._new_artifact_id())
+    artifacts._persist_artifact(
+        artifacts._ArtifactLocator(
+            "helto.foreign-artifact-test",
+            "media",
+            declaration,
+            foreign_pack.id,
+        ),
+        owner,
+        b"FOREIGN_PACK",
+    )
+    foreign_resource = ArtifactReference(artifacts._new_artifact_id())
+    foreign_declaration = replace(declaration, resource_id="alternate-media")
+    artifacts._persist_artifact(
+        artifacts._ArtifactLocator(
+            pack.profile.id,
+            "alternate-media",
+            foreign_declaration,
+            foreign_resource.id,
+        ),
+        owner,
+        b"FOREIGN_RESOURCE",
+    )
+    missing = ArtifactReference(artifacts._new_artifact_id())
+    artifacts.reset_artifact_runtime_for_tests()
+    ledger = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    stale_entry = next(
+        entry
+        for entry in ledger["entries"]
+        if entry["artifactId"] == references["stale"].id
+    )
+    stale_entry["cleanupPending"] = True
+    artifacts._touch_entry(stale_entry)
+    artifacts._write_ledger(ledger)
+    before = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+
+    invalid_keeps = (
+        (references["canonical"], references["canonical"]),
+        (references["owner"],),
+        (references["kind"],),
+        (foreign_pack,),
+        (foreign_resource,),
+        (missing,),
+        (references["stale"],),
+    )
+    for keep in invalid_keeps:
+        with pytest.raises(ArtifactError) as rejected:
+            asyncio.run(handle.reconcile_owner("durable-mask", owner, keep=keep))
+        assert rejected.value.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+        assert str(root) not in repr(rejected.value)
+        assert owner not in repr(rejected.value)
+    after = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    assert after == before
+    assert asyncio.run(handle.read("durable-mask", references["canonical"])) == b"CANONICAL"
+    assert asyncio.run(handle.read("durable-mask", references["loser"])) == b"LOSER"
+
+
+def test_reconcile_owner_cleanup_failure_is_pending_sanitized_and_retryable(
+    artifact_pack,
+    monkeypatch,
+):
+    pack, root, _token = artifact_pack
+    handle = pack.artifacts("media")
+    owner = generate_artifact_owner_id()
+
+    async def create():
+        return (
+            await handle.write("durable-mask", owner, b"CANONICAL"),
+            await handle.write("durable-mask", owner, b"PLAINTEXT_CANARY"),
+        )
+
+    canonical, loser = asyncio.run(create())
+    loser_path = next(root.rglob(f"{loser.id}.hpa"))
+    original_unlink = Path.unlink
+
+    def fail_loser(path, *args, **kwargs):
+        if path == loser_path:
+            raise OSError("/SYNTHETIC/PRIVATE/PATH/PLAINTEXT_CANARY")
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as blocked:
+        blocked.setattr(Path, "unlink", fail_loser)
+        with pytest.raises(ArtifactError) as failed:
+            asyncio.run(
+                handle.reconcile_owner(
+                    "durable-mask",
+                    owner,
+                    keep=(canonical,),
+                )
+            )
+
+    ledger = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    loser_entry = next(
+        entry for entry in ledger["entries"] if entry["artifactId"] == loser.id
+    )
+    assert loser_entry["cleanupPending"] is True
+    assert failed.value.code == "PRIVACY_ARTIFACT_CLEANUP_FAILED"
+    assert "SYNTHETIC" not in repr(failed.value)
+    assert "PLAINTEXT_CANARY" not in repr(failed.value)
+    assert str(root) not in repr(failed.value)
+    with pytest.raises(ArtifactError) as revoked:
+        asyncio.run(handle.read("durable-mask", loser))
+    assert revoked.value.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+    assert asyncio.run(handle.read("durable-mask", canonical)) == b"CANONICAL"
+    assert asyncio.run(
+        handle.reconcile_owner("durable-mask", owner, keep=(canonical,))
+    ) == 1
+
+
+def test_reconcile_owner_interruption_and_concurrent_commit_remain_retry_safe(
+    artifact_pack,
+    monkeypatch,
+):
+    pack, root, _token = artifact_pack
+    handle = pack.artifacts("media")
+    owner = generate_artifact_owner_id()
+
+    async def create():
+        return (
+            await handle.write("durable-mask", owner, b"CANONICAL"),
+            await handle.write("durable-mask", owner, b"LOSER_A"),
+            await handle.write("durable-mask", owner, b"LOSER_B"),
+        )
+
+    canonical, loser_a, loser_b = asyncio.run(create())
+
+    class SyntheticInterruption(BaseException):
+        pass
+
+    original_unlink = Path.unlink
+    interrupted = False
+
+    def interrupt_once(path, *args, **kwargs):
+        nonlocal interrupted
+        if path.suffix == ".hpa" and not interrupted:
+            interrupted = True
+            raise SyntheticInterruption()
+        return original_unlink(path, *args, **kwargs)
+
+    with monkeypatch.context() as interrupted_cleanup:
+        interrupted_cleanup.setattr(Path, "unlink", interrupt_once)
+        with pytest.raises(SyntheticInterruption):
+            asyncio.run(
+                handle.reconcile_owner(
+                    "durable-mask",
+                    owner,
+                    keep=(canonical,),
+                )
+            )
+    pending = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    assert {
+        entry["artifactId"]
+        for entry in pending["entries"]
+        if entry["cleanupPending"] is True
+    } == {loser_a.id, loser_b.id}
+    assert asyncio.run(
+        handle.reconcile_owner("durable-mask", owner, keep=(canonical,))
+    ) == 2
+
+    late_owner = generate_artifact_owner_id()
+    late_canonical = asyncio.run(
+        handle.write("durable-mask", late_owner, b"INITIAL_CANONICAL")
+    )
+    late_loser = asyncio.run(handle.write("durable-mask", late_owner, b"LATE_LOSER"))
+    entered_reconcile = threading.Event()
+    release_reconcile = threading.Event()
+    original_write_ledger = artifacts._write_ledger
+    paused = False
+
+    def pause_reconcile(ledger):
+        nonlocal paused
+        if not paused and any(
+            entry.get("cleanupPending") is True for entry in ledger["entries"]
+        ):
+            paused = True
+            entered_reconcile.set()
+            assert release_reconcile.wait(timeout=5)
+        return original_write_ledger(ledger)
+
+    reconcile_results = []
+    writer_results = []
+    failures = []
+
+    def reconcile_worker():
+        try:
+            reconcile_results.append(
+                asyncio.run(
+                    handle.reconcile_owner(
+                        "durable-mask",
+                        late_owner,
+                        keep=(late_canonical,),
+                    )
+                )
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    def writer_worker():
+        try:
+            writer_results.append(
+                asyncio.run(
+                    handle.write("durable-mask", late_owner, b"COMMITTED_AFTER")
+                )
+            )
+        except BaseException as exc:
+            failures.append(exc)
+
+    with monkeypatch.context() as concurrent:
+        concurrent.setattr(artifacts, "_write_ledger", pause_reconcile)
+        reconcile_thread = threading.Thread(target=reconcile_worker)
+        reconcile_thread.start()
+        assert entered_reconcile.wait(timeout=5)
+        writer_thread = threading.Thread(target=writer_worker)
+        writer_thread.start()
+        wall_time.sleep(0.05)
+        release_reconcile.set()
+        reconcile_thread.join(timeout=5)
+        writer_thread.join(timeout=5)
+
+    assert failures == []
+    assert reconcile_results == [1]
+    assert len(writer_results) == 1
+    with pytest.raises(ArtifactError):
+        asyncio.run(handle.read("durable-mask", late_loser))
+    assert asyncio.run(handle.read("durable-mask", late_canonical)) == b"INITIAL_CANONICAL"
+    assert asyncio.run(handle.read("durable-mask", writer_results[0])) == b"COMMITTED_AFTER"
+    artifacts.reset_artifact_runtime_for_tests()
+    assert asyncio.run(handle.read("durable-mask", late_canonical)) == b"INITIAL_CANONICAL"
+    assert asyncio.run(handle.read("durable-mask", writer_results[0])) == b"COMMITTED_AFTER"
+
+
+def test_public_run_spill_is_plain_ephemeral_mode_fixed_and_never_leased(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "public-artifacts"
+    monkeypatch.setenv(artifacts.ARTIFACT_ROOT_ENV, str(root))
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    monkeypatch.setattr(artifacts, "require_active_process_suite", lambda: None)
+    artifacts.reset_artifact_runtime_for_tests()
+    pack = runtime.install(
+        _profile(),
+        {"mode": PublicModeAdapter(), "artifact-codec": ArtifactAdapter()},
+    )
+    token = keystore.initialize_keystore("synthetic public spill password")["token"]
+    handle = pack.artifacts("media")
+
+    async def exercise():
+        run = handle.run()
+        with pytest.raises(ArtifactError) as transition_blocked:
+            artifacts.prepare_artifact_mode_transition(
+                pack._installation,
+                "main",
+                SimpleNamespace(
+                    prior_mode=EffectivePrivacyMode.PUBLIC,
+                    target_mode=EffectivePrivacyMode.PRIVATE,
+                ),
+            )
+        reference = await run.write("spill", b"SYNTHETIC_PUBLIC_SPILL")
+        assert await handle.read("spill", reference) == b"SYNTHETIC_PUBLIC_SPILL"
+        authorization = authorize_privacy_request(
+            Request(token),
+            "artifact.use",
+            pack_id=pack.profile.id,
+        )
+        with pytest.raises(ArtifactError) as no_lease:
+            await handle.lease("spill", reference, "use", authorization)
+        keystore.lock_keystore()
+        assert await handle.read("spill", reference) == b"SYNTHETIC_PUBLIC_SPILL"
+        await run.close()
+        return transition_blocked.value, no_lease.value
+
+    transition_blocked, no_lease = asyncio.run(exercise())
+    assert transition_blocked.code == "PRIVACY_ARTIFACT_MODE_BLOCKED"
+    assert no_lease.code == "PRIVACY_ARTIFACT_LEASE_INVALID"
+    assert not list(root.rglob("*.spill"))
+    ledger = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    assert ledger["entries"] == []
+
+
+def test_artifact_run_admission_serializes_registration_with_transition(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "admission-artifacts"
+    monkeypatch.setenv(artifacts.ARTIFACT_ROOT_ENV, str(root))
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    monkeypatch.setattr(artifacts, "require_active_process_suite", lambda: None)
+    artifacts.reset_artifact_runtime_for_tests()
+    pack = runtime.install(
+        _profile(),
+        {"mode": PublicModeAdapter(), "artifact-codec": ArtifactAdapter()},
+    )
+    keystore.initialize_keystore("synthetic admission password")
+    entered_register = threading.Event()
+    release_register = threading.Event()
+    transition_acquired = threading.Event()
+    original_register = artifacts._register_active_run
+
+    def paused_register(pack_id, scope_ids):
+        entered_register.set()
+        assert release_register.wait(timeout=5)
+        return original_register(pack_id, scope_ids)
+
+    monkeypatch.setattr(artifacts, "_register_active_run", paused_register)
+    runs = []
+    worker = threading.Thread(target=lambda: runs.append(pack.artifacts("media").run()))
+    worker.start()
+    assert entered_register.wait(timeout=5)
+    def transition():
+        descriptor = mode_runtime._open_scope_lock(pack.profile.id, "main")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            transition_acquired.set()
+        finally:
+            os.close(descriptor)
+
+    transition_worker = threading.Thread(target=transition)
+    transition_worker.start()
+    assert transition_acquired.wait(timeout=0.05) is False
+    release_register.set()
+    worker.join(timeout=5)
+    transition_worker.join(timeout=5)
+    assert len(runs) == 1
+    assert transition_acquired.is_set()
+    asyncio.run(runs[0].close())
+
+
+def test_transition_first_makes_artifact_run_capture_new_mode(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        artifacts.ARTIFACT_ROOT_ENV,
+        str(tmp_path / "transition-first-artifacts"),
+    )
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    monkeypatch.setattr(artifacts, "require_active_process_suite", lambda: None)
+    artifacts.reset_artifact_runtime_for_tests()
+    mode = MutableModeAdapter("public")
+    pack = runtime.install(
+        _profile(),
+        {"mode": mode, "artifact-codec": ArtifactAdapter()},
+    )
+    keystore.initialize_keystore("synthetic transition-first password")
+    started = threading.Event()
+    runs = []
+
+    def create_run():
+        started.set()
+        runs.append(pack.artifacts("media").run())
+
+    with mode_runtime._TRANSITION_LOCK:
+        worker = threading.Thread(target=create_run)
+        worker.start()
+        assert started.wait(timeout=5)
+        mode.mode = "private"
+    worker.join(timeout=5)
+    assert len(runs) == 1
+    assert runs[0]._run_modes["spill"] == "private"
+    asyncio.run(runs[0].close())
+
+
+def test_public_spill_cleanup_failure_blocks_reads_and_transition_until_retry(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "cleanup-blocked-artifacts"
+    monkeypatch.setenv(artifacts.ARTIFACT_ROOT_ENV, str(root))
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    monkeypatch.setattr(artifacts, "require_active_process_suite", lambda: None)
+    artifacts.reset_artifact_runtime_for_tests()
+    mode = MutableModeAdapter("public")
+    pack = runtime.install(
+        _profile(),
+        {"mode": mode, "artifact-codec": ArtifactAdapter()},
+    )
+    keystore.initialize_keystore("synthetic cleanup-blocked password")
+    handle = pack.artifacts("media")
+    run = handle.run()
+    reference = asyncio.run(run.write("spill", b"PUBLIC_CLEANUP_CANARY"))
+    original_unlink = Path.unlink
+
+    def fail_public_spill(path, *args, **kwargs):
+        if path.suffix == ".spill":
+            raise OSError("/SYNTHETIC/PRIVATE/PATH")
+        return original_unlink(path, *args, **kwargs)
+
+    context = SimpleNamespace(
+        prior_mode=EffectivePrivacyMode.PUBLIC,
+        target_mode=EffectivePrivacyMode.PRIVATE,
+    )
+    with monkeypatch.context() as blocked:
+        blocked.setattr(Path, "unlink", fail_public_spill)
+        with pytest.raises(ArtifactError) as cleanup_failed:
+            asyncio.run(run.close())
+        with pytest.raises(ArtifactError) as read_blocked:
+            asyncio.run(handle.read("spill", reference))
+        with pytest.raises(ArtifactError) as transition_blocked:
+            artifacts.prepare_artifact_mode_transition(
+                pack._installation,
+                "main",
+                context,
+            )
+    ledger = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
+    assert ledger["entries"][0]["cleanupPending"] is True
+    assert ledger["entries"][0]["state"] == "READY"
+    assert ledger["entries"][0]["payloadMode"] == "bounded-bytes-v1"
+    assert cleanup_failed.value.code == "PRIVACY_ARTIFACT_CLEANUP_FAILED"
+    assert read_blocked.value.code == "PRIVACY_ARTIFACT_REFERENCE_INVALID"
+    assert transition_blocked.value.code == "PRIVACY_ARTIFACT_MODE_BLOCKED"
+    assert list(root.rglob("*.spill"))
+
+    assert asyncio.run(run.close()) == 1
+    artifacts.prepare_artifact_mode_transition(pack._installation, "main", context)
+    assert not list(root.rglob("*.spill"))
+    assert json.loads((root / "ledger.json").read_text(encoding="utf-8"))["entries"] == []
+
+
+def test_public_spill_read_fails_when_current_scope_mode_drifts_private(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        artifacts.ARTIFACT_ROOT_ENV,
+        str(tmp_path / "public-mode-drift-artifacts"),
+    )
+    monkeypatch.setattr(runtime, "_INSTALLATIONS", {})
+    monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
+    monkeypatch.setattr(artifacts, "require_active_process_suite", lambda: None)
+    artifacts.reset_artifact_runtime_for_tests()
+    mode = MutableModeAdapter("public")
+    pack = runtime.install(
+        _profile(),
+        {"mode": mode, "artifact-codec": ArtifactAdapter()},
+    )
+    keystore.initialize_keystore("synthetic public drift password")
+    handle = pack.artifacts("media")
+    run = handle.run()
+    reference = asyncio.run(run.write("spill", b"PUBLIC_MODE_DRIFT_CANARY"))
+    mode.mode = "private"
+    with pytest.raises(ArtifactError) as blocked:
+        asyncio.run(handle.read("spill", reference))
+    assert blocked.value.code == "PRIVACY_ARTIFACT_MODE_BLOCKED"
+    asyncio.run(run.close())
+
+
 def test_opaque_operation_scoped_lease_streams_and_revokes_with_session(
     artifact_pack,
     monkeypatch,
@@ -563,6 +1305,61 @@ def test_root_bound_source_lease_streams_without_materializing_or_copying_source
     assert source_path.name not in serialized
     assert token not in serialized
     assert not list(root.rglob("*clip*"))
+
+
+def test_cancelled_source_lease_issue_revokes_inserted_unreturned_lease(
+    artifact_pack,
+    monkeypatch,
+    tmp_path,
+):
+    pack, _root, token = artifact_pack
+    source_root = tmp_path / "cancelled-source"
+    source_root.mkdir()
+    source_path = source_root / "clip.webm"
+    source_path.write_bytes(b"synthetic")
+    request = Request(token)
+    original_run_blocking = artifacts._run_blocking
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def controlled_run_blocking(operation, *args):
+        if operation is artifacts._lease_is_current:
+            entered.set()
+            await release.wait()
+        return await original_run_blocking(operation, *args)
+
+    monkeypatch.setattr(artifacts, "_run_blocking", controlled_run_blocking)
+
+    async def exercise():
+        source = artifacts.root_bound_source(
+            source_path,
+            (source_root,),
+            media_type="video/webm",
+        )
+        authorization = authorize_privacy_request(
+            request,
+            "serve-source-media",
+            pack_id=pack.profile.id,
+        )
+        pending = asyncio.create_task(
+            artifacts.issue_root_bound_source_lease(
+                pack_id=pack.profile.id,
+                operation_id="serve-source-media",
+                source=source,
+                authorization=authorization,
+            )
+        )
+        await entered.wait()
+        with artifacts._LOCK:
+            inserted = tuple(artifacts._LEASES)
+        assert len(inserted) == 1
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        with artifacts._LOCK:
+            assert all(lease_id not in artifacts._LEASES for lease_id in inserted)
+
+    asyncio.run(exercise())
 
 
 def test_root_bound_source_rejects_escape_symlink_and_wrong_authorization(
@@ -822,6 +1619,8 @@ def test_cleanup_failures_are_ledgered_retried_and_never_expose_paths(
 
     ledger = json.loads((root / "ledger.json").read_text(encoding="utf-8"))
     assert ledger["entries"][0]["cleanupPending"] is True
+    assert ledger["entries"][0]["state"] == "READY"
+    assert ledger["entries"][0]["payloadMode"] == "bounded-bytes-v1"
     assert failure.code == "PRIVACY_ARTIFACT_CLEANUP_FAILED"
     assert "SYNTHETIC" not in repr(failure)
     assert str(root) not in repr(failure)

@@ -5,6 +5,7 @@ import types
 
 import helto_privacy.comfy_ui as comfy_ui
 import helto_privacy.artifacts as artifacts
+import helto_privacy.external_mode_transition as external_mode_transition
 import helto_privacy.keystore as keystore
 import helto_privacy.runtime as runtime
 import helto_privacy.suite_runtime as suite_runtime
@@ -19,11 +20,13 @@ from helto_privacy.profile import (
     PrivacyProfile,
     PrivacyScope,
     ProfileResource,
+    ProtectedStateAuthority,
     ResourceKind,
 )
 from helto_privacy.suite_runtime import SuiteInstallation, register_process_suite
 from helto_privacy.snapshot import SnapshotError
-from test_suite_runtime import _inventory, _release
+from tests.test_suite_runtime import _inventory, _release
+from tests.mode_protocol_fixtures import MutableModeSourceFixture
 
 
 class _Response:
@@ -69,6 +72,13 @@ class _Routes:
         return register
 
 
+class _App:
+    def __init__(self):
+        self.middlewares = []
+        self.pre_frozen = False
+        self.frozen = False
+
+
 def _mutation_request(
     payload=None,
     *,
@@ -93,6 +103,42 @@ def _mutation_request(
         content_type=content_type,
         json=read_json,
         scheme=scheme,
+    )
+
+
+class _ChunkedBody:
+    def __init__(self, chunks):
+        self.chunks = [bytes(chunk) for chunk in chunks]
+        self.iterations = 0
+
+    async def iter_chunked(self, _size):
+        for chunk in self.chunks:
+            self.iterations += 1
+            yield chunk
+
+
+def _external_request(raw, *, chunks=None, content_length=None, headers=None):
+    encoded = bytes(raw)
+
+    async def read():
+        return encoded
+
+    return types.SimpleNamespace(
+        match_info={
+            "pack_id": "helto.route-test",
+            "scope_id": "route-test",
+            "transition_id": "1" * 32,
+        },
+        headers={
+            "Content-Type": "application/json",
+            "X-Helto-Privacy-Resume-Capability": "hp-mode-resume-" + "r" * 43,
+            "X-Helto-Privacy-Boot-Epoch": "hp-boot-" + "b" * 32,
+            **(headers or {}),
+        },
+        content_type="application/json",
+        content_length=len(encoded) if content_length is None and chunks is None else content_length,
+        content=None if chunks is None else _ChunkedBody(chunks),
+        read=read,
     )
 
 
@@ -129,6 +175,253 @@ def _profile():
     )
 
 
+def test_external_transition_routes_bound_streaming_json_and_use_capability_headers(
+    monkeypatch,
+):
+    async def inline_to_thread(function, /, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
+    monkeypatch.setattr(comfy_ui, "_ROUTES_REGISTERED", False)
+    monkeypatch.setattr(comfy_ui, "_LEGACY_KEY_DIRS", [])
+    web = types.SimpleNamespace(
+        json_response=lambda data, **kwargs: _Response(data, **kwargs),
+        Response=_Response,
+        StreamResponse=_StreamResponse,
+    )
+    aiohttp = types.ModuleType("aiohttp")
+    aiohttp.web = web
+    monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
+    prompt_server = types.SimpleNamespace(routes=_Routes(), app=_App())
+    assert comfy_ui.register_helto_privacy_ui(prompt_server=prompt_server) is True
+
+    class Authorization:
+        def authorize_declassification(self, request, scope_id, target, *, operation_id):
+            assert (scope_id, target, operation_id) == (
+                "route-test", "public", "mode.transition.reserve",
+            )
+            return "authorized-reserve"
+
+        def authorize_request(self, _request, operation_id):
+            return f"authorized-{operation_id}"
+
+    route_profile = _profile()
+    fake_pack = types.SimpleNamespace(
+        profile=types.SimpleNamespace(
+            scopes=route_profile.scopes,
+            protected_fields=(types.SimpleNamespace(
+                scope_id="route-test",
+                state_authority=(
+                    ProtectedStateAuthority.EXTERNAL_BROWSER_WORKFLOW
+                ),
+                external_transition_policy=types.SimpleNamespace(
+                    max_total_bytes=4096,
+                ),
+            ),),
+        ),
+        authorization=Authorization(),
+        _installation="synthetic-installation",
+    )
+    monkeypatch.setattr(runtime, "bound_privacy_pack", lambda _pack_id: fake_pack)
+    captured = {}
+
+    def reserve(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return {
+            "scopeId": "route-test",
+            "transitionId": "1" * 32,
+            "requestId": kwargs["request_id"],
+            "clientLease": "hp-mode-client-" + "l" * 43,
+            "clientLeaseEpoch": 1,
+            "modeEpoch": 0,
+            "targetModeEpoch": 1,
+            "priorDeclared": "private",
+        }
+
+    monkeypatch.setattr(external_mode_transition, "reserve_external_transition", reserve)
+    path = (
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes/"
+        "{scope_id}/transition/reserve"
+    )
+    handler = prompt_server.routes.handlers[("POST", path)]
+
+    malformed = asyncio.run(handler(_external_request(b"{SYNTHETIC_SECRET")))
+    assert malformed.status == 400
+    assert malformed.data == {"ok": False, "error": "PRIVACY_MODE_INVALID"}
+    assert malformed.headers == {"Cache-Control": "no-store"}
+    assert "SYNTHETIC_SECRET" not in str(malformed.data)
+
+    declared_oversize = _external_request(b"{}", content_length=64 * 1024 + 1)
+    rejected = asyncio.run(handler(declared_oversize))
+    assert rejected.status == 400
+    assert rejected.data == {"ok": False, "error": "PRIVACY_MODE_INVALID"}
+
+    chunked = _external_request(
+        b"",
+        chunks=[b"{" + b"x" * (40 * 1024), b"y" * (30 * 1024) + b"}"],
+        content_length=None,
+    )
+    rejected = asyncio.run(handler(chunked))
+    assert rejected.status == 400
+    assert rejected.data == {"ok": False, "error": "PRIVACY_MODE_INVALID"}
+    assert chunked.content.iterations == 2
+
+    payload = (
+        b'{"target":"public","requestId":"mode-request-abcdefghijklmnopqrstuvwx",'
+        b'"coordinatorId":"mode-coordinator-abcdefghijklmnopqrstuvwx",'
+        b'"offlineRepresentationCount":0,"expectedModeEpoch":0}'
+    )
+    response = asyncio.run(handler(_external_request(payload)))
+    assert response.status == 200
+    assert response.headers == {"Cache-Control": "no-store"}
+    assert response.data["ok"] is True
+    assert captured["args"] == (
+        "synthetic-installation",
+        "privacy-mode",
+        "route-test",
+        "public",
+        "authorized-reserve",
+    )
+    assert captured["kwargs"]["resume_secret"] == "hp-mode-resume-" + "r" * 43
+    assert captured["kwargs"]["server_boot_epoch"] == "hp-boot-" + "b" * 32
+    body_secret = payload[:-1] + b',"resumeSecret":"SYNTHETIC_BODY_SECRET"}'
+    rejected = asyncio.run(handler(_external_request(body_secret)))
+    assert rejected.status == 400
+    assert rejected.data == {"ok": False, "error": "PRIVACY_MODE_INVALID"}
+    assert "SYNTHETIC_BODY_SECRET" not in repr(captured)
+
+    def rebase(*args, **kwargs):
+        if kwargs["server_boot_epoch"] is None or type(kwargs["mode_epoch"]) is not int:
+            raise external_mode_transition.ExternalModeTransitionError(
+                "PRIVACY_EXTERNAL_TRANSITION_FENCED"
+            )
+        captured["rebase_args"] = args
+        captured["rebase_kwargs"] = kwargs
+        return {
+            "scopeId": "route-test",
+            "fieldId": kwargs["field_id"],
+            "exact": kwargs["exact"],
+            "modeEpoch": kwargs["mode_epoch"],
+            "serverBootEpoch": kwargs["server_boot_epoch"],
+        }
+
+    monkeypatch.setattr(
+        external_mode_transition, "rebase_external_owner_exact", rebase
+    )
+    rebase_path = (
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes/"
+        "{scope_id}/transition/rebase"
+    )
+    rebase_handler = prompt_server.routes.handlers[("POST", rebase_path)]
+    rebase_limit = 4096 + 1024 * 1024
+
+    rejected = asyncio.run(rebase_handler(_external_request(
+        b"{}", content_length=rebase_limit + 1,
+    )))
+    assert rejected.status == 400
+    assert rejected.data == {"ok": False, "error": "PRIVACY_MODE_INVALID"}
+
+    chunked_rebase = _external_request(
+        b"",
+        chunks=[b"{" + b"x" * 700_000, b"y" * 400_000 + b"}"],
+        content_length=None,
+    )
+    rejected = asyncio.run(rebase_handler(chunked_rebase))
+    assert rejected.status == 400
+    assert chunked_rebase.content.iterations == 2
+
+    rebase_payload = (
+        b'{"fieldId":"workflow-state","exact":"c3ludGhldGlj","modeEpoch":1}'
+    )
+    rejected = asyncio.run(rebase_handler(_external_request(
+        rebase_payload,
+        headers={"X-Helto-Privacy-Boot-Epoch": None},
+    )))
+    assert rejected.status == 409
+    assert rejected.data == {
+        "ok": False,
+        "error": "PRIVACY_EXTERNAL_TRANSITION_FENCED",
+    }
+
+    missing_epoch = (
+        b'{"fieldId":"workflow-state","exact":"c3ludGhldGlj"}'
+    )
+    rejected = asyncio.run(rebase_handler(_external_request(missing_epoch)))
+    assert rejected.status == 400
+
+    body_boot = rebase_payload[:-1] + (
+        b',"serverBootEpoch":"hp-boot-SYNTHETIC_BODY_BOOT"}'
+    )
+    rejected = asyncio.run(rebase_handler(_external_request(body_boot)))
+    assert rejected.status == 400
+    assert "SYNTHETIC_BODY_BOOT" not in repr(captured)
+
+    response = asyncio.run(rebase_handler(_external_request(rebase_payload)))
+    assert response.status == 200
+    assert response.headers == {"Cache-Control": "no-store"}
+    assert captured["rebase_args"] == (
+        "synthetic-installation",
+        "route-test",
+        "authorized-mode.transition.rebase",
+    )
+    assert captured["rebase_kwargs"] == {
+        "field_id": "workflow-state",
+        "exact": "c3ludGhldGlj",
+        "mode_epoch": 1,
+        "server_boot_epoch": "hp-boot-" + "b" * 32,
+    }
+
+    def resume(*args, **kwargs):
+        if (
+            kwargs["resume_secret"] is None
+            or kwargs["server_boot_epoch"] is None
+        ):
+            raise external_mode_transition.ExternalModeTransitionError(
+                "PRIVACY_EXTERNAL_TRANSITION_FENCED"
+            )
+        captured["resume_args"] = args
+        captured["resume_kwargs"] = kwargs
+        return {
+            "externalPhase": "prepared",
+            "clientLease": "hp-mode-client-" + "n" * 43,
+            "clientLeaseEpoch": 2,
+            "pendingOwners": [],
+        }
+
+    monkeypatch.setattr(
+        external_mode_transition, "resume_external_transition", resume
+    )
+    resume_path = (
+        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes/"
+        "{scope_id}/transition/{transition_id}/resume"
+    )
+    resume_handler = prompt_server.routes.handlers[("POST", resume_path)]
+    resume_payload = (
+        b'{"coordinatorId":"mode-coordinator-abcdefghijklmnopqrstuvwx",'
+        b'"modeEpoch":1}'
+    )
+    rejected = asyncio.run(resume_handler(_external_request(
+        resume_payload,
+        headers={"X-Helto-Privacy-Boot-Epoch": None},
+    )))
+    assert rejected.status == 409
+    response = asyncio.run(resume_handler(_external_request(resume_payload)))
+    assert response.status == 200
+    assert captured["resume_args"] == (
+        "synthetic-installation",
+        "route-test",
+        "1" * 32,
+        "authorized-mode.transition.resume",
+    )
+    assert captured["resume_kwargs"] == {
+        "resume_secret": "hp-mode-resume-" + "r" * 43,
+        "coordinator_id": "mode-coordinator-abcdefghijklmnopqrstuvwx",
+        "mode_epoch": 1,
+        "server_boot_epoch": "hp-boot-" + "b" * 32,
+    }
+
+
 def test_profile_routes_are_safe_and_independent_of_aiohttp(
     monkeypatch,
     tmp_path,
@@ -157,16 +450,10 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     runtime.install(
         profile,
         {
-            "mode-server": types.SimpleNamespace(
-                read_declared_mode=lambda: None,
-                write_declared_mode=lambda: None,
-                prepare_mode_transition=lambda *_args: None,
-                commit_mode_transition=lambda *_args: None,
-                rollback_mode_transition=lambda *_args: None,
-            ),
+            "mode-server": MutableModeSourceFixture(),
         },
     )
-    prompt_server = types.SimpleNamespace(routes=_Routes())
+    prompt_server = types.SimpleNamespace(routes=_Routes(), app=_App())
     assert runtime.reconcile_prompt_server(prompt_server) is True
 
     bootstrap_payloads = {
@@ -374,6 +661,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 "snapshot.protect",
                 "snapshot.reveal",
                 "execution.prepare",
+                "submission-grants.revoke",
                 "record.create",
                 "record.patch",
                 "record.use",
@@ -399,6 +687,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     assert mode_response.data == {
         "ok": True,
         "packId": profile.id,
+        "serverBootEpoch": runtime.SERVER_BOOT_EPOCH,
         "scopes": [
             {
                 "id": "route-test",
@@ -408,6 +697,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                 "inheritedFrom": "base-private",
                 "floors": [],
                 "transitionStatus": "idle",
+                "modeEpoch": 0,
             }
         ],
     }
@@ -514,18 +804,27 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
             )
 
     class Execution:
-        def prepare(self, projection_id, protected_fields, authorization):
+        def prepare(
+            self,
+            projection_id,
+            protected_fields,
+            authorization,
+            *,
+            subject_id,
+        ):
             assert projection_id == "product-execution"
+            assert subject_id == "node-7"
             assert protected_fields == {"private-state": "SYNTHETIC_CIPHERTEXT"}
             assert authorization == "synthetic-execution.prepare"
             return types.SimpleNamespace(
                 reference={
                     "schema": "helto.private-execution-reference",
-                    "version": 1,
+                    "version": 2,
                     "packId": profile.id,
                     "executionResourceId": "dispatch",
                     "projectionId": projection_id,
                     "workflowResourceId": "state",
+                    "subject": "a" * 64,
                     "grant": "opaque-grant",
                     "fields": [
                         {
@@ -535,6 +834,11 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
                     ],
                 },
             )
+
+        def revoke(self, reference, authorization):
+            assert reference["grant"] == "opaque-grant"
+            assert authorization == "synthetic-submission-grants.revoke"
+            return True
 
     record_id = "hp-rec-A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
     outer_record_id = record_id
@@ -781,6 +1085,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     async def execution_payload():
         return {
             "projectionId": "product-execution",
+            "subjectId": "node-7",
             "fields": [
                 {
                     "fieldId": "private-state",
@@ -812,6 +1117,30 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     assert "cacheIdentity" not in execution_response.data
     assert execution_response.data["reference"]["grant"] == "opaque-grant"
     assert "SYNTHETIC_PLAINTEXT_CANARY" not in str(execution_response.data)
+
+    revoke_handler = prompt_server.routes.handlers[
+        (
+            "POST",
+            f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/submission-grants/revoke",
+        )
+    ]
+
+    async def revoke_payload():
+        return {"references": [execution_response.data["reference"]]}
+
+    revoke_response = asyncio.run(
+        revoke_handler(
+            types.SimpleNamespace(
+                match_info={"pack_id": profile.id},
+                headers={},
+                cookies={},
+                json=revoke_payload,
+            )
+        )
+    )
+    assert revoke_response.status == 204
+    assert revoke_response.data is None
+    assert revoke_response.headers == {"Cache-Control": "no-store"}
 
     record_base = (
         f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/records/"
@@ -1079,6 +1408,9 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     snapshot_module_handler = prompt_server.routes.handlers[
         ("GET", comfy_ui.SNAPSHOT_MODULE_ROUTE)
     ]
+    submission_module_handler = prompt_server.routes.handlers[
+        ("GET", comfy_ui.SUBMISSION_MODULE_ROUTE)
+    ]
     queue_module_handler = prompt_server.routes.handlers[
         ("GET", comfy_ui.QUEUE_MODULE_ROUTE)
     ]
@@ -1092,6 +1424,13 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     )
     assert snapshot_module_response.status == 200
     assert "createPrivacySnapshotCoordinator" in snapshot_module_response.kwargs["text"]
+    submission_module_response = asyncio.run(
+        submission_module_handler(types.SimpleNamespace())
+    )
+    assert submission_module_response.status == 200
+    assert "createPrivacyPromptSubmissionService" in (
+        submission_module_response.kwargs["text"]
+    )
     queue_module_response = asyncio.run(
         queue_module_handler(types.SimpleNamespace())
     )

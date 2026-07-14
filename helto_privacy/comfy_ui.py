@@ -11,16 +11,26 @@ Registered surface (pack-neutral, stable):
 - ``GET  /helto_privacy/profiles/{pack_id}`` — safe profile attestation
 - ``GET  /helto_privacy/profiles/{pack_id}/modes`` — safe mode status
 - ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition``
+- ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition/reserve``
+- ``GET /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition/status``
+- ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition/{transition_id}/{phase}``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/disposition``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/protect``
 - ``POST /helto_privacy/profiles/{pack_id}/fields/{field_id}/reveal``
 - ``POST /helto_privacy/profiles/{pack_id}/executions/{execution_id}/prepare``
+- ``POST /helto_privacy/profiles/{pack_id}/submission-grants/revoke``
 - ``GET  /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/mutate/create``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/mutate/{operation}``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/reveal/{operation}``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/delete``
 - ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/{record_id}/replace``
+- ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/reference-migrations/{migration_id}/migrate``
+- ``POST /helto_privacy/profiles/{pack_id}/records/{resource_id}/{record_kind}/reference-migrations/{migration_id}/resolve``
+- ``POST /helto_privacy/profiles/{pack_id}/references/revoke``
+- ``POST /helto_privacy/profiles/{pack_id}/operations/{operation_id}/external/prepare``
+- ``GET  /helto_privacy/profiles/{pack_id}/operations/{operation_id}/external/{transaction_id}/status``
+- ``POST /helto_privacy/profiles/{pack_id}/operations/{operation_id}/external/{transaction_id}/{resume|apply|rollback}``
 - ``POST /helto_privacy/profiles/{pack_id}/artifacts/{resource_id}/{artifact_kind}/{artifact_id}/lease/{operation}``
 - ``GET  /helto_privacy/artifacts/{lease_id}`` — authenticated private stream
 - ``POST /helto_privacy/unlock`` / ``/lock``
@@ -33,6 +43,8 @@ Registered surface (pack-neutral, stable):
   validation and resolution.
 - ``GET  /helto_privacy/ui/privacy_snapshot.js`` — runtime-only snapshot and
   serialization barrier mechanics.
+- ``GET  /helto_privacy/ui/privacy_submission.js`` — guarded prompt transport
+  ownership and completion mechanics.
 - ``GET  /helto_privacy/ui/privacy_queue.js`` — settled queue capture and
   fresh-grant replay orchestration.
 - ``GET  /helto_privacy/ui/privacy_profile/{manifest_digest}.js`` — exact-suite
@@ -46,9 +58,12 @@ wrapped entries have been verified; no ``.migrated`` plaintext copy is kept.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
+import re
+import secrets
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -71,9 +86,15 @@ CLIENT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_client.js"
 RECORDS_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_records.js"
 ARTIFACTS_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_artifacts.js"
 SNAPSHOT_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_snapshot.js"
+SUBMISSION_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_submission.js"
 QUEUE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_queue.js"
 PROFILE_MODULE_ROUTE = f"{ROUTE_PREFIX}/ui/privacy_profile/{{manifest_digest}}.js"
 _WEB_DIR = Path(__file__).resolve().parent / "web"
+_EXTERNAL_RESUME_HEADER = "X-Helto-Privacy-Resume-Capability"
+_EXTERNAL_OPERATION_RESUME_HEADER = (
+    "X-Helto-Privacy-Operation-Resume-Capability"
+)
+_SERVER_BOOT_EPOCH_HEADER = "X-Helto-Privacy-Boot-Epoch"
 
 _ROUTES_REGISTERED = False
 _LEGACY_KEY_DIRS: list[Path] = []
@@ -177,6 +198,10 @@ def register_helto_privacy_ui(
         logging.debug("helto-privacy UI routes unavailable: %s", exc)
         return False
 
+    from .submission_middleware import install_prompt_submission_middleware
+
+    install_prompt_submission_middleware(prompt_server)
+
     routes = prompt_server.routes
 
     @routes.get(f"{ROUTE_PREFIX}/status")
@@ -237,7 +262,8 @@ def register_helto_privacy_ui(
     @routes.get(f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes")
     async def get_helto_privacy_modes(request):
         from .mode import ModePolicyError, ModeTransitionError
-        from .runtime import PackBlockedError, bound_privacy_pack
+        from .mode_state import load_mode_scope_state
+        from .runtime import SERVER_BOOT_EPOCH, PackBlockedError, bound_privacy_pack
 
         try:
             pack = bound_privacy_pack(
@@ -246,15 +272,22 @@ def register_helto_privacy_ui(
             scopes = []
             for scope in pack.profile.scopes:
                 resolution = pack.mode(scope.mode_resource_id).resolve(scope.id)
-                scopes.append(
-                    _mode_resolution_payload(
-                        scope.id,
-                        scope.mode_resource_id,
-                        resolution,
-                    )
+                payload = _mode_resolution_payload(
+                    scope.id,
+                    scope.mode_resource_id,
+                    resolution,
                 )
+                payload["modeEpoch"] = load_mode_scope_state(
+                    pack.profile.id, scope.id
+                ).mode_epoch
+                scopes.append(payload)
             return web.json_response(
-                {"ok": True, "packId": pack.profile.id, "scopes": scopes},
+                {
+                    "ok": True,
+                    "packId": pack.profile.id,
+                    "serverBootEpoch": SERVER_BOOT_EPOCH,
+                    "scopes": scopes,
+                },
                 headers={"Cache-Control": "no-store"},
             )
         except PackBlockedError:
@@ -527,8 +560,14 @@ def register_helto_privacy_ui(
             if not isinstance(payload, dict):
                 raise ExecutionError("PRIVACY_EXECUTION_REFERENCE_INVALID")
             projection_id = str(payload.get("projectionId") or "")
+            subject_id = payload.get("subjectId")
             field_items = payload.get("fields")
-            if not projection_id or not isinstance(field_items, list):
+            if (
+                set(payload) != {"projectionId", "subjectId", "fields"}
+                or not projection_id
+                or subject_id is None
+                or not isinstance(field_items, list)
+            ):
                 raise ExecutionError("PRIVACY_EXECUTION_REFERENCE_INVALID")
             protected_fields: dict[str, object] = {}
             for item in field_items:
@@ -549,6 +588,7 @@ def register_helto_privacy_ui(
                 projection_id,
                 protected_fields,
                 authorization,
+                subject_id=subject_id,
             )
             return web.json_response(
                 {
@@ -578,6 +618,163 @@ def register_helto_privacy_ui(
                 web,
                 "PRIVACY_EXECUTION_PREPARATION_FAILED",
                 500,
+            )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/subject-modes/"
+        "{binding_id}/prepare"
+    )
+    async def post_helto_privacy_subject_mode_prepare(request):
+        from .guard import PrivacyRouteError
+        from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+        from .subject_mode import SubjectModeReferenceError
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            binding_id = str(request.match_info.get("binding_id") or "")
+            payload = await request.json()
+            if not isinstance(payload, dict) or set(payload) - {
+                "subjectId", "declaration", "facts",
+            }:
+                raise SubjectModeReferenceError()
+            prepared = pack.subject_modes(binding_id).prepare(
+                payload.get("subjectId"),
+                payload.get("declaration"),
+                _mode_facts_from_payload(payload.get("facts")),
+                pack.authorization.authorize_request(
+                    request,
+                    "subject-mode.prepare",
+                ),
+            )
+            return web.json_response(
+                {
+                    "ok": True,
+                    "reference": prepared.reference,
+                    "effective": prepared.effective,
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except (PackBlockedError, UnknownResourceError):
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except PrivacyRouteError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except (SubjectModeReferenceError, AttributeError, TypeError, ValueError):
+            return _privacy_error_response(
+                web,
+                "PRIVACY_SUBJECT_MODE_REFERENCE_INVALID",
+                400,
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_SUBJECT_MODE_REFERENCE_INVALID",
+                409,
+            )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/submission-grants/revoke"
+    )
+    async def post_helto_privacy_submission_grants_revoke(request):
+        from .execution import (
+            EXECUTION_REFERENCE_SCHEMA,
+            ExecutionError,
+            validate_execution_reference_for_revoke,
+        )
+        from .guard import PrivacyRouteError
+        from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+        from .subject_mode import (
+        SUBJECT_MODE_REFERENCE_SCHEMA,
+            SubjectModeReferenceError,
+            validate_subject_mode_reference_for_revoke,
+        )
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            authorization = pack.authorization.authorize_request(
+                request,
+                "submission-grants.revoke",
+            )
+            payload = await request.json()
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"references"}
+                or not isinstance(payload["references"], list)
+                or len(payload["references"]) > 2048
+            ):
+                raise ValueError("invalid submission grant batch")
+            plans = []
+            seen = set()
+            for reference in payload["references"]:
+                if not isinstance(reference, dict):
+                    raise ValueError("invalid submission grant")
+                grant_id = reference.get("grant")
+                schema = reference.get("schema")
+                identity = (schema, grant_id)
+                if (
+                    not isinstance(grant_id, str)
+                    or not grant_id
+                    or identity in seen
+                ):
+                    raise ValueError("invalid submission grant")
+                seen.add(identity)
+                if schema == EXECUTION_REFERENCE_SCHEMA:
+                    execution_id = reference.get("executionResourceId")
+                    if not isinstance(execution_id, str):
+                        raise ValueError("invalid submission grant")
+                    validate_execution_reference_for_revoke(
+                        reference,
+                        pack_id=pack.profile.id,
+                        execution_resource_id=execution_id,
+                    )
+                    plans.append(("execution", pack.execution(execution_id), reference))
+                elif schema == SUBJECT_MODE_REFERENCE_SCHEMA:
+                    binding_id = reference.get("bindingId")
+                    binding = next(
+                        (
+                            item
+                            for item in pack.profile.subject_mode_bindings
+                            if item.id == binding_id
+                        ),
+                        None,
+                    )
+                    if binding is None:
+                        raise SubjectModeReferenceError()
+                    validate_subject_mode_reference_for_revoke(
+                        reference,
+                        profile=pack.profile,
+                        binding=binding,
+                    )
+                    plans.append(("subject", pack.subject_modes(binding.id), reference))
+                else:
+                    raise ValueError("invalid submission grant")
+            for kind, handle, reference in plans:
+                if kind == "execution":
+                    handle.revoke(reference, authorization)
+                else:
+                    handle.revoke(reference, authorization)
+            return web.Response(status=204, headers={"Cache-Control": "no-store"})
+        except PackBlockedError:
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except PrivacyRouteError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except (
+            UnknownResourceError,
+            ExecutionError,
+            SubjectModeReferenceError,
+            AttributeError,
+            TypeError,
+            ValueError,
+        ):
+            return _privacy_error_response(
+                web,
+                "PRIVACY_SUBMISSION_GRANTS_INVALID",
+                400,
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_SUBMISSION_GRANTS_FAILED",
+                409,
             )
 
     record_base = (
@@ -645,11 +842,21 @@ def register_helto_privacy_ui(
             record_kind = str(request.match_info.get("record_kind") or "")
             record_id = str(request.match_info.get("record_id") or "")
             operation = str(request.match_info.get("operation") or "")
-            authorization = pack.authorization.authorize_request(
-                request,
-                f"record.{operation}",
+            records = pack.records(resource_id)
+            authorize = getattr(records, "authorize_request", None)
+            authorization = (
+                authorize(record_kind, request, f"record.{operation}")
+                if callable(authorize)
+                else pack.authorization.authorize_request(
+                    request,
+                    f"record.{operation}",
+                )
             )
-            revealed = pack.records(resource_id).reveal(
+            if authorization is None:
+                denied = _bootstrap_mutation_denial(request, require_json=False)
+                if denied is not None:
+                    return _record_route_error_response(web, denied[0], denied[1])
+            revealed = records.reveal(
                 record_kind,
                 record_id,
                 operation,
@@ -714,6 +921,111 @@ def register_helto_privacy_ui(
     @routes.post(record_base + "/{record_id}/replace")
     async def post_helto_privacy_record_replace(request):
         return await _destructive_record_route(request, web, operation="replace")
+
+    reference_migration_base = (
+        record_base + "/reference-migrations/{migration_id}"
+    )
+
+    @routes.post(reference_migration_base + "/migrate")
+    async def post_helto_privacy_record_reference_migrate(request):
+        return await _record_reference_route(request, web, operation="migrate")
+
+    @routes.post(reference_migration_base + "/resolve")
+    async def post_helto_privacy_record_reference_resolve(request):
+        return await _record_reference_route(request, web, operation="resolve")
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/associations/{{association_id}}/claim"
+    )
+    async def post_helto_privacy_association_claim(request):
+        from .associations import (
+            AssociationError,
+            association_operation_id,
+            claim_operation_association,
+        )
+        from .guard import PrivacyAuthorizationError
+        from .protected_operations import protected_operation_response_payload
+        from .runtime import PackBlockedError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            payload = await request.json()
+            if not isinstance(payload, dict) or payload:
+                raise AssociationError()
+            association_id = str(request.match_info.get("association_id") or "")
+            operation_id = association_operation_id(pack.profile, association_id)
+            authorization = pack.authorization.authorize_request(
+                request,
+                operation_id,
+            )
+            result = claim_operation_association(
+                installation=pack._installation,
+                profile=pack.profile,
+                association_id=association_id,
+                authorization=authorization,
+            )
+            return web.json_response(
+                protected_operation_response_payload(result),
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except PrivacyAuthorizationError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except AssociationError as exc:
+            return web.json_response(
+                {"ok": False, "error": exc.code, "correlationId": exc.correlation_id},
+                status=409,
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_OPERATION_ASSOCIATION_UNAVAILABLE",
+                409,
+            )
+
+    @routes.post(f"{ROUTE_PREFIX}/profiles/{{pack_id}}/references/revoke")
+    async def post_helto_privacy_reference_revoke(request):
+        from .guard import PrivacyAuthorizationError
+        from .opaque_references import OpaqueReferenceError, revoke_operation_references
+        from .runtime import PackBlockedError, bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            payload = await request.json()
+            if not isinstance(payload, dict) or set(payload) != {"references"}:
+                raise OpaqueReferenceError()
+            authorization = pack.authorization.authorize_request(
+                request,
+                "reference.revoke",
+            )
+            count = revoke_operation_references(
+                profile=pack.profile,
+                authorization=authorization,
+                reference_ids=payload["references"],
+            )
+            correlation = "hp-operation-" + secrets.token_urlsafe(12)
+            return web.json_response(
+                {"ok": True, "revoked": count, "correlationId": correlation},
+                headers={"Cache-Control": "no-store"},
+            )
+        except PackBlockedError:
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        except PrivacyAuthorizationError as exc:
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        except OpaqueReferenceError as exc:
+            return web.json_response(
+                {"ok": False, "error": exc.code, "correlationId": exc.correlation_id},
+                status=409,
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception:  # noqa: BLE001
+            return _privacy_error_response(
+                web,
+                "PRIVACY_OPAQUE_REFERENCE_UNAVAILABLE",
+                409,
+            )
 
     artifact_lease_route = (
         f"{ROUTE_PREFIX}/profiles/{{pack_id}}/artifacts/"
@@ -825,6 +1137,699 @@ def register_helto_privacy_ui(
             await chunks.aclose()
         await response.write_eof()
         return response
+
+    def _external_transition_capability(request, payload):
+        return {
+            "resume_secret": _required_external_resume_secret(request),
+            "coordinator_id": payload.get("coordinatorId"),
+            "client_lease": payload.get("clientLease"),
+            "client_lease_epoch": payload.get("clientLeaseEpoch"),
+            "mode_epoch": payload.get("modeEpoch"),
+            "server_boot_epoch": _required_external_boot_epoch(request),
+        }
+
+    def _required_external_header(request, name, pattern):
+        from .external_mode_transition import ExternalModeTransitionError
+
+        value = request.headers.get(name)
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            raise ExternalModeTransitionError("PRIVACY_EXTERNAL_TRANSITION_FENCED")
+        return value
+
+    def _required_external_resume_secret(request):
+        return _required_external_header(
+            request,
+            _EXTERNAL_RESUME_HEADER,
+            r"hp-mode-resume-[A-Za-z0-9_-]{43}",
+        )
+
+    def _required_external_boot_epoch(request):
+        return _required_external_header(
+            request,
+            _SERVER_BOOT_EPOCH_HEADER,
+            r"hp-boot-[A-Za-z0-9_-]{16,64}",
+        )
+
+    async def _external_json_payload(request, maximum):
+        length = request.content_length
+        if length is not None and (length < 0 or length > maximum):
+            raise ValueError("external transition request too large")
+        content = getattr(request, "content", None)
+        if content is not None and callable(getattr(content, "iter_chunked", None)):
+            chunks = []
+            size = 0
+            async for chunk in content.iter_chunked(64 * 1024):
+                size += len(chunk)
+                if size > maximum:
+                    raise ValueError("external transition request too large")
+                chunks.append(bytes(chunk))
+            raw = b"".join(chunks)
+        else:
+            raw = await request.read()
+            if len(raw) > maximum:
+                raise ValueError("external transition request too large")
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            raise ValueError("external transition request invalid") from None
+        if not isinstance(payload, dict):
+            raise ValueError("external transition request invalid")
+        return payload
+
+    def _external_payload_keys(payload, expected):
+        if set(payload) != set(expected):
+            raise ValueError("external transition request invalid")
+        return payload
+
+    def _external_owner_request_limit(pack, scope_id):
+        from .profile import ProtectedStateAuthority
+
+        totals = [
+            field.external_transition_policy.max_total_bytes
+            for field in pack.profile.protected_fields
+            if field.scope_id == scope_id
+            and field.state_authority is ProtectedStateAuthority.EXTERNAL_BROWSER_WORKFLOW
+        ]
+        if not totals:
+            raise ValueError("external transition scope invalid")
+        return min(49 * 1024 * 1024, min(totals) + 1024 * 1024)
+
+    def _external_transition_error(web, exc):
+        from .external_mode_transition import ExternalModeTransitionError
+        from .guard import PrivacyRouteError
+        from .mode import ModePolicyError
+        from .runtime import PackBlockedError
+
+        if isinstance(exc, PackBlockedError):
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        if isinstance(exc, PrivacyRouteError):
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        if isinstance(exc, ExternalModeTransitionError):
+            return _privacy_error_response(web, exc.code, 409)
+        if isinstance(exc, ModePolicyError):
+            return _privacy_error_response(web, "PRIVACY_MODE_STATE_UNAVAILABLE", 409)
+        if isinstance(exc, ValueError):
+            return _privacy_error_response(web, "PRIVACY_MODE_INVALID", 400)
+        return _privacy_error_response(web, "PRIVACY_MODE_TRANSITION_FAILED", 500)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/reserve"
+    )
+    async def post_helto_privacy_external_transition_reserve(request):
+        from .external_mode_transition import reserve_external_transition
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            scope_id = str(request.match_info.get("scope_id") or "")
+            scope = next((item for item in pack.profile.scopes if item.id == scope_id), None)
+            if scope is None:
+                return _privacy_error_response(web, "PRIVACY_SCOPE_INVALID", 400)
+            payload = await _external_json_payload(request, 64 * 1024)
+            _external_payload_keys(payload, {
+                "target",
+                "requestId",
+                "coordinatorId",
+                "offlineRepresentationCount",
+                "expectedModeEpoch",
+            })
+            target = str(payload.get("target") or "")
+            if target not in {"inherit", "private", "public"}:
+                return _privacy_error_response(web, "PRIVACY_MODE_INVALID", 400)
+            authorization = (
+                pack.authorization.authorize_declassification(
+                    request,
+                    scope_id,
+                    target,
+                    operation_id="mode.transition.reserve",
+                )
+                if target == "public"
+                else pack.authorization.authorize_request(
+                    request, "mode.transition.reserve"
+                )
+            )
+            result = await asyncio.to_thread(
+                reserve_external_transition,
+                pack._installation,
+                scope.mode_resource_id,
+                scope_id,
+                target,
+                authorization,
+                request_id=payload.get("requestId"),
+                coordinator_id=payload.get("coordinatorId"),
+                resume_secret=_required_external_resume_secret(request),
+                offline_representation_count=payload.get("offlineRepresentationCount"),
+                expected_mode_epoch=payload.get("expectedModeEpoch"),
+                server_boot_epoch=_required_external_boot_epoch(request),
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/client-heartbeat"
+    )
+    async def post_helto_privacy_external_transition_client_heartbeat(request):
+        from .external_mode_transition import heartbeat_external_client
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            payload = await _external_json_payload(request, 64 * 1024)
+            _external_payload_keys(payload, {"coordinatorId"})
+            authorization = pack.authorization.authorize_request(
+                request, "mode.transition.client-heartbeat"
+            )
+            result = await asyncio.to_thread(
+                heartbeat_external_client,
+                pack._installation,
+                str(request.match_info.get("scope_id") or ""),
+                authorization,
+                coordinator_id=payload.get("coordinatorId"),
+                resume_secret=_required_external_resume_secret(request),
+                server_boot_epoch=_required_external_boot_epoch(request),
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    @routes.get(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/status"
+    )
+    async def get_helto_privacy_external_transition_status(request):
+        from .external_mode_transition import external_transition_status
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            scope_id = str(request.match_info.get("scope_id") or "")
+            authorization = pack.authorization.authorize_request(
+                request, "mode.transition.status"
+            )
+            result = await asyncio.to_thread(
+                external_transition_status,
+                pack._installation,
+                scope_id,
+                authorization,
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/rebase"
+    )
+    async def post_helto_privacy_external_transition_rebase(request):
+        from .external_mode_transition import rebase_external_owner_exact
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            scope_id = str(request.match_info.get("scope_id") or "")
+            payload = await _external_json_payload(
+                request, _external_owner_request_limit(pack, scope_id)
+            )
+            _external_payload_keys(payload, {"fieldId", "exact", "modeEpoch"})
+            authorization = pack.authorization.authorize_request(
+                request, "mode.transition.rebase"
+            )
+            result = await asyncio.to_thread(
+                rebase_external_owner_exact,
+                pack._installation,
+                scope_id,
+                authorization,
+                field_id=payload.get("fieldId"),
+                exact=payload.get("exact"),
+                mode_epoch=payload.get("modeEpoch"),
+                server_boot_epoch=_required_external_boot_epoch(request),
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/{{transition_id}}/prepare"
+    )
+    async def post_helto_privacy_external_transition_prepare(request):
+        from .external_mode_transition import prepare_external_transition
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            scope_id = str(request.match_info.get("scope_id") or "")
+            payload = await _external_json_payload(
+                request, _external_owner_request_limit(pack, scope_id)
+            )
+            _external_payload_keys(payload, {
+                "coordinatorId",
+                "clientLease",
+                "clientLeaseEpoch",
+                "modeEpoch",
+                "owners",
+            })
+            authorization = pack.authorization.authorize_request(
+                request, "mode.transition.prepare"
+            )
+            result = await asyncio.to_thread(
+                prepare_external_transition,
+                pack._installation,
+                scope_id,
+                str(request.match_info.get("transition_id") or ""),
+                authorization,
+                owners=payload.get("owners"),
+                **_external_transition_capability(request, payload),
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/{{transition_id}}/resume"
+    )
+    async def post_helto_privacy_external_transition_resume(request):
+        from .external_mode_transition import resume_external_transition
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            payload = await _external_json_payload(request, 64 * 1024)
+            _external_payload_keys(payload, {"coordinatorId", "modeEpoch"})
+            authorization = pack.authorization.authorize_request(
+                request, "mode.transition.resume"
+            )
+            result = await asyncio.to_thread(
+                resume_external_transition,
+                pack._installation,
+                str(request.match_info.get("scope_id") or ""),
+                str(request.match_info.get("transition_id") or ""),
+                authorization,
+                resume_secret=_required_external_resume_secret(request),
+                coordinator_id=payload.get("coordinatorId"),
+                mode_epoch=payload.get("modeEpoch"),
+                server_boot_epoch=_required_external_boot_epoch(request),
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    async def _external_ack_route(request, operation_id, function):
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            scope_id = str(request.match_info.get("scope_id") or "")
+            payload = await _external_json_payload(
+                request, _external_owner_request_limit(pack, scope_id)
+            )
+            _external_payload_keys(payload, {
+                "coordinatorId",
+                "clientLease",
+                "clientLeaseEpoch",
+                "modeEpoch",
+                "acknowledgements",
+            })
+            authorization = pack.authorization.authorize_request(request, operation_id)
+            result = await asyncio.to_thread(
+                function,
+                pack._installation,
+                scope_id,
+                str(request.match_info.get("transition_id") or ""),
+                authorization,
+                acknowledgements=payload.get("acknowledgements"),
+                **_external_transition_capability(request, payload),
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/{{transition_id}}/apply-ack"
+    )
+    async def post_helto_privacy_external_transition_apply_ack(request):
+        from .external_mode_transition import acknowledge_external_apply
+
+        return await _external_ack_route(
+            request, "mode.transition.apply-ack", acknowledge_external_apply
+        )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/{{transition_id}}/verify"
+    )
+    async def post_helto_privacy_external_transition_verify(request):
+        from .external_mode_transition import verify_external_transition
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            scope_id = str(request.match_info.get("scope_id") or "")
+            payload = await _external_json_payload(
+                request, _external_owner_request_limit(pack, scope_id)
+            )
+            _external_payload_keys(payload, {
+                "coordinatorId",
+                "clientLease",
+                "clientLeaseEpoch",
+                "modeEpoch",
+                "acknowledgements",
+                "snapshotId",
+                "snapshotGeneration",
+            })
+            authorization = pack.authorization.authorize_request(
+                request, "mode.transition.verify"
+            )
+            result = await asyncio.to_thread(
+                verify_external_transition,
+                pack._installation,
+                scope_id,
+                str(request.match_info.get("transition_id") or ""),
+                authorization,
+                acknowledgements=payload.get("acknowledgements"),
+                snapshot_id=payload.get("snapshotId"),
+                snapshot_generation=payload.get("snapshotGeneration"),
+                **_external_transition_capability(request, payload),
+            )
+            return web.json_response(
+                {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_transition_error(web, exc)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/{{transition_id}}/finalize"
+    )
+    async def post_helto_privacy_external_transition_finalize(request):
+        from .external_mode_transition import finalize_external_transition
+
+        async def finalize_route(req, operation_id, function):
+            from .runtime import bound_privacy_pack
+
+            try:
+                pack = bound_privacy_pack(str(req.match_info.get("pack_id") or ""))
+                payload = await _external_json_payload(req, 64 * 1024)
+                _external_payload_keys(payload, {
+                    "coordinatorId",
+                    "clientLease",
+                    "clientLeaseEpoch",
+                    "modeEpoch",
+                })
+                authorization = pack.authorization.authorize_request(req, operation_id)
+                result = await asyncio.to_thread(
+                    function,
+                    pack._installation,
+                    str(req.match_info.get("scope_id") or ""),
+                    str(req.match_info.get("transition_id") or ""),
+                    authorization,
+                    **_external_transition_capability(req, payload),
+                )
+                return web.json_response(
+                    {"ok": True, **result}, headers={"Cache-Control": "no-store"}
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _external_transition_error(web, exc)
+
+        return await finalize_route(
+            request, "mode.transition.finalize", finalize_external_transition
+        )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition/{{transition_id}}/rollback"
+    )
+    async def post_helto_privacy_external_transition_rollback(request):
+        from .external_mode_transition import rollback_external_transition
+
+        return await _external_ack_route(
+            request, "mode.transition.rollback", rollback_external_transition
+        )
+
+    def _external_operation_declaration(pack, operation_id):
+        from .profile import ExternalOperationBinding
+
+        declaration = next(
+            (
+                item
+                for item in pack.profile.protected_operations
+                if item.id == operation_id
+                and isinstance(
+                    item.external_operation_binding,
+                    ExternalOperationBinding,
+                )
+            ),
+            None,
+        )
+        if declaration is None:
+            raise ValueError("external operation declaration invalid")
+        return declaration
+
+    def _required_external_operation_resume(request):
+        from .external_operations import ExternalOperationError
+
+        value = request.headers.get(_EXTERNAL_OPERATION_RESUME_HEADER)
+        if (
+            not isinstance(value, str)
+            or re.fullmatch(r"hp-operation-resume-[A-Za-z0-9_-]{43}", value)
+            is None
+        ):
+            raise ExternalOperationError("PRIVACY_EXTERNAL_OPERATION_FENCED")
+        return value
+
+    def _external_operation_exact(value, maximum):
+        if (
+            not isinstance(value, str)
+            or len(value) > maximum * 2 + 8
+            or re.fullmatch(r"[A-Za-z0-9_-]*", value) is None
+        ):
+            raise ValueError("external operation exact value invalid")
+        try:
+            decoded = base64.b64decode(
+                value + "=" * (-len(value) % 4),
+                altchars=b"-_",
+                validate=True,
+            )
+        except Exception:
+            raise ValueError("external operation exact value invalid") from None
+        if len(decoded) > maximum:
+            raise ValueError("external operation exact value invalid")
+        return decoded
+
+    def _external_operation_error(web, exc):
+        from .external_operations import ExternalOperationError
+        from .guard import PrivacyRouteError
+        from .runtime import PackBlockedError
+
+        if isinstance(exc, PackBlockedError):
+            return _privacy_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+        if isinstance(exc, PrivacyRouteError):
+            return _privacy_error_response(web, exc.code, exc.http_status)
+        if isinstance(exc, ExternalOperationError):
+            status = (
+                404
+                if exc.code == "PRIVACY_EXTERNAL_OPERATION_NOT_FOUND"
+                else 400
+                if exc.code == "PRIVACY_EXTERNAL_OPERATION_INVALID"
+                else 500
+                if exc.code in {
+                    "PRIVACY_EXTERNAL_OPERATION_ADAPTER_INVALID",
+                    "PRIVACY_EXTERNAL_OPERATION_RECOVERY_FAILED",
+                    "PRIVACY_EXTERNAL_OPERATION_STATE_FAILED",
+                }
+                else 409
+            )
+            return _privacy_error_response(web, exc.code, status)
+        if isinstance(exc, SuiteBlockedError):
+            return _suite_blocked_response(web)
+        if isinstance(exc, ValueError):
+            return _privacy_error_response(
+                web,
+                "PRIVACY_EXTERNAL_OPERATION_INVALID",
+                400,
+            )
+        return _privacy_error_response(
+            web,
+            "PRIVACY_EXTERNAL_OPERATION_RECOVERY_FAILED",
+            500,
+        )
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/operations/{{operation_id}}/external/prepare"
+    )
+    async def post_helto_privacy_external_operation_prepare(request):
+        from ._plaintext import clear_mutable_plaintext
+        from .external_operations import prepare_external_operation
+        from .runtime import bound_privacy_pack
+
+        payload = None
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            operation_id = str(request.match_info.get("operation_id") or "")
+            declaration = _external_operation_declaration(pack, operation_id)
+            policy = declaration.external_operation_binding.policy
+            maximum = min(
+                49 * 1024 * 1024,
+                policy.max_original_bytes * 2
+                + policy.max_identity_bytes * 2
+                + 10 * 1024 * 1024,
+            )
+            payload = await _external_json_payload(request, maximum)
+            _external_payload_keys(
+                payload,
+                {
+                    "requestId",
+                    "ownerIdentity",
+                    "originalExact",
+                    "input",
+                    "references",
+                },
+            )
+            authorization = pack.authorization.authorize_request(
+                request,
+                operation_id,
+            )
+            result = await prepare_external_operation(
+                pack._installation,
+                operation_id,
+                authorization,
+                request_id=payload.get("requestId"),
+                owner_identity=payload.get("ownerIdentity"),
+                original_exact=_external_operation_exact(
+                    payload.get("originalExact"),
+                    policy.max_original_bytes,
+                ),
+                input_value=payload.get("input"),
+                references=payload.get("references"),
+            )
+            return web.json_response(
+                {"ok": True, **result},
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_operation_error(web, exc)
+        finally:
+            clear_mutable_plaintext(payload)
+
+    @routes.get(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/operations/{{operation_id}}/external/"
+        "{transaction_id}/status"
+    )
+    async def get_helto_privacy_external_operation_status(request):
+        from .external_operations import external_operation_status
+        from .runtime import bound_privacy_pack
+
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            operation_id = str(request.match_info.get("operation_id") or "")
+            _external_operation_declaration(pack, operation_id)
+            authorization = pack.authorization.authorize_request(
+                request,
+                operation_id,
+            )
+            result = external_operation_status(
+                pack._installation,
+                operation_id,
+                str(request.match_info.get("transaction_id") or ""),
+                authorization,
+            )
+            return web.json_response(
+                {"ok": True, **result},
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_operation_error(web, exc)
+
+    async def _external_operation_action_route(request, action):
+        from ._plaintext import clear_mutable_plaintext
+        from .external_operations import (
+            apply_external_operation,
+            resume_external_operation,
+            rollback_external_operation,
+        )
+        from .runtime import bound_privacy_pack
+
+        payload = None
+        try:
+            pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+            operation_id = str(request.match_info.get("operation_id") or "")
+            declaration = _external_operation_declaration(pack, operation_id)
+            policy = declaration.external_operation_binding.policy
+            maximum = (
+                policy.max_target_bytes * 2 + 64 * 1024
+                if action == "apply"
+                else 64 * 1024
+            )
+            payload = await _external_json_payload(request, maximum)
+            _external_payload_keys(
+                payload,
+                {"currentExact"} if action == "apply" else set(),
+            )
+            authorization = pack.authorization.authorize_request(
+                request,
+                operation_id,
+            )
+            arguments = (
+                {
+                    "current_exact": _external_operation_exact(
+                        payload.get("currentExact"),
+                        policy.max_target_bytes,
+                    )
+                }
+                if action == "apply"
+                else {}
+            )
+            function = {
+                "apply": apply_external_operation,
+                "resume": resume_external_operation,
+                "rollback": rollback_external_operation,
+            }[action]
+            result = await function(
+                pack._installation,
+                operation_id,
+                str(request.match_info.get("transaction_id") or ""),
+                authorization,
+                resume_capability=_required_external_operation_resume(request),
+                **arguments,
+            )
+            return web.json_response(
+                {"ok": True, **result},
+                headers={"Cache-Control": "no-store"},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _external_operation_error(web, exc)
+        finally:
+            clear_mutable_plaintext(payload)
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/operations/{{operation_id}}/external/"
+        "{transaction_id}/resume"
+    )
+    async def post_helto_privacy_external_operation_resume(request):
+        return await _external_operation_action_route(request, "resume")
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/operations/{{operation_id}}/external/"
+        "{transaction_id}/apply"
+    )
+    async def post_helto_privacy_external_operation_apply(request):
+        return await _external_operation_action_route(request, "apply")
+
+    @routes.post(
+        f"{ROUTE_PREFIX}/profiles/{{pack_id}}/operations/{{operation_id}}/external/"
+        "{transaction_id}/rollback"
+    )
+    async def post_helto_privacy_external_operation_rollback(request):
+        return await _external_operation_action_route(request, "rollback")
 
     @routes.post(
         f"{ROUTE_PREFIX}/profiles/{{pack_id}}/modes/{{scope_id}}/transition"
@@ -1071,6 +2076,23 @@ def register_helto_privacy_ui(
             headers={"Cache-Control": "no-cache"},
         )
 
+    @routes.get(SUBMISSION_MODULE_ROUTE)
+    async def get_helto_privacy_submission_module(_request):
+        try:
+            source = (_WEB_DIR / "privacy_submission.js").read_text(encoding="utf-8")
+        except OSError:
+            return _privacy_error_response(
+                web,
+                "PRIVACY_BROWSER_MODULE_UNAVAILABLE",
+                500,
+            )
+        return web.Response(
+            text=source,
+            content_type="application/javascript",
+            charset="utf-8",
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @routes.get(QUEUE_MODULE_ROUTE)
     async def get_helto_privacy_queue_module(_request):
         try:
@@ -1295,11 +2317,21 @@ async def _authorized_record_mutation_route(request, web, *, operation: str):
         payload = await request.json()
         if not isinstance(payload, dict) or "value" not in payload:
             raise RecordError("PRIVACY_RECORD_MUTATION_INVALID")
-        authorization = pack.authorization.authorize_request(
-            request,
-            f"record.{operation}",
+        records = pack.records(resource_id)
+        authorize = getattr(records, "authorize_request", None)
+        authorization = (
+            authorize(record_kind, request, f"record.{operation}")
+            if callable(authorize)
+            else pack.authorization.authorize_request(
+                request,
+                f"record.{operation}",
+            )
         )
-        receipt = pack.records(resource_id).mutate(
+        if authorization is None:
+            denied = _bootstrap_mutation_denial(request, require_json=True)
+            if denied is not None:
+                return _record_route_error_response(web, denied[0], denied[1])
+        receipt = records.mutate(
             record_kind,
             operation,
             payload["value"],
@@ -1344,6 +2376,77 @@ async def _authorized_record_mutation_route(request, web, *, operation: str):
             web,
             "PRIVACY_RECORD_MUTATION_FAILED",
             500,
+        )
+    finally:
+        clear_mutable_plaintext(payload)
+
+
+async def _record_reference_route(request, web, *, operation: str):
+    from ._plaintext import clear_mutable_plaintext
+    from .guard import PrivacyRouteError
+    from .record_relocation import RecordReferenceError
+    from .runtime import PackBlockedError, UnknownResourceError, bound_privacy_pack
+
+    payload: object = None
+    try:
+        pack = bound_privacy_pack(str(request.match_info.get("pack_id") or ""))
+        resource_id = str(request.match_info.get("resource_id") or "")
+        record_kind = str(request.match_info.get("record_kind") or "")
+        migration_id = str(request.match_info.get("migration_id") or "")
+        payload = await request.json()
+        if not isinstance(payload, dict) or set(payload) != {"reference"}:
+            raise RecordReferenceError("PRIVACY_RECORD_REFERENCE_INVALID")
+        authorization = pack.authorization.authorize_request(
+            request,
+            f"record.reference.{operation}",
+        )
+        records = pack.records(resource_id)
+        result = (
+            records.migrate_legacy_reference(
+                record_kind,
+                migration_id,
+                payload["reference"],
+                authorization,
+            )
+            if operation == "migrate"
+            else records.resolve_legacy_reference(
+                record_kind,
+                migration_id,
+                payload["reference"],
+                authorization,
+            )
+        )
+        response = {
+            "ok": True,
+            "recordId": result.record_id,
+            "correlationId": result.correlation_id,
+        }
+        if operation == "migrate":
+            response["disposition"] = result.disposition
+        return web.json_response(
+            response,
+            headers=_record_response_headers(result.correlation_id),
+        )
+    except PackBlockedError:
+        return _record_route_error_response(web, "PRIVACY_PROFILE_UNAVAILABLE", 404)
+    except UnknownResourceError:
+        return _record_route_error_response(web, "PRIVACY_RECORD_RESOURCE_INVALID", 400)
+    except SuiteBlockedError:
+        return _record_route_error_response(web, "PRIVACY_SUITE_BLOCKED", 409)
+    except PrivacyRouteError as exc:
+        return _record_route_error_response(web, exc.code, exc.http_status)
+    except RecordReferenceError as exc:
+        return _record_route_error_response(
+            web,
+            exc.code,
+            _record_error_status(exc.code),
+            exc.correlation_id,
+        )
+    except Exception:  # noqa: BLE001
+        return _record_route_error_response(
+            web,
+            "PRIVACY_RECORD_REFERENCE_UNAVAILABLE",
+            409,
         )
     finally:
         clear_mutable_plaintext(payload)

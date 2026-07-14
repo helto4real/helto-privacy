@@ -12,6 +12,10 @@ const PRIVACY_SUITE_HEADER = "X-Helto-Privacy-Suite";
 const PRIVACY_OPERATION_HEADER = "X-Helto-Privacy-Operation";
 const PRIVACY_DECLASSIFICATION_HEADER = "X-Helto-Privacy-Declassification";
 const PRIVACY_DESTRUCTIVE_HEADER = "X-Helto-Privacy-Destructive";
+const PRIVACY_RESUME_CAPABILITY_HEADER = "X-Helto-Privacy-Resume-Capability";
+const PRIVACY_OPERATION_RESUME_CAPABILITY_HEADER =
+  "X-Helto-Privacy-Operation-Resume-Capability";
+const PRIVACY_SERVER_BOOT_EPOCH_HEADER = "X-Helto-Privacy-Boot-Epoch";
 const PRIVACY_TOKEN_STORAGE_KEY = "helto_privacy_token";
 const PRIVACY_LOCKED_CODES = ["PRIVACY_LOCKED", "PRIVACY_TOKEN_REQUIRED"];
 const PRIVACY_SETUP_CODES = ["PRIVACY_KEYSTORE_UNINITIALIZED"];
@@ -164,6 +168,16 @@ function createAttestedPrivacyRequestClient({
       if (options.destructiveConfirmed === true) {
         headers[PRIVACY_DESTRUCTIVE_HEADER] = "confirmed";
       }
+      if (options.resumeCapability) {
+        headers[PRIVACY_RESUME_CAPABILITY_HEADER] = String(options.resumeCapability);
+      }
+      if (options.operationResumeCapability) {
+        headers[PRIVACY_OPERATION_RESUME_CAPABILITY_HEADER] =
+          String(options.operationResumeCapability);
+      }
+      if (options.serverBootEpoch) {
+        headers[PRIVACY_SERVER_BOOT_EPOCH_HEADER] = String(options.serverBootEpoch);
+      }
       if (options.body !== undefined) headers["Content-Type"] = "application/json";
 
       let response;
@@ -280,7 +294,111 @@ function createAttestedPrivacyModeClient({
     );
   }
 
-  return Object.freeze({ id, scopes, readAll, resolve, transition });
+  function externalTarget(scopeId, suffix = "") {
+    if (!scopes.some((scope) => scope.id === scopeId)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_MODE_SCOPE_INVALID");
+    }
+    return `${ROUTE_PREFIX}/profiles/${encodeURIComponent(id)}/modes/`
+      + `${encodeURIComponent(scopeId)}/transition${suffix}`;
+  }
+
+  async function reserve(scopeId, target, capability) {
+    if (!capability || !["inherit", "private", "public"].includes(target)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_MODE_INVALID");
+    }
+    const declassificationConfirmed = target === "public"
+      ? await confirmSharedDeclassification()
+      : false;
+    if (target === "public" && !declassificationConfirmed) return null;
+    const { resumeSecret, serverBootEpoch, ...body } = capability;
+    return requestClient.request(
+      "mode.transition.reserve",
+      externalTarget(scopeId, "/reserve"),
+      {
+        body: { target, ...body },
+        declassificationConfirmed,
+        resumeCapability: resumeSecret,
+        serverBootEpoch,
+      },
+    );
+  }
+
+  const status = (scopeId) => requestClient.request(
+    "mode.transition.status",
+    externalTarget(scopeId, "/status"),
+    { method: "GET", retryUnlock: false },
+  );
+  const rebase = (scopeId, body) => {
+    const { serverBootEpoch, ...safeBody } = body || {};
+    return requestClient.request(
+      "mode.transition.rebase",
+      externalTarget(scopeId, "/rebase"),
+      { body: safeBody, serverBootEpoch },
+    );
+  };
+  const externalStep = (operation, scopeId, transitionId, phase, body) => {
+    const { resumeSecret, serverBootEpoch, ...safeBody } = body || {};
+    return requestClient.request(
+      operation,
+      externalTarget(
+        scopeId,
+        `/${encodeURIComponent(String(transitionId || ""))}/${phase}`,
+      ),
+      {
+        body: safeBody,
+        resumeCapability: resumeSecret,
+        serverBootEpoch,
+      },
+    );
+  };
+  const heartbeat = (scopeId, body) => {
+    const { serverBootEpoch, resumeSecret, ...safeBody } = body || {};
+    return requestClient.request(
+      "mode.transition.client-heartbeat",
+      externalTarget(scopeId, "/client-heartbeat"),
+      {
+        body: safeBody,
+        serverBootEpoch,
+        resumeCapability: resumeSecret,
+      },
+    );
+  };
+  const prepare = (scopeId, transitionId, body) => externalStep(
+    "mode.transition.prepare", scopeId, transitionId, "prepare", body,
+  );
+  const resume = (scopeId, transitionId, body) => externalStep(
+    "mode.transition.resume", scopeId, transitionId, "resume", body,
+  );
+  const applyAck = (scopeId, transitionId, body) => externalStep(
+    "mode.transition.apply-ack", scopeId, transitionId, "apply-ack", body,
+  );
+  const verify = (scopeId, transitionId, body) => externalStep(
+    "mode.transition.verify", scopeId, transitionId, "verify", body,
+  );
+  const finalize = (scopeId, transitionId, body) => externalStep(
+    "mode.transition.finalize", scopeId, transitionId, "finalize", body,
+  );
+  const rollback = (scopeId, transitionId, body) => externalStep(
+    "mode.transition.rollback", scopeId, transitionId, "rollback", body,
+  );
+
+  return Object.freeze({
+    id,
+    scopes,
+    readAll,
+    resolve,
+    transition,
+    reserve,
+    status,
+    rebase,
+    prepare,
+    resume,
+    applyAck,
+    verify,
+    finalize,
+    rollback,
+    heartbeat,
+  });
 }
 
 async function confirmSharedDeclassification() {
@@ -321,6 +439,9 @@ export async function connectAttestedPrivacyProfileClient({
     normalizeProtectedOperations(
       attestation.protectedOperations,
       attestation.modeScopes,
+      attestation.records,
+      attestation.singletons,
+      attestation.artifacts,
     ),
   );
   const protectedFields = Object.freeze(
@@ -329,8 +450,21 @@ export async function connectAttestedPrivacyProfileClient({
   const executionProjections = Object.freeze(
     normalizeExecutionProjections(attestation.executionProjections),
   );
+  const subjectModeBindings = Object.freeze(
+    normalizeSubjectModeBindings(
+      attestation.subjectModeBindings ?? [],
+      attestation.modeScopes,
+      attestation.requiredBrowserAdapters,
+      protectedFields,
+      executionProjections,
+      operations,
+    ),
+  );
   const recordDeclarations = Object.freeze(
     normalizeRecordDeclarations(attestation.records),
+  );
+  const recordReferenceMigrations = Object.freeze(
+    normalizeRecordReferenceMigrations(attestation.recordReferenceMigrations ?? []),
   );
   const artifactDeclarations = Object.freeze(
     normalizeArtifactDeclarations(attestation.artifacts),
@@ -351,9 +485,22 @@ export async function connectAttestedPrivacyProfileClient({
     projections: executionProjections,
     requestClient,
   });
+  const subjectMode = createAttestedSubjectModeClient({
+    packId: requestClient.identity.packId,
+    bindings: subjectModeBindings,
+    requestClient,
+  });
+  const submissionGrants = createAttestedSubmissionGrantClient({
+    packId: requestClient.identity.packId,
+    profileFingerprint: requestClient.identity.profileFingerprint,
+    projections: executionProjections,
+    bindings: subjectModeBindings,
+    requestClient,
+  });
   const records = createAttestedPrivacyRecordClient({
     packId: requestClient.identity.packId,
     declarations: recordDeclarations,
+    referenceMigrations: recordReferenceMigrations,
     requestClient,
   });
   const artifacts = createAttestedPrivacyArtifactClient({
@@ -361,10 +508,17 @@ export async function connectAttestedPrivacyProfileClient({
     declarations: artifactDeclarations,
     requestClient,
   });
+  const externalOperations = createAttestedExternalOperationClient({
+    packId: requestClient.identity.packId,
+    operations,
+    requestClient,
+  });
 
   function invoke(resourceId, operationId, body = undefined) {
     const operation = operations.find(
-      (item) => item.id === operationId && item.resourceId === resourceId,
+      (item) => item.id === operationId
+        && item.resourceId === resourceId
+        && item.route !== null,
     );
     if (!operation) {
       throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
@@ -379,20 +533,272 @@ export async function connectAttestedPrivacyProfileClient({
     );
   }
 
+  function revokeReferences(references) {
+    if (
+      !Array.isArray(references)
+      || !references.length
+      || references.length > 256
+      || references.some((value) => !/^hp-ref-[A-Za-z0-9_-]{32}$/.test(value))
+      || new Set(references).size !== references.length
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_OPAQUE_REFERENCE_UNAVAILABLE");
+    }
+    return requestClient.request(
+      "reference.revoke",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(identity.packId)}/references/revoke`,
+      { body: { references } },
+    );
+  }
+
+  function claimAssociation(associationId) {
+    const value = String(associationId || "");
+    if (!/^hp-assoc-[A-Za-z0-9_-]{32}$/.test(value)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_OPERATION_ASSOCIATION_UNAVAILABLE");
+    }
+    return requestClient.request(
+      "association.claim",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(identity.packId)}`
+        + `/associations/${encodeURIComponent(value)}/claim`,
+      { body: {} },
+    );
+  }
+
   return Object.freeze({
     attestation: Object.freeze({ ...attestation }),
     identity: requestClient.identity,
     operations,
     executionProjections,
+    subjectModeBindings,
     recordDeclarations,
+    recordReferenceMigrations,
     artifactDeclarations,
     mode,
     snapshot,
     execution,
+    subjectMode,
+    submissionGrants,
     records,
     artifacts,
+    externalOperations,
     invoke,
+    revokeReferences,
+    claimAssociation,
   });
+}
+
+function createAttestedExternalOperationClient({
+  packId,
+  operations,
+  requestClient,
+}) {
+  const declaration = (operationId) => {
+    const operation = operations.find((item) => (
+      item.id === String(operationId || "")
+      && item.externalOperationBinding !== null
+    ));
+    if (!operation) {
+      throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+    }
+    return operation;
+  };
+  const base = (operation) => (
+    `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/operations/`
+    + `${encodeURIComponent(operation.id)}/external`
+  );
+  const transactionTarget = (operation, transactionId, action) => {
+    const transaction = String(transactionId || "");
+    if (!/^hp-operation-[A-Za-z0-9_-]{32}$/.test(transaction)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_EXTERNAL_OPERATION_INVALID");
+    }
+    return `${base(operation)}/${encodeURIComponent(transaction)}/${action}`;
+  };
+  const capability = (value) => {
+    const normalized = String(value || "");
+    if (!/^hp-operation-resume-[A-Za-z0-9_-]{43}$/.test(normalized)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_EXTERNAL_OPERATION_FENCED");
+    }
+    return normalized;
+  };
+  const prepare = (operationId, body) => {
+    const operation = declaration(operationId);
+    return requestClient.request(
+      operation.id,
+      `${base(operation)}/prepare`,
+      { body },
+    ).then(normalizeExternalOperationResponse);
+  };
+  const status = (operationId, transactionId) => {
+    const operation = declaration(operationId);
+    return requestClient.request(
+      operation.id,
+      transactionTarget(operation, transactionId, "status"),
+      { method: "GET", retryUnlock: false },
+    ).then(normalizeExternalOperationStatusResponse);
+  };
+  const action = (operationId, transactionId, resumeCapability, name, body = {}) => {
+    const operation = declaration(operationId);
+    return requestClient.request(
+      operation.id,
+      transactionTarget(operation, transactionId, name),
+      {
+        body,
+        operationResumeCapability: capability(resumeCapability),
+      },
+    ).then(normalizeExternalOperationResponse);
+  };
+  return Object.freeze({
+    prepare,
+    status,
+    resume: (operationId, transactionId, resumeCapability) => action(
+      operationId, transactionId, resumeCapability, "resume",
+    ),
+    apply: (operationId, transactionId, resumeCapability, currentExact) => action(
+      operationId,
+      transactionId,
+      resumeCapability,
+      "apply",
+      { currentExact },
+    ),
+    rollback: (operationId, transactionId, resumeCapability) => action(
+      operationId, transactionId, resumeCapability, "rollback",
+    ),
+  });
+}
+
+function normalizeExternalOperationResponse(value) {
+  const normalized = normalizeExternalOperationStatusResponse(value);
+  const phase = normalized.phase;
+  const active = normalized.active;
+  if (active) {
+    if (
+      value.ownerIdentity === undefined
+      || typeof value.originalExact !== "string"
+      || (value.targetExact !== null && typeof value.targetExact !== "string")
+      || value.browserValue === undefined
+      || (value.resumeCapability !== undefined
+        && !/^hp-operation-resume-[A-Za-z0-9_-]{43}$/.test(value.resumeCapability))
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_EXTERNAL_OPERATION_INVALID");
+    }
+  } else if (
+    value.ownerIdentity === undefined
+    || typeof value.exact !== "string"
+    || (phase === "completed" && (!value.result || typeof value.result !== "object"))
+    || (phase === "rolled-back" && value.result !== null)
+  ) {
+    throw new PrivacyBrowserRequestError("PRIVACY_EXTERNAL_OPERATION_INVALID");
+  }
+  return Object.freeze({ ...value });
+}
+
+function normalizeExternalOperationStatusResponse(value) {
+  const phase = String(value?.phase || "");
+  const active = value?.active === true;
+  const transactionId = String(value?.transactionId || "");
+  const operationId = String(value?.operationId || "");
+  if (
+    value?.ok !== true
+    || !/^hp-operation-[A-Za-z0-9_-]{32}$/.test(transactionId)
+    || !isStablePrivacyId(operationId)
+    || ![
+      "captured",
+      "prepared",
+      "applied",
+      "rollback-required",
+      "completed",
+      "rolled-back",
+    ].includes(phase)
+    || active !== ["captured", "prepared", "applied", "rollback-required"].includes(phase)
+    || !Number.isInteger(value?.expiresInSeconds)
+    || value.expiresInSeconds < 0
+  ) {
+    throw new PrivacyBrowserRequestError("PRIVACY_EXTERNAL_OPERATION_INVALID");
+  }
+  if (
+    value.receiptId !== null
+    && !/^hp-operation-receipt-[a-f0-9]{32}$/.test(String(value.receiptId || ""))
+  ) {
+    throw new PrivacyBrowserRequestError("PRIVACY_EXTERNAL_OPERATION_INVALID");
+  }
+  return Object.freeze({ ...value });
+}
+
+function createAttestedSubmissionGrantClient({
+  packId,
+  profileFingerprint,
+  projections,
+  bindings,
+  requestClient,
+}) {
+  const revoke = (references) => {
+    if (!Array.isArray(references) || references.length > 2048) {
+      throw new PrivacyBrowserRequestError("PRIVACY_SUBMISSION_GRANTS_INVALID");
+    }
+    const cloned = references.map((reference) => {
+      if (!reference || typeof reference !== "object" || Array.isArray(reference)) {
+        throw new PrivacyBrowserRequestError("PRIVACY_SUBMISSION_GRANTS_INVALID");
+      }
+      const schema = reference.schema;
+      const valid = schema === "helto.private-execution-reference"
+        ? reference.version === 2
+          && reference.packId === packId
+          && /^[0-9a-f]{64}$/.test(reference.subject)
+          && projections.some(
+            (item) => item.executionResourceId === reference.executionResourceId,
+          )
+        : schema === "helto.subject-mode-reference"
+          ? reference.version === 2
+          && reference.packId === packId
+          && reference.profileFingerprint === profileFingerprint
+          && /^[0-9a-f]{64}$/.test(reference.subject)
+          && bindings.some((item) => (
+            item.id === reference.bindingId
+            && item.scopeId === reference.scopeId
+          ))
+          : false;
+      if (!valid) {
+        throw new PrivacyBrowserRequestError("PRIVACY_SUBMISSION_GRANTS_INVALID");
+      }
+      try {
+        return JSON.parse(JSON.stringify(reference));
+      } catch {
+        throw new PrivacyBrowserRequestError("PRIVACY_SUBMISSION_GRANTS_INVALID");
+      }
+    });
+    return requestClient.request(
+      "submission-grants.revoke",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/submission-grants/revoke`,
+      { body: { references: cloned }, retryUnlock: false },
+    );
+  };
+  return Object.freeze({ revoke });
+}
+
+function createAttestedSubjectModeClient({ packId, bindings, requestClient }) {
+  const prepare = (bindingId, subjectId, declaration, facts = undefined) => {
+    const id = String(bindingId || "");
+    if (
+      !bindings.some((binding) => binding.id === id)
+      || !String(subjectId ?? "")
+      || !["inherit", "private", "public"].includes(declaration)
+      || (facts !== undefined && (!facts || typeof facts !== "object" || Array.isArray(facts)))
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_REFERENCE_INVALID");
+    }
+    return requestClient.request(
+      "subject-mode.prepare",
+      `${ROUTE_PREFIX}/profiles/${encodeURIComponent(packId)}/subject-modes/`
+        + `${encodeURIComponent(id)}/prepare`,
+      {
+        body: {
+          subjectId: String(subjectId),
+          declaration,
+          ...(facts === undefined ? {} : { facts }),
+        },
+      },
+    );
+  };
+  return Object.freeze({ prepare });
 }
 
 function createAttestedPrivacyArtifactClient({ packId, declarations, requestClient }) {
@@ -488,13 +894,27 @@ function createAttestedPrivacyExecutionClient({
   projections,
   requestClient,
 }) {
-  const prepare = (executionResourceId, projectionId, protectedFields) => {
+  const prepare = (
+    executionResourceId,
+    projectionId,
+    subjectId,
+    protectedFields,
+  ) => {
     const executionId = String(executionResourceId || "");
+    const subjectScalar = typeof subjectId === "string"
+      || (typeof subjectId === "number" && Number.isSafeInteger(subjectId));
+    const subject = String(subjectId ?? "");
     const projection = projections.find(
       (item) => item.id === projectionId
         && item.executionResourceId === executionId,
     );
-    if (!projection || !Array.isArray(protectedFields)) {
+    if (
+      !projection
+      || !subjectScalar
+      || !subject
+      || new TextEncoder().encode(subject).length > 512
+      || !Array.isArray(protectedFields)
+    ) {
       throw new PrivacyBrowserRequestError("PRIVACY_EXECUTION_PROJECTION_INVALID");
     }
     const expected = fields
@@ -519,6 +939,7 @@ function createAttestedPrivacyExecutionClient({
       {
         body: {
           projectionId: projection.id,
+          subjectId: subject,
           fields: protectedFields.map((item) => ({
             fieldId: String(item.fieldId),
             protectedValue: item.protectedValue,
@@ -530,7 +951,12 @@ function createAttestedPrivacyExecutionClient({
   return Object.freeze({ prepare });
 }
 
-function createAttestedPrivacyRecordClient({ packId, declarations, requestClient }) {
+function createAttestedPrivacyRecordClient({
+  packId,
+  declarations,
+  referenceMigrations,
+  requestClient,
+}) {
   const declaration = (resourceId, recordKind) => {
     const resource = String(resourceId || "");
     const kind = String(recordKind || "");
@@ -611,7 +1037,63 @@ function createAttestedPrivacyRecordClient({ packId, declarations, requestClient
       { body: { value } },
     );
   };
-  return Object.freeze({ list, reveal, delete: remove, replace, mutate });
+  const referenceOperation = (
+    resourceId,
+    recordKind,
+    migrationId,
+    reference,
+    operation,
+  ) => {
+    const item = declaration(resourceId, recordKind);
+    const migration = referenceMigrations.find(
+      (candidate) => candidate.id === migrationId
+        && candidate.resourceId === item.resourceId
+        && candidate.recordKind === item.id,
+    );
+    if (!migration || !["migrate", "resolve"].includes(operation)) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_REFERENCE_INVALID");
+    }
+    if (typeof reference !== "string" || reference.length === 0) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_REFERENCE_INVALID");
+    }
+    return requestClient.request(
+      `record.reference.${operation}`,
+      `${base(item)}/reference-migrations/${encodeURIComponent(migration.id)}/${operation}`,
+      { body: { reference } },
+    );
+  };
+  return Object.freeze({
+    list,
+    reveal,
+    delete: remove,
+    replace,
+    mutate,
+    migrateLegacyReference: (...args) => referenceOperation(...args, "migrate"),
+    resolveLegacyReference: (...args) => referenceOperation(...args, "resolve"),
+  });
+}
+
+function normalizeRecordReferenceMigrations(values) {
+  if (!Array.isArray(values)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_RECORD_REFERENCE_INVALID");
+  }
+  const seen = new Set();
+  return values.map((item) => {
+    const migration = Object.freeze({
+      id: String(item?.id || ""),
+      resourceId: String(item?.resourceId || ""),
+      recordKind: String(item?.recordKind || ""),
+      legacyBindingId: String(item?.legacyBindingId || ""),
+    });
+    if (
+      Object.values(migration).some((value) => !/^[a-z0-9][a-z0-9._-]*$/.test(value))
+      || seen.has(migration.id)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_RECORD_REFERENCE_INVALID");
+    }
+    seen.add(migration.id);
+    return migration;
+  });
 }
 
 function normalizeProtectedFields(fields) {
@@ -623,8 +1105,15 @@ function normalizeProtectedFields(fields) {
     const scopeId = String(field?.scopeId || "");
     const browserAdapter = String(field?.browserAdapter || "");
     const execution = field?.execution === true;
+    const stateAuthority = String(field?.stateAuthority || "");
+    const externalTransitionPolicy = field?.externalTransitionPolicy;
     const nodeTypes = Object.freeze(
       (Array.isArray(field?.nodeTypes) ? field.nodeTypes : [])
+        .map((value) => String(value || ""))
+        .filter(Boolean),
+    );
+    const legacyReaderIds = Object.freeze(
+      (Array.isArray(field?.legacyReaderIds) ? field.legacyReaderIds : [])
         .map((value) => String(value || ""))
         .filter(Boolean),
     );
@@ -634,6 +1123,14 @@ function normalizeProtectedFields(fields) {
       || !/^[a-z0-9][a-z0-9._-]*$/.test(scopeId)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(browserAdapter)
       || !nodeTypes.length
+      || !["server-durable", "external-browser-workflow"].includes(stateAuthority)
+      || !validExternalTransitionPolicy(stateAuthority, externalTransitionPolicy)
+      || legacyReaderIds.some(
+        (value, index) => (
+          !/^[a-z0-9][a-z0-9._-]*$/.test(value)
+          || legacyReaderIds.indexOf(value) !== index
+        ),
+      )
       || seen.has(id)
     ) {
       throw new PrivacyBrowserRequestError("PRIVACY_SNAPSHOT_FIELD_INVALID");
@@ -645,9 +1142,40 @@ function normalizeProtectedFields(fields) {
       scopeId,
       browserAdapter,
       nodeTypes,
+      legacyReaderIds,
       execution,
+      stateAuthority,
+      externalTransitionPolicy: externalTransitionPolicy === null
+        ? null
+        : Object.freeze({ ...externalTransitionPolicy }),
     });
   });
+}
+
+function validExternalTransitionPolicy(authority, policy) {
+  if (authority === "server-durable") return policy === null;
+  return policy
+    && typeof policy === "object"
+    && !Array.isArray(policy)
+    && policy.ownerIdentity === "graph-node-field-v1"
+    && Number.isInteger(policy.maxOwners)
+    && policy.maxOwners >= 1
+    && policy.maxOwners <= 4096
+    && Number.isInteger(policy.maxOriginalBytesPerOwner)
+    && policy.maxOriginalBytesPerOwner >= 1024
+    && policy.maxOriginalBytesPerOwner <= 16 * 1024 * 1024
+    && Number.isInteger(policy.maxTargetBytesPerOwner)
+    && policy.maxTargetBytesPerOwner >= 1024
+    && policy.maxTargetBytesPerOwner <= 16 * 1024 * 1024
+    && Number.isInteger(policy.maxTotalBytes)
+    && policy.maxTotalBytes >= Math.max(
+      policy.maxOriginalBytesPerOwner,
+      policy.maxTargetBytesPerOwner,
+    )
+    && policy.maxTotalBytes <= 64 * 1024 * 1024
+    && Number.isInteger(policy.leaseSeconds)
+    && policy.leaseSeconds >= 30
+    && policy.leaseSeconds <= 900;
 }
 
 function normalizeExecutionProjections(projections) {
@@ -657,17 +1185,116 @@ function normalizeExecutionProjections(projections) {
     const id = String(projection?.id || "");
     const executionResourceId = String(projection?.executionResourceId || "");
     const workflowResourceId = String(projection?.workflowResourceId || "");
+    const subjectModeBindingId = String(projection?.subjectModeBindingId || "");
+    const inputName = String(projection?.inputName || "");
     if (
       !/^[a-z0-9][a-z0-9._-]*$/.test(id)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(executionResourceId)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(workflowResourceId)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(subjectModeBindingId)
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(inputName)
       || seen.has(id)
     ) {
       throw new PrivacyBrowserRequestError("PRIVACY_EXECUTION_PROJECTION_INVALID");
     }
     seen.add(id);
-    return Object.freeze({ id, executionResourceId, workflowResourceId });
+    return Object.freeze({
+      id,
+      executionResourceId,
+      workflowResourceId,
+      subjectModeBindingId,
+      inputName,
+    });
   });
+}
+
+function normalizeSubjectModeBindings(
+  bindings,
+  modeScopes,
+  requiredAdapters,
+  protectedFields,
+  executionProjections,
+  operations,
+) {
+  if (!Array.isArray(bindings)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_BINDING_INVALID");
+  }
+  const seen = new Set();
+  const injectedInputs = new Set();
+  const normalized = bindings.map((binding) => {
+    const id = String(binding?.id || "");
+    const scopeId = String(binding?.scopeId || "");
+    const inputName = String(binding?.inputName || "");
+    const nodeTypes = Object.freeze(
+      (Array.isArray(binding?.nodeTypes) ? binding.nodeTypes : [])
+        .map((value) => String(value || ""))
+        .filter(Boolean),
+    );
+    const scope = modeScopes?.find((item) => item?.id === scopeId);
+    const editor = requiredAdapters?.find((item) => item?.id === scope?.modeEditorAdapter);
+    if (
+      ![id, scopeId, inputName].every(
+        (value) => /^[a-z0-9][a-z0-9._-]*$/.test(value),
+      )
+      || !nodeTypes.length
+      || !modeScopes?.some(
+        (scope) => scope?.id === scopeId && scope?.modeEditorAdapter,
+      )
+      || nodeTypes.some((nodeType) => !editor?.nodeTypes?.includes(nodeType))
+      || seen.has(id)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_BINDING_INVALID");
+    }
+    for (const nodeType of nodeTypes) {
+      const key = `${nodeType}:${inputName}`;
+      if (injectedInputs.has(key)) {
+        throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_BINDING_INVALID");
+      }
+      injectedInputs.add(key);
+    }
+    seen.add(id);
+    return Object.freeze({ id, scopeId, inputName, nodeTypes });
+  });
+  for (const projection of executionProjections) {
+    const binding = normalized.find(
+      (item) => item.id === projection.subjectModeBindingId,
+    );
+    const executionFields = protectedFields.filter((field) => (
+      field.execution && field.workflowResourceId === projection.workflowResourceId
+    ));
+    const nodeTypes = new Set(executionFields.flatMap((field) => field.nodeTypes));
+    const scopes = new Set(executionFields.map((field) => field.scopeId));
+    if (
+      !binding
+      || !executionFields.length
+      || scopes.size !== 1
+      || !scopes.has(binding.scopeId)
+      || nodeTypes.size !== binding.nodeTypes.length
+      || binding.nodeTypes.some((nodeType) => !nodeTypes.has(nodeType))
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_BINDING_INVALID");
+    }
+    for (const nodeType of binding.nodeTypes) {
+      const key = `${nodeType}:${projection.inputName}`;
+      if (injectedInputs.has(key)) {
+        throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_BINDING_INVALID");
+      }
+      injectedInputs.add(key);
+    }
+  }
+  const used = new Set(executionProjections.map((item) => item.subjectModeBindingId));
+  for (const operation of operations) {
+    if (operation.subjectModeBindingId === null) continue;
+    const binding = normalized.find((item) => item.id === operation.subjectModeBindingId);
+    if (!binding || operation.scopeId !== binding.scopeId) {
+      throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_BINDING_INVALID");
+    }
+    used.add(binding.id);
+  }
+  if (normalized.some((binding) => !used.has(binding.id))) {
+    throw new PrivacyBrowserRequestError("PRIVACY_SUBJECT_MODE_BINDING_INVALID");
+  }
+  return normalized;
 }
 
 function normalizeRecordDeclarations(records) {
@@ -730,13 +1357,23 @@ function normalizeArtifactDeclarations(artifacts) {
     const scopeId = String(artifact?.scopeId || "");
     const retention = String(artifact?.retention || "");
     const mediaType = String(artifact?.mediaType || "");
+    const payloadMode = String(artifact?.payloadMode || "");
+    const suppliedStream = artifact?.streamContract;
     const operations = Object.freeze(
       (Array.isArray(artifact?.operations) ? artifact.operations : [])
         .map((value) => String(value || "")),
     );
     const key = `${resourceId}:${id}`;
+    const exactArtifactKeys = [
+      "id", "mediaType", "operations", "payloadMode", "resourceId", "retention",
+      "scopeId", "streamContract",
+    ];
     if (
-      !/^[a-z0-9][a-z0-9._-]*$/.test(id)
+      !artifact
+      || typeof artifact !== "object"
+      || Array.isArray(artifact)
+      || Object.keys(artifact).sort().join("\0") !== exactArtifactKeys.join("\0")
+      || !/^[a-z0-9][a-z0-9._-]*$/.test(id)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(resourceId)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(scopeId)
       || ![
@@ -745,12 +1382,52 @@ function normalizeArtifactDeclarations(artifacts) {
         "run-scoped-spill",
         "served-transient",
       ].includes(retention)
+      || !["bounded-bytes-v1", "stream-v1"].includes(payloadMode)
       || !/^[a-z0-9][a-z0-9.+-]*\/[a-z0-9][a-z0-9.+-]*$/i.test(mediaType)
-      || !operations.length
+      || (!operations.length && retention !== "run-scoped-spill")
       || operations.some((operation) => !/^[a-z0-9][a-z0-9._-]*$/.test(operation))
       || operations.length !== new Set(operations).size
       || seen.has(key)
     ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_DECLARATION_INVALID");
+    }
+    let streamContract = null;
+    if (payloadMode === "stream-v1") {
+      const safeInteger = (value) => Number.isSafeInteger(value) && value > 0;
+      if (
+        retention === "durable-adjunct"
+        ||
+        !suppliedStream
+        || typeof suppliedStream !== "object"
+        || Array.isArray(suppliedStream)
+        || Object.keys(suppliedStream).sort().join("\0") !== [
+          "codecSchema", "codecVersion", "decodedOutput", "maxMaterializedOutputBytes",
+          "maxOwnerPlaintextBytes", "maxPlaintextBytes",
+        ].join("\0")
+        || !/^[a-z0-9][a-z0-9._-]*$/.test(String(suppliedStream.codecSchema || ""))
+        || !safeInteger(suppliedStream.codecVersion)
+        || !safeInteger(suppliedStream.maxPlaintextBytes)
+        || !["materialized", "stream"].includes(suppliedStream.decodedOutput)
+        || (suppliedStream.maxOwnerPlaintextBytes !== null
+          && !safeInteger(suppliedStream.maxOwnerPlaintextBytes))
+        || (suppliedStream.maxOwnerPlaintextBytes !== null
+          && suppliedStream.maxOwnerPlaintextBytes < suppliedStream.maxPlaintextBytes)
+        || (suppliedStream.decodedOutput === "materialized"
+          && !safeInteger(suppliedStream.maxMaterializedOutputBytes))
+        || (suppliedStream.decodedOutput === "stream"
+          && suppliedStream.maxMaterializedOutputBytes !== null)
+      ) {
+        throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_DECLARATION_INVALID");
+      }
+      streamContract = Object.freeze({
+        codecSchema: String(suppliedStream.codecSchema),
+        codecVersion: suppliedStream.codecVersion,
+        maxPlaintextBytes: suppliedStream.maxPlaintextBytes,
+        maxOwnerPlaintextBytes: suppliedStream.maxOwnerPlaintextBytes,
+        decodedOutput: String(suppliedStream.decodedOutput),
+        maxMaterializedOutputBytes: suppliedStream.maxMaterializedOutputBytes,
+      });
+    } else if (suppliedStream !== null) {
       throw new PrivacyBrowserRequestError("PRIVACY_ARTIFACT_DECLARATION_INVALID");
     }
     seen.add(key);
@@ -761,6 +1438,8 @@ function normalizeArtifactDeclarations(artifacts) {
       retention,
       operations,
       mediaType,
+      payloadMode,
+      streamContract,
     });
   });
 }
@@ -805,7 +1484,13 @@ async function attestFixedBrowserManifest(manifestDigest) {
   }
 }
 
-function normalizeProtectedOperations(operations, modeScopes) {
+function normalizeProtectedOperations(
+  operations,
+  modeScopes,
+  recordDeclarations,
+  singletonDeclarations,
+  artifactDeclarations,
+) {
   if (!Array.isArray(operations)) {
     throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
   }
@@ -813,9 +1498,12 @@ function normalizeProtectedOperations(operations, modeScopes) {
   return operations.map((operation) => {
     const id = String(operation?.id || "");
     const resourceId = String(operation?.resourceId || "");
-    const route = String(operation?.route || "");
+    const route = operation?.route == null ? null : String(operation.route);
     const method = String(operation?.method || "").toUpperCase();
     const scopeId = operation?.scopeId == null ? null : String(operation.scopeId);
+    const subjectModeBindingId = operation?.subjectModeBindingId == null
+      ? null
+      : String(operation.subjectModeBindingId);
     const sensitiveFields = Array.isArray(operation?.sensitiveFields)
       ? operation.sensitiveFields.map((field) => Object.freeze({
         path: String(field?.path || ""),
@@ -828,14 +1516,61 @@ function normalizeProtectedOperations(operations, modeScopes) {
         kind: String(field?.kind || ""),
       }))
       : null;
+    const referenceInputs = Array.isArray(operation?.referenceInputs)
+      ? operation.referenceInputs.map((item) => Object.freeze({
+        name: String(item?.name || ""),
+        referenceKindId: String(item?.referenceKindId || ""),
+        revokeOnSuccess: item?.revokeOnSuccess === true,
+      }))
+      : [];
+    const referenceOutputs = Array.isArray(operation?.referenceOutputs)
+      ? operation.referenceOutputs.map((item) => Object.freeze({
+        referenceKindId: String(typeof item === "string" ? item : item?.referenceKindId || ""),
+        minimum: Number(typeof item === "string" ? 1 : item?.minimum),
+        maximum: Number(typeof item === "string" ? 1 : item?.maximum),
+      }))
+      : [];
+    const returnsLease = operation?.returnsLease === true;
+    const safePayloadProjectionId = operation?.safePayloadProjectionId == null
+      ? null : String(operation.safePayloadProjectionId);
+    const deferredUi = operation?.deferredUi === true;
+    const recordDependencies = normalizeRecordOperationDependencies(
+      operation?.recordDependencies ?? [],
+      scopeId,
+      recordDeclarations,
+    );
+    const singletonDependencies = normalizeSingletonOperationDependencies(
+      operation?.singletonDependencies ?? [],
+      scopeId,
+      singletonDeclarations,
+    );
+    const artifactDependencies = normalizeArtifactOperationDependencies(
+      operation?.artifactDependencies ?? [],
+      scopeId,
+      artifactDeclarations,
+    );
+    const externalOperationBinding = normalizeExternalOperationBinding(
+      operation?.externalOperationBinding ?? null,
+      scopeId,
+      route,
+      method,
+      referenceOutputs,
+      returnsLease,
+      deferredUi,
+      subjectModeBindingId,
+    );
     if (
       !/^[a-z0-9][a-z0-9._-]*$/.test(id)
       || !/^[a-z0-9][a-z0-9._-]*$/.test(resourceId)
-      || !isSafePrivacyBrowserTarget(route)
+      || (route !== null && !isSafePrivacyBrowserTarget(route))
       || !["GET", "POST", "PUT", "PATCH", "DELETE"].includes(method)
       || sensitiveFields === null
       || safeProjection === null
       || (scopeId !== null && !/^[a-z0-9][a-z0-9._-]*$/.test(scopeId))
+      || (
+        subjectModeBindingId !== null
+        && !/^[a-z0-9][a-z0-9._-]*$/.test(subjectModeBindingId)
+      )
       || sensitiveFields.some((field) => (
         (field.path !== "*" && !isProjectionPath(field.path))
         || !["user-authored", "path-or-name", "debug", "consumer-derived"]
@@ -851,6 +1586,21 @@ function normalizeProtectedOperations(operations, modeScopes) {
       || ((sensitiveFields.length || safeProjection.length) && !sensitiveFields.some(
         (field) => field.path === "*" && field.class === "consumer-derived",
       ))
+      || referenceInputs.some((item) => (
+        !/^[a-z0-9][a-z0-9._-]*$/.test(item.name)
+        || !/^[a-z0-9][a-z0-9._-]*$/.test(item.referenceKindId)
+      ))
+      || new Set(referenceInputs.map((item) => item.name)).size !== referenceInputs.length
+      || referenceOutputs.some((item) => (
+        !/^[a-z0-9][a-z0-9._-]*$/.test(item.referenceKindId)
+        || !Number.isInteger(item.minimum)
+        || !Number.isInteger(item.maximum)
+        || item.minimum < 0
+        || item.maximum < item.minimum
+        || item.maximum > 256
+      ))
+      || new Set(referenceOutputs.map((item) => item.referenceKindId)).size
+        !== referenceOutputs.length
       || seen.has(id)
     ) {
       throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
@@ -862,10 +1612,204 @@ function normalizeProtectedOperations(operations, modeScopes) {
       route,
       method,
       scopeId,
+      subjectModeBindingId,
       sensitiveFields: Object.freeze(sensitiveFields),
       safeProjection: Object.freeze(safeProjection),
+      referenceInputs: Object.freeze(referenceInputs),
+      referenceOutputs: Object.freeze(referenceOutputs),
+      returnsLease,
+      safePayloadProjectionId,
+      deferredUi,
+      recordDependencies,
+      singletonDependencies,
+      artifactDependencies,
+      externalOperationBinding,
     });
   });
+}
+
+function normalizeExternalOperationBinding(
+  value,
+  scopeId,
+  route,
+  method,
+  referenceOutputs,
+  returnsLease,
+  deferredUi,
+  subjectModeBindingId,
+) {
+  if (value === null) return null;
+  const keys = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value).sort().join("\0") : "";
+  const policy = value?.policy;
+  const policyKeys = policy && typeof policy === "object" && !Array.isArray(policy)
+    ? Object.keys(policy).sort().join("\0") : "";
+  const normalized = {
+    fieldId: String(value?.fieldId || ""),
+    browserAdapter: String(value?.browserAdapter || ""),
+    policy: {
+      ownerIdentity: String(policy?.ownerIdentity || ""),
+      maxIdentityBytes: Number(policy?.maxIdentityBytes),
+      maxOriginalBytes: Number(policy?.maxOriginalBytes),
+      maxTargetBytes: Number(policy?.maxTargetBytes),
+      leaseSeconds: Number(policy?.leaseSeconds),
+    },
+  };
+  if (
+    keys !== "browserAdapter\0fieldId\0policy"
+    || policyKeys !== [
+      "leaseSeconds",
+      "maxIdentityBytes",
+      "maxOriginalBytes",
+      "maxTargetBytes",
+      "ownerIdentity",
+    ].join("\0")
+    || !isStablePrivacyId(normalized.fieldId)
+    || !isStablePrivacyId(normalized.browserAdapter)
+    || normalized.policy.ownerIdentity !== "graph-node-v1"
+    || !Number.isInteger(normalized.policy.maxIdentityBytes)
+    || normalized.policy.maxIdentityBytes < 256
+    || normalized.policy.maxIdentityBytes > 64 * 1024
+    || !Number.isInteger(normalized.policy.maxOriginalBytes)
+    || normalized.policy.maxOriginalBytes < 1024
+    || normalized.policy.maxOriginalBytes > 16 * 1024 * 1024
+    || !Number.isInteger(normalized.policy.maxTargetBytes)
+    || normalized.policy.maxTargetBytes < 1024
+    || normalized.policy.maxTargetBytes > 16 * 1024 * 1024
+    || !Number.isInteger(normalized.policy.leaseSeconds)
+    || normalized.policy.leaseSeconds < 30
+    || normalized.policy.leaseSeconds > 900
+    || scopeId === null
+    || route !== null
+    || method !== "POST"
+    || referenceOutputs.length
+    || returnsLease
+    || deferredUi
+    || subjectModeBindingId !== null
+  ) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+  }
+  return Object.freeze({
+    ...normalized,
+    policy: Object.freeze(normalized.policy),
+  });
+}
+
+function normalizeRecordOperationDependencies(values, scopeId, declarations) {
+  if (!Array.isArray(values)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+  }
+  if (!values.length) return Object.freeze([]);
+  if (!Array.isArray(declarations)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+  }
+  const seen = new Set();
+  return Object.freeze(values.map((value) => {
+    const keys = value && typeof value === "object" && !Array.isArray(value)
+      ? Object.keys(value).sort().join("\0") : "";
+    const resourceId = String(value?.resourceId || "");
+    const recordKind = String(value?.recordKind || "");
+    const operation = String(value?.operation || "");
+    const key = `${resourceId}\0${recordKind}\0${operation}`;
+    const declaration = declarations.find(
+      (item) => item?.id === recordKind && item?.resourceId === resourceId,
+    );
+    if (
+      keys !== "operation\0recordKind\0resourceId"
+      || !isStablePrivacyId(resourceId)
+      || !isStablePrivacyId(recordKind)
+      || !isStablePrivacyId(operation)
+      || !declaration
+      || declaration.scopeId !== scopeId
+      || !Array.isArray(declaration.revealOperations)
+      || !declaration.revealOperations.includes(operation)
+      || seen.has(key)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+    }
+    seen.add(key);
+    return Object.freeze({ resourceId, recordKind, operation });
+  }));
+}
+
+function normalizeSingletonOperationDependencies(values, scopeId, declarations) {
+  const allowed = new Set(["status", "reveal", "replace", "delete"]);
+  if (!Array.isArray(values)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+  }
+  if (!values.length) return Object.freeze([]);
+  if (!Array.isArray(declarations)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+  }
+  const seen = new Set();
+  return Object.freeze(values.map((value) => {
+    const keys = value && typeof value === "object" && !Array.isArray(value)
+      ? Object.keys(value).sort().join("\0") : "";
+    const singletonId = String(value?.singletonId || "");
+    const verbs = Array.isArray(value?.verbs) ? value.verbs.map(String) : null;
+    const declaration = declarations.find((item) => item?.id === singletonId);
+    if (
+      keys !== "singletonId\0verbs"
+      || !isStablePrivacyId(singletonId)
+      || !verbs?.length
+      || verbs.some((verb) => !allowed.has(verb))
+      || new Set(verbs).size !== verbs.length
+      || [...verbs].sort().join("\0") !== verbs.join("\0")
+      || !declaration
+      || declaration.scopeId !== scopeId
+      || seen.has(singletonId)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+    }
+    seen.add(singletonId);
+    return Object.freeze({ singletonId, verbs: Object.freeze(verbs) });
+  }));
+}
+
+function normalizeArtifactOperationDependencies(values, scopeId, declarations) {
+  const allowed = new Set([
+    "write", "read", "retire", "release-owner", "reconcile-owner",
+  ]);
+  if (!Array.isArray(values)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+  }
+  if (!values.length) return Object.freeze([]);
+  if (!Array.isArray(declarations)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+  }
+  const seen = new Set();
+  return Object.freeze(values.map((value) => {
+    const keys = value && typeof value === "object" && !Array.isArray(value)
+      ? Object.keys(value).sort().join("\0") : "";
+    const artifactKind = String(value?.artifactKind || "");
+    const verbs = Array.isArray(value?.verbs) ? value.verbs.map(String) : null;
+    const declaration = declarations.find((item) => item?.id === artifactKind);
+    if (
+      keys !== "artifactKind\0verbs"
+      || !isStablePrivacyId(artifactKind)
+      || !verbs?.length
+      || verbs.some((verb) => (
+        !allowed.has(verb)
+        && !(verb.startsWith("lease.")
+          && declaration?.operations?.includes(verb.slice(6)))
+      ))
+      || new Set(verbs).size !== verbs.length
+      || [...verbs].sort().join("\0") !== verbs.join("\0")
+      || !declaration
+      || declaration.scopeId !== scopeId
+      || (verbs.includes("reconcile-owner") && declaration.retention !== "durable-adjunct")
+      || (verbs.includes("write") && declaration.retention === "run-scoped-spill")
+      || seen.has(artifactKind)
+    ) {
+      throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_OPERATION_INVALID");
+    }
+    seen.add(artifactKind);
+    return Object.freeze({ artifactKind, verbs: Object.freeze(verbs) });
+  }));
+}
+
+function isStablePrivacyId(value) {
+  return /^[a-z0-9][a-z0-9._-]*$/.test(String(value || ""));
 }
 
 function isProjectionPath(value) {

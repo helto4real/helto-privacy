@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture
+
 import helto_privacy.keystore as keystore
 import helto_privacy.migration as migration
 import helto_privacy.runtime as runtime
@@ -43,7 +45,7 @@ class Request:
         self.cookies = {}
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, *_args):
         return "private"
 
@@ -124,6 +126,14 @@ class SingletonStore:
             expected_revision,
             replacement,
         )
+
+    def rollback_singleton_replace(self, singleton_id, expected, replacement):
+        if self.fail_rollback:
+            raise RuntimeError("synthetic rollback failure")
+        if self.snapshots[singleton_id] != expected:
+            return False
+        self.snapshots[singleton_id] = copy.deepcopy(replacement)
+        return True
 
     def prepare_mode_transition(self, *_args):
         return None
@@ -242,12 +252,41 @@ def test_profile_compiles_typed_singleton_contract_and_handle(singleton_pack):
     assert isinstance(pack.singletons("pack-state"), SingletonHandle)
     assert pack.profile.server_adapter_contracts["singleton-store"] == (
         "begin_singleton_replace",
-        "commit_mode_transition",
-        "prepare_mode_transition",
         "read_singleton",
-        "rollback_mode_transition",
+        "rollback_singleton_replace",
     )
     assert pack.profile._canonical_value()["singletons"] == [
+        {
+            "id": "provider-settings",
+            "resourceId": "pack-state",
+            "scopeId": "main",
+            "currentSchema": "helto.singleton.provider-settings",
+            "purpose": "provider-settings",
+            "storeAdapter": "singleton-store",
+            "payloadKind": "field",
+            "legacyReaderIds": [],
+        },
+        {
+            "id": "queue-state",
+            "resourceId": "pack-state",
+            "scopeId": "main",
+            "currentSchema": "helto.singleton.queue-state",
+            "purpose": "queue-state",
+            "storeAdapter": "singleton-store",
+            "payloadKind": "blob",
+            "legacyReaderIds": [],
+        },
+    ]
+
+
+def test_profile_attestation_retains_exact_fingerprinted_singleton_declarations(
+    singleton_pack,
+):
+    pack, _store, _token = singleton_pack
+    attestation = runtime.profile_attestation(pack.profile.id)
+
+    assert attestation["fingerprint"] == pack.profile.fingerprint
+    assert attestation["singletons"] == [
         {
             "id": "provider-settings",
             "resourceId": "pack-state",
@@ -504,7 +543,8 @@ def test_verified_readback_failure_rolls_back_exact_snapshot(singleton_pack):
         )
 
     assert failure.value.code == "PRIVACY_SINGLETON_VERIFICATION_FAILED"
-    _assert_snapshot_equal(store.snapshots["provider-settings"], original)
+    assert store.snapshots["provider-settings"].revision == 2
+    assert store.snapshots["provider-settings"].protected == original.protected
 
 
 def test_partial_commit_failure_rolls_back_exact_snapshot(singleton_pack):
@@ -521,7 +561,8 @@ def test_partial_commit_failure_rolls_back_exact_snapshot(singleton_pack):
         )
 
     assert failure.value.code == "PRIVACY_SINGLETON_REPLACE_FAILED"
-    _assert_snapshot_equal(store.snapshots["provider-settings"], original)
+    assert store.snapshots["provider-settings"].revision == 2
+    assert store.snapshots["provider-settings"].protected == original.protected
 
 
 def test_malformed_and_locked_state_never_defaults_or_resets(singleton_pack):

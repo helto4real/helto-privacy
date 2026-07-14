@@ -2,6 +2,8 @@ import asyncio
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture
+
 import helto_privacy.runtime as runtime
 from helto_privacy import (
     AdapterSlot,
@@ -65,7 +67,7 @@ def test_workflow_reveal_operation_issues_narrow_authority_inside_dispatch():
     ]
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def __init__(self, mode):
         self.mode = mode
 
@@ -202,7 +204,30 @@ def test_private_operation_projection_is_allowlist_only_and_coarse(monkeypatch):
     assert adapter.calls == 1
     assert source["debug"]["workflow"] == "SYNTHETIC_PRIVATE_WORKFLOW"
     assert "SYNTHETIC" not in repr(result)
-    assert runtime.profile_attestation(pack.profile.id)["protectedOperations"] == []
+    assert runtime.profile_attestation(pack.profile.id)["protectedOperations"] == [
+        {
+            "id": "emit-run-info",
+            "resourceId": "run-info",
+            "scopeId": "generate",
+            "route": None,
+            "method": "POST",
+            "sensitiveFields": [
+                {"path": "*", "class": "consumer-derived"},
+                {"path": "debug", "class": "debug"},
+                {"path": "model_path", "class": "path-or-name"},
+                {"path": "settings.prompt", "class": "user-authored"},
+            ],
+            "safeProjection": [
+                {"path": "performance.configured", "kind": "boolean"},
+                {
+                    "path": "performance.memory_cleanup_applied",
+                    "kind": "boolean",
+                },
+                {"path": "performance.warning_count", "kind": "count"},
+            ],
+            "subjectModeBindingId": None,
+        },
+    ]
     declaration = pack.profile.protected_operations[0]
     assert declaration.scope_id == "generate"
     assert {item.path for item in declaration.safe_projection} == {

@@ -8,6 +8,12 @@ export class PrivacyQueueError extends Error {
   }
 }
 
+const EXECUTION_REFERENCE_MARKERS = Object.freeze([
+  "helto.private-execution-reference",
+  "helto.subject-mode-reference",
+]);
+const EXECUTION_REFERENCE_SCAN_LIMIT = 16384;
+
 export function createPrivacyQueueCoordinator({
   workflow,
   capturePrompt,
@@ -112,28 +118,142 @@ async function sanitized(code, operation) {
 }
 
 function executionGrants(value) {
-  const grants = [];
+  const references = [];
   const visited = new WeakSet();
-  const visit = (candidate) => {
+  const visit = (candidate, path = [], parsedValue = false) => {
+    if (typeof candidate === "string") {
+      if (parsedValue && !isJsonContainerText(candidate)) return;
+      if (
+        candidate.length <= EXECUTION_REFERENCE_SCAN_LIMIT
+        && isJsonContainerText(candidate)
+      ) {
+        try {
+          visit(JSON.parse(candidate), path, true);
+          return;
+        } catch (error) {
+          if (error instanceof PrivacyQueueError) throw error;
+          if (!hasDecodedExecutionReferenceMarker(candidate)) return;
+        }
+      } else if (!hasDecodedExecutionReferenceMarker(candidate)) {
+        return;
+      }
+      throw new PrivacyQueueError("PRIVACY_QUEUE_EXECUTION_REFERENCE_INVALID");
+    }
     if (!candidate || typeof candidate !== "object") return;
-    if (visited.has(candidate)) return;
-    visited.add(candidate);
-    if (candidate.schema === "helto.private-execution-reference") {
-      if (typeof candidate.grant !== "string" || !candidate.grant) {
+    if (
+      candidate.schema === "helto.private-execution-reference"
+      || candidate.schema === "helto.subject-mode-reference"
+    ) {
+      const validVersion = candidate.schema === "helto.private-execution-reference"
+        ? candidate.version === 2 && /^[0-9a-f]{64}$/.test(candidate.subject)
+        : candidate.version === 2
+          && /^[0-9a-f]{64}$/.test(candidate.profileFingerprint)
+          && /^[0-9a-f]{64}$/.test(candidate.subject)
+          && typeof candidate.bindingId === "string"
+          && !!candidate.bindingId;
+      if (
+        !validVersion
+        || typeof candidate.grant !== "string"
+        || !candidate.grant
+      ) {
         throw new PrivacyQueueError("PRIVACY_QUEUE_EXECUTION_REFERENCE_INVALID");
       }
-      grants.push(candidate.grant);
+      references.push(Object.freeze({
+        schema: candidate.schema,
+        version: candidate.version,
+        path: JSON.stringify(path),
+        grant: candidate.grant,
+      }));
       return;
     }
-    for (const item of Array.isArray(candidate) ? candidate : Object.values(candidate)) {
-      visit(item);
+    if (visited.has(candidate)) return;
+    visited.add(candidate);
+    if (Array.isArray(candidate)) {
+      candidate.forEach((item, index) => (
+        visit(item, [...path, ["array", index]], parsedValue)
+      ));
+    } else {
+      for (const [key, item] of Object.entries(candidate)) {
+        visit(item, [...path, ["object", key]], parsedValue);
+      }
     }
   };
   visit(value);
-  if (new Set(grants).size !== grants.length) {
+  if (
+    new Set(references.map((item) => item.grant)).size !== references.length
+    || new Set(references.map((item) => `${item.schema}:${item.path}`)).size
+      !== references.length
+  ) {
     throw new PrivacyQueueError("PRIVACY_QUEUE_EXECUTION_REFERENCE_INVALID");
   }
-  return Object.freeze(grants);
+  return Object.freeze(references);
+}
+
+function isJsonContainerText(value) {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d) continue;
+    return code === 0x7b || code === 0x5b;
+  }
+  return false;
+}
+
+function hasDecodedExecutionReferenceMarker(value) {
+  const progress = EXECUTION_REFERENCE_MARKERS.map(() => 0);
+  const feed = (character) => {
+    for (let index = 0; index < EXECUTION_REFERENCE_MARKERS.length; index += 1) {
+      const marker = EXECUTION_REFERENCE_MARKERS[index];
+      const next = progress[index];
+      progress[index] = character === marker[next]
+        ? next + 1
+        : (character === marker[0] ? 1 : 0);
+      if (progress[index] === marker.length) return true;
+    }
+    return false;
+  };
+  for (let index = 0; index < value.length; index += 1) {
+    let character = value[index];
+    if (character === "\\" && index + 1 < value.length) {
+      const escape = value[index + 1];
+      if (escape === "u" && index + 5 < value.length) {
+        let code = 0;
+        let valid = true;
+        for (let offset = 2; offset <= 5; offset += 1) {
+          const unit = value.charCodeAt(index + offset);
+          const nibble = unit >= 0x30 && unit <= 0x39
+            ? unit - 0x30
+            : unit >= 0x41 && unit <= 0x46
+              ? unit - 0x41 + 10
+              : unit >= 0x61 && unit <= 0x66
+                ? unit - 0x61 + 10
+                : -1;
+          if (nibble < 0) {
+            valid = false;
+            break;
+          }
+          code = (code << 4) | nibble;
+        }
+        if (valid) {
+          character = String.fromCharCode(code);
+          index += 5;
+        }
+      } else if (
+        escape === "\"" || escape === "\\" || escape === "/"
+        || escape === "b" || escape === "f" || escape === "n"
+        || escape === "r" || escape === "t"
+      ) {
+        character = escape === "b" ? "\b"
+          : escape === "f" ? "\f"
+            : escape === "n" ? "\n"
+              : escape === "r" ? "\r"
+                : escape === "t" ? "\t"
+                  : escape;
+        index += 1;
+      }
+    }
+    if (feed(character)) return true;
+  }
+  return false;
 }
 
 function requireFreshExecutionGrants(stored, rebuilt) {
@@ -143,8 +263,21 @@ function requireFreshExecutionGrants(stored, rebuilt) {
   if (stored.length !== rebuilt.length) {
     throw new PrivacyQueueError("PRIVACY_QUEUE_EXECUTION_REFERENCE_MISSING");
   }
-  const expired = new Set(stored);
-  if (rebuilt.some((grant) => expired.has(grant))) {
+  const byLocation = (items) => [...items]
+    .sort((left, right) => `${left.schema}:${left.path}`.localeCompare(
+      `${right.schema}:${right.path}`,
+    ));
+  const expired = byLocation(stored);
+  const fresh = byLocation(rebuilt);
+  if (expired.some((item, index) => (
+    item.schema !== fresh[index].schema
+    || item.version !== fresh[index].version
+    || item.path !== fresh[index].path
+  ))) {
+    throw new PrivacyQueueError("PRIVACY_QUEUE_EXECUTION_REFERENCE_MISSING");
+  }
+  const expiredGrants = new Set(expired.map((item) => item.grant));
+  if (fresh.some((item) => expiredGrants.has(item.grant))) {
     throw new PrivacyQueueError("PRIVACY_QUEUE_EXECUTION_GRANT_STALE");
   }
 }

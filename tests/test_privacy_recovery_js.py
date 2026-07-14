@@ -2,7 +2,7 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-from privacy_js_test_support import write_privacy_client_dependencies
+from tests.privacy_js_test_support import write_privacy_client_dependencies
 
 
 ROOT = Path(__file__).resolve().parents[1]

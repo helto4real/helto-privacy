@@ -2,6 +2,8 @@ import json
 
 import pytest
 
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture, ProductStateProtocolFixture
+
 import helto_privacy.keystore as keystore
 import helto_privacy.migration as migration
 import helto_privacy.runtime as runtime
@@ -22,6 +24,7 @@ from helto_privacy.profile import (
     LegacyReaderBinding,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     ProfileResource,
     ResourceKind,
@@ -35,7 +38,7 @@ class Request:
         self.cookies = {}
 
 
-class ModeAdapter:
+class ModeAdapter(ModeSourceProtocolFixture):
     def read_declared_mode(self, _scope_id):
         return "private"
 
@@ -52,7 +55,7 @@ class ModeAdapter:
         return None
 
 
-class StateAdapter:
+class StateAdapter(ProductStateProtocolFixture):
     def capture(self):
         return {}
 
@@ -110,6 +113,7 @@ def _profile():
                 FieldLocation(FieldLocationKind.WIDGET, "state"),
                 "helto.snapshot-test.v1",
                 "state",
+                ProtectedStateAuthority.SERVER_DURABLE,
                 legacy_reader_ids=("state-v0",),
             ),
         ),
@@ -329,6 +333,17 @@ def test_protect_normalizes_and_returns_only_current_envelope(snapshot_pack):
     with pytest.raises(TypeError):
         is_verified_current_disposition(
             type("ForgedDisposition", (), {"disposition": "verified-current"})()
+        )
+    with pytest.raises(ValueError):
+        DispositionResult(
+            EnvelopeDisposition.READABLE_LEGACY,
+            replacement_envelope=protected.envelope,
+        )
+    with pytest.raises(ValueError):
+        DispositionResult(
+            EnvelopeDisposition.VERIFIED_CURRENT,
+            migration_obligation_id="hp-obligation-forged",
+            replacement_envelope=protected.envelope,
         )
     assert "synthetic" not in repr(protected)
 

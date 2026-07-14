@@ -8,6 +8,8 @@ import helto_privacy.mode_runtime as mode_runtime
 import helto_privacy.runtime as runtime
 import helto_privacy.suite_runtime as suite_runtime
 import pytest
+from tests.mode_protocol_fixtures import ModeSourceProtocolFixture, ProductStateProtocolFixture
+from helto_privacy.records import RecordSnapshot
 from helto_privacy.guard import (
     AuthorizedPrivacyRequest,
     PrivacyRouteDispatchError,
@@ -31,6 +33,7 @@ from helto_privacy.profile import (
     FieldLocationKind,
     PrivacyProfile,
     PrivacyScope,
+    ProtectedStateAuthority,
     ProtectedField,
     ProfileResource,
     RecordDeclaration,
@@ -38,7 +41,7 @@ from helto_privacy.profile import (
 )
 
 
-class ModeSourceAdapter:
+class ModeSourceAdapter(ModeSourceProtocolFixture):
     def __init__(self, declarations):
         self.declarations = declarations
 
@@ -73,6 +76,7 @@ class TransitionParticipant:
         self.mode = mode
         self.pending = {}
         self.fail_commit = False
+        self.fail_rollback = False
 
     def prepare_mode_transition(
         self,
@@ -98,9 +102,10 @@ class TransitionParticipant:
             self.mode = self.pending[transition_id][0]
 
 
-class TransactionalModeSource(TransitionParticipant):
+class TransactionalModeSource(ModeSourceProtocolFixture):
     def __init__(self, declarations, log):
-        super().__init__("mode-source", log)
+        self.name = "mode-source"
+        self.log = log
         self.declarations = declarations
 
     def read_declared_mode(self, scope_id):
@@ -109,27 +114,16 @@ class TransactionalModeSource(TransitionParticipant):
     def write_declared_mode(self, scope_id, mode):
         self.declarations[scope_id] = mode
 
-    def prepare_mode_transition(
-        self,
-        context,
-    ):
-        super().prepare_mode_transition(context)
-        self.pending[context.transition_id] = (
-            self.declarations.get(context.scope_id),
-            context.target_declared,
-        )
-
-    def commit_mode_transition(self, scope_id, transition_id):
+    def compare_and_set_mode_source(self, *args):
         self.log.append(("commit", self.name))
-        self.declarations[scope_id] = self.pending[transition_id][1]
+        return super().compare_and_set_mode_source(*args)
 
-    def rollback_mode_transition(self, scope_id, transition_id):
+    def rollback_mode_source(self, *args):
         self.log.append(("rollback", self.name))
-        if transition_id in self.pending:
-            self.declarations[scope_id] = self.pending[transition_id][0]
+        return super().rollback_mode_source(*args)
 
 
-class StateParticipant(TransitionParticipant):
+class StateParticipant(ProductStateProtocolFixture, TransitionParticipant):
     def capture(self):
         return {}
 
@@ -142,19 +136,36 @@ class StateParticipant(TransitionParticipant):
     def clear_plaintext(self):
         return None
 
+    def prepare_mode_transition(self, context, plan):
+        self.log.append(("prepare", self.name))
+        return ProductStateProtocolFixture.prepare_mode_transition(self, context, plan)
+
+    def commit_mode_transition(self, context, plan):
+        self.log.append(("commit", self.name))
+        if self.fail_commit:
+            raise RuntimeError("SYNTHETIC_PRIVATE_CANARY")
+        result = ProductStateProtocolFixture.commit_mode_transition(self, context, plan)
+        self.mode = context.target_mode
+        return result
+
+    def rollback_mode_transition(self, context, plan):
+        self.log.append(("rollback", self.name))
+        if self.fail_rollback:
+            raise RuntimeError("SYNTHETIC_PRIVATE_CANARY")
+        result = ProductStateProtocolFixture.rollback_mode_transition(self, context, plan)
+        self.mode = context.prior_mode
+        return result
+
 
 class RecordParticipant(TransitionParticipant):
     def list_ids(self):
         return ()
 
-    def read_protected(self, record_id):
-        return None
+    def read_record(self, record_id):
+        return RecordSnapshot(0)
 
-    def write_protected(self, record_id, value):
-        return None
-
-    def delete(self, record_id):
-        return None
+    def compare_and_swap_record(self, record_id, expected, replacement):
+        return False
 
 
 class ArtifactParticipant(TransitionParticipant):
@@ -254,6 +265,7 @@ def _transaction_profile():
                 location=FieldLocation(FieldLocationKind.WIDGET, "state"),
                 current_schema="helto.transition-test.v1",
                 purpose="state",
+                state_authority=ProtectedStateAuthority.SERVER_DURABLE,
             ),
         ),
         records=(
@@ -583,28 +595,22 @@ def test_transition_prepares_every_surface_and_commits_mode_last(monkeypatch):
     assert result.status is ModeTransitionStatus.IDLE
     assert declarations["main"] is DeclaredPrivacyMode.PRIVATE
     assert log == [
-        ("purge-plaintext", "artifact-store"),
-        ("prepare", "artifact-store"),
-        ("prepare", "record-store"),
         ("prepare", "state-store"),
-        ("prepare", "mode-source"),
-        ("commit", "artifact-store"),
-        ("commit", "record-store"),
         ("commit", "state-store"),
         ("commit", "mode-source"),
     ]
-    assert all(
-        participant.mode is EffectivePrivacyMode.PRIVATE
-        for adapter_id, participant in adapters.items()
-        if adapter_id != "mode-source"
-    )
+    assert adapters["state-store"].classify_mode_transition is not None
 
 
 def test_private_transition_aborts_before_prepare_when_derivative_purge_fails(
     monkeypatch,
 ):
-    pack, adapters, declarations, log, authorization = _transaction_pack(monkeypatch)
-    adapters["artifact-store"].fail_purge = True
+    pack, _adapters, declarations, log, authorization = _transaction_pack(monkeypatch)
+
+    def fail_artifact_plan(*_args, **_kwargs):
+        raise RuntimeError("SYNTHETIC_PRIVATE_PATH_CANARY")
+
+    monkeypatch.setattr(artifacts, "plan_artifact_mode_transition", fail_artifact_plan)
 
     with pytest.raises(ModeTransitionError) as failed:
         pack.mode("privacy-mode").transition(
@@ -616,7 +622,7 @@ def test_private_transition_aborts_before_prepare_when_derivative_purge_fails(
 
     assert failed.value.code == "PRIVACY_TRANSITION_FAILED"
     assert declarations["main"] is DeclaredPrivacyMode.PUBLIC
-    assert log == [("purge-plaintext", "artifact-store")]
+    assert log == []
     assert "SYNTHETIC" not in str(failed.value)
 
 
@@ -690,11 +696,7 @@ def test_direct_declaration_change_blocks_until_shared_transition_runs(monkeypat
         authorization,
     )
     assert completed.effective is EffectivePrivacyMode.PRIVATE
-    assert all(
-        participant.mode is EffectivePrivacyMode.PRIVATE
-        for adapter_id, participant in adapters.items()
-        if adapter_id != "mode-source"
-    )
+    assert adapters["state-store"].mode is EffectivePrivacyMode.PRIVATE
 
     declarations["main"] = DeclaredPrivacyMode.PUBLIC
     assert mode.resolve("main").transition_status is ModeTransitionStatus.BLOCKED
@@ -729,11 +731,7 @@ def test_authorized_private_to_public_transition_rewrites_every_surface(monkeypa
     assert result.effective is EffectivePrivacyMode.PUBLIC
     assert declarations["main"] is DeclaredPrivacyMode.PUBLIC
     assert mode.resolve("main").effective is EffectivePrivacyMode.PUBLIC
-    assert all(
-        participant.mode is EffectivePrivacyMode.PUBLIC
-        for adapter_id, participant in adapters.items()
-        if adapter_id != "mode-source"
-    )
+    assert adapters["state-store"].mode is EffectivePrivacyMode.PUBLIC
     assert log[-1] == ("commit", "mode-source")
 
 
@@ -760,10 +758,10 @@ def test_private_to_public_requires_explicit_confirmation_evidence(monkeypatch):
     assert log == []
 
 
-def test_transition_failure_rolls_back_and_blocks_until_explicit_restore(monkeypatch):
+def test_transition_failure_rolls_back_to_idle_before_returning(monkeypatch):
     pack, adapters, declarations, log, authorization = _transaction_pack(
         monkeypatch,
-        fail_participant="record-store",
+        fail_participant="state-store",
     )
     mode = pack.mode("privacy-mode")
     facts = ModeFacts(current_mode=EffectivePrivacyMode.PUBLIC)
@@ -778,39 +776,21 @@ def test_transition_failure_rolls_back_and_blocks_until_explicit_restore(monkeyp
 
     assert failed.value.code == "PRIVACY_TRANSITION_FAILED"
     assert "SYNTHETIC_PRIVATE_CANARY" not in str(failed.value)
-    blocked = mode.resolve("main", facts)
-    assert blocked.effective is EffectivePrivacyMode.PUBLIC
-    assert blocked.transition_status is ModeTransitionStatus.BLOCKED
+    restored = mode.resolve("main", facts)
+    assert restored.effective is EffectivePrivacyMode.PUBLIC
+    assert restored.transition_status is ModeTransitionStatus.IDLE
     assert declarations["main"] is DeclaredPrivacyMode.PUBLIC
-    assert all(
-        participant.mode is EffectivePrivacyMode.PUBLIC
-        for adapter_id, participant in adapters.items()
-        if adapter_id != "mode-source"
-    )
+    assert adapters["state-store"].mode is EffectivePrivacyMode.PUBLIC
 
-    monkeypatch.setattr(mode_runtime, "_MODE_TRANSITIONS", {})
-    blocked_after_restart = mode.resolve("main", facts)
-    assert blocked_after_restart.effective is EffectivePrivacyMode.PUBLIC
-    assert blocked_after_restart.transition_status is ModeTransitionStatus.BLOCKED
-
-    restored = mode.transition(
-        "main",
-        DeclaredPrivacyMode.PUBLIC,
-        authorization,
-        facts,
-    )
-    assert restored.status is ModeTransitionStatus.IDLE
-    assert mode.resolve("main", facts).transition_status is ModeTransitionStatus.IDLE
     assert any(action == "rollback" for action, _name in log)
 
 
 def test_bound_route_dispatch_cannot_cross_a_blocked_transition(monkeypatch):
     monkeypatch.setattr(runtime, "register_helto_privacy_ui", lambda **_kwargs: True)
     monkeypatch.setattr(suite_runtime, "require_active_process_suite", lambda: None)
-    pack, _adapters, _declarations, _log, authorization = _transaction_pack(
-        monkeypatch,
-        fail_participant="record-store",
-    )
+    pack, adapters, _declarations, _log, authorization = _transaction_pack(monkeypatch)
+    adapters["state-store"].fail_commit = True
+    adapters["state-store"].fail_rollback = True
     assert runtime.reconcile_prompt_server(object()) is True
     mode = pack.mode("privacy-mode")
     facts = ModeFacts(current_mode=EffectivePrivacyMode.PUBLIC)
@@ -844,6 +824,8 @@ def test_bound_route_dispatch_cannot_cross_a_blocked_transition(monkeypatch):
     assert blocked.value.code == "PRIVACY_TRANSITION_BLOCKED"
     assert called is False
 
+    adapters["state-store"].fail_commit = False
+    adapters["state-store"].fail_rollback = False
     mode.transition(
         "main",
         DeclaredPrivacyMode.PUBLIC,

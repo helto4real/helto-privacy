@@ -123,6 +123,87 @@ There is no plaintext `.migrated` copy. Failure before unlink leaves the source
 authoritative and blocks readers that depend on the import. This does not claim
 physical secure erasure on journaling or solid-state filesystems.
 
+## External migration participants
+
+Use an external participant only when an attested browser-owned editor, rather
+than a server transaction adapter, owns the durable current-state commit. The
+legacy binding must use `LegacyLocationKind.EXPORT`, and its `location_id` must
+equal the exact protected import operation:
+
+```python
+external = pack.migration.external("legacy-export-binding", "imports.apply")
+pending = external.prepare(
+    obligation_id,
+    expected_normalized,
+    original_exact,
+    ExternalMigrationContext(
+        ExternalMigrationMode.REPLACE,
+        "2026-07-13T12:34:56Z",
+    ),
+    owner_id,
+    idempotency_key,
+    imports_apply_authorization,
+)
+```
+
+Call `prepare` before changing the external owner. The caller keeps
+`pending.status.id` and `pending.resume_token`; shared state persists only a
+hash of the resume capability. A retry with the same pack, operation, owner,
+idempotency key, obligation, exact original bytes, normalized target, and
+context returns the same transaction and deterministically regenerated resume
+capability. Changed inputs under the same idempotency tuple fail with
+`migration_idempotency_conflict`.
+
+Normalized targets and finalization proofs are validated before migration state
+or capacity is touched. Only exact JSON scalars plus bounded lists, tuples, and
+string-keyed mappings are accepted; non-finite numbers, Python scalar aliases,
+cycles, oversized strings or containers, excessive depth or item counts, and a
+canonical representation above 8 MiB fail with
+`external_migration_normalized_invalid`. Exact original, current, and re-export
+byte values are separately capped at 16 MiB.
+
+After a process or browser restart, call `external.resume(...)` with the exact
+transaction, owner, resume capability, and operation authorization. It returns
+an `ExternalMigrationResume` containing the protected expected normalized
+state, exact original destination bytes, and context needed to finish or roll
+back. This private object intentionally has no `to_payload()` method and hides
+those fields from its representation; a consumer route must return them only
+under the same exact authorization and resume-capability checks. Public
+`status(...)` remains product-data-free. Do not retain recovery material in
+browser storage.
+
+After the product write, read back the exact current representation and perform
+one deterministic current-format re-export under the same context. Complete
+with `ExternalMigrationVerification`. The shared receipt closes the legacy
+obligation only when normalized state, context, current-format status, and
+durable-adjunct status verify. The consumer remains responsible for proving
+that its exact current bytes and re-export bytes represent those product values;
+shared privacy records keyed digests because it deliberately does not know the
+product encoding.
+
+On cancellation, failed verification, or the 300-second preparation expiry,
+restore `original_exact`, call the browser workflow handle's
+`reload(owner, fieldId)` to reread those exact bytes without re-encryption, then
+acknowledge with:
+
+```python
+external.confirm_rollback(
+    pending.status.id,
+    owner_id,
+    pending.resume_token,
+    imports_apply_authorization,
+    verification=ExternalRollbackVerification(restored_exact),
+)
+```
+
+Until that acknowledgement, the owner remains blocked and the protected
+recovery record counts against the 64-per-pack and 256-global unresolved caps.
+Only one unresolved external transaction is allowed per `(pack, owner)` across
+merge and replace. `status`, `finalize`, `cancel`, and `confirm_rollback` all
+require the exact operation authorization, transaction ID, owner ID, and resume
+capability. Completed response-loss retries return the same receipt or
+rolled-back status from a product-data-free tombstone.
+
 ## Audit scopes and retirement seals
 
 The user explicitly declares an inventory using `AuditItem` values and
@@ -131,6 +212,14 @@ The user explicitly declares an inventory using `AuditItem` values and
 path. `confirm_retirement_seal(...)` succeeds only when every declared item was
 checked, the scope has zero unresolved obligations, and every key import
 required by that reader is complete.
+
+Record bindings are excluded from generic `migration.*` reads and audits.
+Check a declared record item through
+`pack.records(resource_id).audit_legacy(...)` with `record.audit`
+authorization. The typed record audit invokes the exact reader, persists any
+obligation, clears reader plaintext internally, and returns only whether the
+reader matched. A later normal record reveal or mutation performs the verified
+rewrite needed to resolve a matching obligation.
 
 The seal records the reader discovery epoch. Any later matching discovery
 increments that epoch and invalidates every prior seal for the reader. A seal

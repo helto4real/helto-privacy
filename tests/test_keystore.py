@@ -16,7 +16,7 @@ from helto_privacy.keystore import (
     PrivacyKeystoreError,
 )
 from helto_privacy.suite_runtime import SuiteBlockedError
-from _legacy_envelope_fixture import write_legacy_state_fixture
+from tests._legacy_envelope_fixture import write_legacy_state_fixture
 
 pytestmark = pytest.mark.skipif(
     not KEYSTORE_CRYPTO_AVAILABLE,

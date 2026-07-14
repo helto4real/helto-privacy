@@ -12,6 +12,21 @@ from threading import RLock
 
 from .envelope import ALGORITHM, ENVELOPE_VERSION, PrivacyEnvelopeCodec, PrivacyError
 from .guard import AuthorizedPrivacyRequest, require_current_authorization
+from .mode import EffectivePrivacyMode, ModeTransitionStatus
+from .mode_values import (
+    ModeValueDisposition,
+    ModeValueError,
+    PreparedModeValue,
+    classify_bytes,
+    classify_prepared_value,
+    classify_state,
+    prepare_bytes_transition,
+    prepare_state_transition,
+    protect_bytes,
+    protect_state,
+    reveal_bytes,
+    reveal_state,
+)
 from .profile import (
     PrivacyProfile,
     SingletonDeclaration,
@@ -78,12 +93,13 @@ class SingletonStatus:
     exists: bool
     revision: int
     current_format: bool
+    private: bool = True
 
     def to_payload(self) -> dict[str, object]:
         return {
             "exists": self.exists,
             "revision": self.revision,
-            "private": True,
+            "private": self.private,
             "currentFormat": self.current_format,
         }
 
@@ -126,6 +142,28 @@ class SingletonMutationReceipt:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SingletonModeTransitionValue:
+    """Restart-classifiable singleton representation rewrite."""
+
+    singleton_id: str
+    original: SingletonSnapshot = field(repr=False)
+    target: SingletonSnapshot = field(repr=False)
+    prepared: PreparedModeValue = field(repr=False)
+
+    def __post_init__(self) -> None:
+        if (
+            not isinstance(self.singleton_id, str)
+            or not self.singleton_id
+            or not isinstance(self.original, SingletonSnapshot)
+            or not isinstance(self.target, SingletonSnapshot)
+            or not isinstance(self.prepared, PreparedModeValue)
+            or self.original.protected is None
+            or self.target.revision != self.original.revision + 1
+        ):
+            raise ValueError("Singleton transition value is invalid.")
+
+
 _LOCK = RLock()
 _SINGLETON_LOCKS: dict[tuple[str, str, str], RLock] = {}
 
@@ -142,11 +180,22 @@ def singleton_status(
     _require_stable_scope(installation, declaration.scope_id)
     with _operation_lock(profile.id, resource_id, singleton_id):
         snapshot = _read_snapshot(adapter, declaration.id)
+        mode = _effective_mode(installation, declaration.scope_id)
         if snapshot.protected is None:
-            return SingletonStatus(False, snapshot.revision, True)
-        if not _is_current_protected(declaration, snapshot.protected):
+            return SingletonStatus(
+                False,
+                snapshot.revision,
+                True,
+                mode is EffectivePrivacyMode.PRIVATE,
+            )
+        if _stored_mode(declaration, snapshot.protected) is not mode:
             raise SingletonError("PRIVACY_SINGLETON_STORED_VALUE_INVALID")
-        return SingletonStatus(True, snapshot.revision, True)
+        return SingletonStatus(
+            True,
+            snapshot.revision,
+            True,
+            mode is EffectivePrivacyMode.PRIVATE,
+        )
 
 
 def reveal_singleton_field(
@@ -200,7 +249,7 @@ def replace_singleton_field(
     expected_revision: int,
     authorization: AuthorizedPrivacyRequest,
 ) -> SingletonMutationReceipt:
-    declaration, adapter = _authorized_mutation_binding(
+    declaration, adapter, mode = _authorized_mutation_binding(
         installation,
         profile,
         adapters,
@@ -214,6 +263,7 @@ def replace_singleton_field(
         declaration,
         value,
         SingletonPayloadKind.FIELD,
+        mode,
     ).protected
     return _replace_snapshot(
         profile.id,
@@ -236,7 +286,7 @@ def replace_singleton_blob(
     expected_revision: int,
     authorization: AuthorizedPrivacyRequest,
 ) -> SingletonMutationReceipt:
-    declaration, adapter = _authorized_mutation_binding(
+    declaration, adapter, mode = _authorized_mutation_binding(
         installation,
         profile,
         adapters,
@@ -250,6 +300,7 @@ def replace_singleton_blob(
         declaration,
         value,
         SingletonPayloadKind.BLOB,
+        mode,
     ).protected
     return _replace_snapshot(
         profile.id,
@@ -273,7 +324,7 @@ def protect_singleton_field(
 ) -> ProtectedSingletonValue:
     """Protect a field for a larger shared migration transaction."""
 
-    declaration, _adapter = _authorized_mutation_binding(
+    declaration, _adapter, mode = _authorized_mutation_binding(
         installation,
         profile,
         adapters,
@@ -287,6 +338,7 @@ def protect_singleton_field(
         declaration,
         value,
         SingletonPayloadKind.FIELD,
+        mode,
     )
 
 
@@ -302,7 +354,7 @@ def protect_singleton_blob(
 ) -> ProtectedSingletonValue:
     """Protect a blob for a larger shared migration transaction."""
 
-    declaration, _adapter = _authorized_mutation_binding(
+    declaration, _adapter, mode = _authorized_mutation_binding(
         installation,
         profile,
         adapters,
@@ -316,6 +368,7 @@ def protect_singleton_blob(
         declaration,
         value,
         SingletonPayloadKind.BLOB,
+        mode,
     )
 
 
@@ -329,7 +382,7 @@ def delete_singleton(
     expected_revision: int,
     authorization: AuthorizedPrivacyRequest,
 ) -> SingletonMutationReceipt:
-    declaration, adapter = _authorized_mutation_binding(
+    declaration, adapter, _mode = _authorized_mutation_binding(
         installation,
         profile,
         adapters,
@@ -359,27 +412,32 @@ def _reveal_singleton(
     expected_kind: SingletonPayloadKind,
     authorization: AuthorizedPrivacyRequest,
 ) -> RevealedSingleton:
-    require_current_authorization(
-        authorization,
-        "singleton.reveal",
-        pack_id=profile.id,
-    )
     declaration, adapter = _binding(profile, adapters, resource_id, singleton_id)
     if declaration.payload_kind is not expected_kind:
         raise SingletonError("PRIVACY_SINGLETON_OPERATION_INVALID")
-    _require_stable_scope(installation, declaration.scope_id)
+    mode = _effective_mode(installation, declaration.scope_id)
+    _require_authorization_for_mode(
+        mode,
+        authorization,
+        "singleton.reveal",
+        profile.id,
+    )
     with _operation_lock(profile.id, resource_id, singleton_id):
         snapshot = _read_snapshot(adapter, declaration.id)
         if snapshot.protected is None:
             raise SingletonError("PRIVACY_SINGLETON_NOT_FOUND")
-        if not _is_current_protected(declaration, snapshot.protected):
+        if _stored_mode(declaration, snapshot.protected) is not mode:
             raise SingletonError("PRIVACY_SINGLETON_STORED_VALUE_INVALID")
-        codec = PrivacyEnvelopeCodec(declaration.current_schema)
         try:
             value = (
-                codec.decrypt_state(snapshot.protected)
+                reveal_state(declaration.current_schema, snapshot.protected, mode)
                 if expected_kind is SingletonPayloadKind.FIELD
-                else codec.decrypt_bytes(snapshot.protected, declaration.purpose)
+                else reveal_bytes(
+                    declaration.current_schema,
+                    declaration.purpose,
+                    snapshot.protected,
+                    mode,
+                )
             )
         except Exception:
             raise SingletonError("PRIVACY_SINGLETON_DECRYPT_FAILED") from None
@@ -399,23 +457,20 @@ def _authorized_mutation_binding(
     expected_kind: SingletonPayloadKind | None,
     authorization: AuthorizedPrivacyRequest,
     operation_id: str,
-) -> tuple[SingletonDeclaration, object]:
-    require_current_authorization(
-        authorization,
-        operation_id,
-        pack_id=profile.id,
-    )
+) -> tuple[SingletonDeclaration, object, EffectivePrivacyMode]:
     declaration, adapter = _binding(profile, adapters, resource_id, singleton_id)
     if expected_kind is not None and declaration.payload_kind is not expected_kind:
         raise SingletonError("PRIVACY_SINGLETON_OPERATION_INVALID")
-    _require_stable_scope(installation, declaration.scope_id)
-    return declaration, adapter
+    mode = _effective_mode(installation, declaration.scope_id)
+    _require_authorization_for_mode(mode, authorization, operation_id, profile.id)
+    return declaration, adapter, mode
 
 
 def _protect_declared_singleton(
     declaration: SingletonDeclaration,
     value: object,
     expected_kind: SingletonPayloadKind,
+    mode: EffectivePrivacyMode,
 ) -> ProtectedSingletonValue:
     if declaration.payload_kind is not expected_kind:
         raise SingletonError("PRIVACY_SINGLETON_OPERATION_INVALID")
@@ -431,18 +486,19 @@ def _protect_declared_singleton(
                 separators=(",", ":"),
                 allow_nan=False,
             )
-            protected = PrivacyEnvelopeCodec(
-                declaration.current_schema
-            ).encrypt_state(normalized)
+            protected = protect_state(declaration.current_schema, normalized, mode)
         except Exception:
             raise SingletonError("PRIVACY_SINGLETON_ENCRYPT_FAILED") from None
     else:
         if not isinstance(value, bytes):
             raise SingletonError("PRIVACY_SINGLETON_PAYLOAD_INVALID")
         try:
-            protected = PrivacyEnvelopeCodec(
-                declaration.current_schema
-            ).encrypt_bytes(value, declaration.purpose)
+            protected = protect_bytes(
+                declaration.current_schema,
+                declaration.purpose,
+                value,
+                mode,
+            )
         except Exception:
             raise SingletonError("PRIVACY_SINGLETON_ENCRYPT_FAILED") from None
     return ProtectedSingletonValue(expected_kind, protected)
@@ -467,11 +523,8 @@ def _replace_snapshot(
         original = _read_snapshot(adapter, declaration.id)
         if original.revision != expected_revision:
             raise SingletonError("PRIVACY_SINGLETON_REVISION_CONFLICT")
-        if original.protected is not None and not _is_current_protected(
-            declaration,
-            original.protected,
-        ):
-            raise SingletonError("PRIVACY_SINGLETON_STORED_VALUE_INVALID")
+        if original.protected is not None:
+            _stored_mode(declaration, original.protected)
         begin = getattr(adapter, "begin_singleton_replace", None)
         if not callable(begin):
             raise SingletonError("PRIVACY_SINGLETON_ADAPTER_INVALID")
@@ -481,7 +534,7 @@ def _replace_snapshot(
             raise SingletonError("PRIVACY_SINGLETON_REPLACE_FAILED") from None
         methods = {
             name: getattr(transaction, name, None)
-            for name in ("commit", "read_back", "rollback")
+            for name in ("commit", "read_back")
         }
         if any(not callable(method) for method in methods.values()):
             raise SingletonError("PRIVACY_SINGLETON_ADAPTER_INVALID")
@@ -506,10 +559,20 @@ def _replace_snapshot(
                 raise SingletonError("PRIVACY_SINGLETON_VERIFICATION_FAILED")
         except SingletonError as exc:
             if committed or exc.code != "PRIVACY_SINGLETON_REVISION_CONFLICT":
-                _rollback_transaction(methods, original)
+                _recover_or_rollback_singleton(
+                    adapter,
+                    declaration.id,
+                    original,
+                    replacement,
+                )
             raise
         except Exception:
-            _rollback_transaction(methods, original)
+            _recover_or_rollback_singleton(
+                adapter,
+                declaration.id,
+                original,
+                replacement,
+            )
             raise SingletonError("PRIVACY_SINGLETON_REPLACE_FAILED") from None
     return SingletonMutationReceipt(
         replacement.revision,
@@ -518,14 +581,39 @@ def _replace_snapshot(
     )
 
 
-def _rollback_transaction(methods: Mapping[str, object], original: SingletonSnapshot) -> None:
+def _recover_or_rollback_singleton(
+    adapter: object,
+    singleton_id: str,
+    original: SingletonSnapshot,
+    committed: SingletonSnapshot,
+) -> None:
+    current = _read_snapshot(adapter, singleton_id)
+    if _snapshot_equal(current, original):
+        return
+    if not _snapshot_equal(current, committed):
+        raise SingletonError("PRIVACY_SINGLETON_ROLLBACK_FAILED")
+    _rollback_committed_singleton(adapter, singleton_id, committed, original)
+
+
+def _rollback_committed_singleton(
+    adapter: object,
+    singleton_id: str,
+    committed: SingletonSnapshot,
+    original: SingletonSnapshot,
+) -> SingletonSnapshot:
+    rollback = getattr(adapter, "rollback_singleton_replace", None)
+    if not callable(rollback):
+        raise SingletonError("PRIVACY_SINGLETON_ADAPTER_INVALID")
+    restored = SingletonSnapshot(committed.revision + 1, original.protected)
     try:
-        methods["rollback"]()
-        restored = methods["read_back"]()
+        result = rollback(singleton_id, committed, restored)
     except Exception:
         raise SingletonError("PRIVACY_SINGLETON_ROLLBACK_FAILED") from None
-    if not _snapshot_equal(restored, original):
+    if result is not True:
         raise SingletonError("PRIVACY_SINGLETON_ROLLBACK_FAILED")
+    if not _snapshot_equal(_read_snapshot(adapter, singleton_id), restored):
+        raise SingletonError("PRIVACY_SINGLETON_ROLLBACK_FAILED")
+    return restored
 
 
 def _binding(
@@ -587,6 +675,195 @@ def _canonical_protected(value: object | None) -> bytes:
     ).encode("utf-8")
 
 
+def prepare_singleton_mode_transition_value(
+    *,
+    profile: PrivacyProfile,
+    adapters: Mapping[str, object],
+    resource_id: str,
+    singleton_id: str,
+    prior_mode: EffectivePrivacyMode,
+    target_mode: EffectivePrivacyMode,
+) -> SingletonModeTransitionValue:
+    """Prepare one verified representation rewrite without changing storage."""
+
+    declaration, adapter = _binding(profile, adapters, resource_id, singleton_id)
+    snapshot = _read_snapshot(adapter, declaration.id)
+    if snapshot.protected is None:
+        raise SingletonError("PRIVACY_SINGLETON_NOT_FOUND")
+    if _stored_mode(declaration, snapshot.protected) is not prior_mode:
+        raise SingletonError("PRIVACY_SINGLETON_MODE_BLOCKED")
+    try:
+        prepared = (
+            prepare_state_transition(
+                declaration.current_schema,
+                snapshot.protected,
+                prior_mode,
+                target_mode,
+            )
+            if declaration.payload_kind is SingletonPayloadKind.FIELD
+            else prepare_bytes_transition(
+                declaration.current_schema,
+                declaration.purpose,
+                snapshot.protected,
+                prior_mode,
+                target_mode,
+            )
+        )
+    except ModeValueError:
+        raise SingletonError("PRIVACY_SINGLETON_VERIFICATION_FAILED") from None
+    return SingletonModeTransitionValue(
+        declaration.id,
+        snapshot,
+        SingletonSnapshot(snapshot.revision + 1, prepared.target),
+        prepared,
+    )
+
+
+def classify_singleton_mode_transition_value(
+    snapshot: SingletonSnapshot,
+    transition: SingletonModeTransitionValue,
+) -> ModeValueDisposition:
+    """Classify restart state without decrypting or exposing the value."""
+
+    if not isinstance(snapshot, SingletonSnapshot) or not isinstance(
+        transition,
+        SingletonModeTransitionValue,
+    ):
+        raise SingletonError("PRIVACY_SINGLETON_VERIFICATION_FAILED")
+    disposition = classify_prepared_value(snapshot.protected, transition.prepared)
+    if disposition is ModeValueDisposition.ORIGINAL:
+        if snapshot.revision not in {
+            transition.original.revision,
+            transition.target.revision + 1,
+        }:
+            return ModeValueDisposition.DIVERGED
+    elif disposition is ModeValueDisposition.TARGET:
+        if snapshot.revision != transition.target.revision:
+            return ModeValueDisposition.DIVERGED
+    return disposition
+
+
+def verify_singleton_mode_transition_value(
+    snapshot: SingletonSnapshot,
+    transition: SingletonModeTransitionValue,
+    expected: ModeValueDisposition,
+) -> bool:
+    """Verify one expected restart disposition without revealing the value."""
+
+    if expected not in {ModeValueDisposition.ORIGINAL, ModeValueDisposition.TARGET}:
+        raise SingletonError("PRIVACY_SINGLETON_VERIFICATION_FAILED")
+    return classify_singleton_mode_transition_value(snapshot, transition) is expected
+
+
+def commit_singleton_mode_transition_value(
+    *,
+    profile: PrivacyProfile,
+    adapters: Mapping[str, object],
+    resource_id: str,
+    transition: SingletonModeTransitionValue,
+) -> None:
+    """Commit a prepared representation with adapter CAS and read-back."""
+
+    declaration, adapter = _binding(
+        profile,
+        adapters,
+        resource_id,
+        transition.singleton_id,
+    )
+    with _operation_lock(profile.id, resource_id, declaration.id):
+        current = _read_snapshot(adapter, declaration.id)
+        state = classify_singleton_mode_transition_value(current, transition)
+        if state is ModeValueDisposition.TARGET:
+            return
+        if state is not ModeValueDisposition.ORIGINAL or current.revision != transition.original.revision:
+            raise SingletonError("PRIVACY_SINGLETON_REVISION_CONFLICT")
+        _replace_snapshot_exact(
+            adapter,
+            declaration.id,
+            current,
+            transition.target,
+        )
+
+
+def rollback_singleton_mode_transition_value(
+    *,
+    profile: PrivacyProfile,
+    adapters: Mapping[str, object],
+    resource_id: str,
+    transition: SingletonModeTransitionValue,
+) -> None:
+    """Restore the prior representation idempotently after commit or restart."""
+
+    declaration, adapter = _binding(
+        profile,
+        adapters,
+        resource_id,
+        transition.singleton_id,
+    )
+    with _operation_lock(profile.id, resource_id, declaration.id):
+        current = _read_snapshot(adapter, declaration.id)
+        state = classify_singleton_mode_transition_value(current, transition)
+        if state is ModeValueDisposition.ORIGINAL:
+            return
+        if state is not ModeValueDisposition.TARGET:
+            raise SingletonError("PRIVACY_SINGLETON_ROLLBACK_FAILED")
+        restored = SingletonSnapshot(current.revision + 1, transition.original.protected)
+        _replace_snapshot_exact(adapter, declaration.id, current, restored)
+        if classify_singleton_mode_transition_value(
+            _read_snapshot(adapter, declaration.id),
+            transition,
+        ) is not ModeValueDisposition.ORIGINAL:
+            raise SingletonError("PRIVACY_SINGLETON_ROLLBACK_FAILED")
+
+
+def _replace_snapshot_exact(
+    adapter: object,
+    singleton_id: str,
+    expected: SingletonSnapshot,
+    replacement: SingletonSnapshot,
+) -> None:
+    begin = getattr(adapter, "begin_singleton_replace", None)
+    if not callable(begin):
+        raise SingletonError("PRIVACY_SINGLETON_ADAPTER_INVALID")
+    try:
+        transaction = begin(singleton_id, expected.revision, replacement)
+    except Exception:
+        raise SingletonError("PRIVACY_SINGLETON_REPLACE_FAILED") from None
+    methods = {
+        name: getattr(transaction, name, None)
+        for name in ("commit", "read_back")
+    }
+    if any(not callable(method) for method in methods.values()):
+        raise SingletonError("PRIVACY_SINGLETON_ADAPTER_INVALID")
+    committed = False
+    try:
+        result = methods["commit"]()
+        if result is False:
+            raise SingletonError("PRIVACY_SINGLETON_REVISION_CONFLICT")
+        if result is not True:
+            raise SingletonError("PRIVACY_SINGLETON_REPLACE_FAILED")
+        committed = True
+        if not _snapshot_equal(methods["read_back"](), replacement):
+            raise SingletonError("PRIVACY_SINGLETON_VERIFICATION_FAILED")
+    except SingletonError as exc:
+        if committed or exc.code != "PRIVACY_SINGLETON_REVISION_CONFLICT":
+            _recover_or_rollback_singleton(
+                adapter,
+                singleton_id,
+                expected,
+                replacement,
+            )
+        raise
+    except Exception:
+        _recover_or_rollback_singleton(
+            adapter,
+            singleton_id,
+            expected,
+            replacement,
+        )
+        raise SingletonError("PRIVACY_SINGLETON_REPLACE_FAILED") from None
+
+
 def _is_current_protected(
     declaration: SingletonDeclaration,
     protected: object,
@@ -602,6 +879,67 @@ def _is_current_protected(
     if declaration.payload_kind is SingletonPayloadKind.FIELD:
         return _exact_state_envelope(payload, declaration.current_schema)
     return _exact_byte_envelope(payload, declaration.current_schema, declaration.purpose)
+
+
+def _stored_mode(
+    declaration: SingletonDeclaration,
+    stored: object,
+) -> EffectivePrivacyMode:
+    if _is_current_protected(declaration, stored):
+        return EffectivePrivacyMode.PRIVATE
+    try:
+        return (
+            classify_state(declaration.current_schema, stored)
+            if declaration.payload_kind is SingletonPayloadKind.FIELD
+            else classify_bytes(
+                declaration.current_schema,
+                declaration.purpose,
+                stored,
+            )
+        )
+    except ModeValueError:
+        raise SingletonError("PRIVACY_SINGLETON_STORED_VALUE_INVALID") from None
+
+
+def _effective_mode(installation, scope_id: str) -> EffectivePrivacyMode:
+    from .mode import ModePolicyError, ModeTransitionError
+    from .mode_runtime import require_stable_bound_scope, resolve_bound_mode
+
+    scope = next(
+        (item for item in installation.profile.scopes if item.id == scope_id),
+        None,
+    )
+    if scope is None:
+        raise SingletonError("PRIVACY_SINGLETON_MODE_BLOCKED")
+    try:
+        require_stable_bound_scope(installation, scope.id)
+        resolution = resolve_bound_mode(
+            installation,
+            scope.mode_resource_id,
+            scope.id,
+            None,
+        )
+        if resolution.transition_status is not ModeTransitionStatus.IDLE:
+            raise ModeTransitionError("PRIVACY_TRANSITION_BLOCKED")
+        require_stable_bound_scope(installation, scope.id)
+        return resolution.effective
+    except (ModePolicyError, ModeTransitionError):
+        raise SingletonError("PRIVACY_SINGLETON_MODE_BLOCKED") from None
+
+
+def _require_authorization_for_mode(
+    mode: EffectivePrivacyMode,
+    authorization: AuthorizedPrivacyRequest | None,
+    operation_id: str,
+    pack_id: str,
+) -> None:
+    if mode is EffectivePrivacyMode.PUBLIC:
+        return
+    require_current_authorization(
+        authorization,
+        operation_id,
+        pack_id=pack_id,
+    )
 
 
 def _exact_state_envelope(payload: Mapping[str, object], schema: str) -> bool:

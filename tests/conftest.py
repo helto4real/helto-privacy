@@ -35,6 +35,7 @@ def isolated_privacy_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(keystore, "require_active_process_suite", lambda: None)
     monkeypatch.setattr(guard, "require_active_process_suite", lambda: None)
     monkeypatch.setattr(mode_runtime, "_MODE_TRANSITIONS", {})
+    monkeypatch.setattr(mode_runtime, "_ACTIVE_SCOPE_WORK", {})
     monkeypatch.setattr(suite_runtime, "_PROCESS_SUITE_INSTALLATION", None)
     monkeypatch.setattr(suite_runtime, "_PROCESS_SUITE_CONFLICT", False)
     monkeypatch.setattr(suite_runtime, "_PROCESS_CONSUMER_DECLARATIONS", [])

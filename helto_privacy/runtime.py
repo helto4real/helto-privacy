@@ -5,12 +5,23 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import Enum
+import inspect
 from threading import RLock
+import secrets
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from .comfy_ui import register_helto_privacy_ui
-from .profile import PrivacyProfile, ProfileResource, ProtectedField, ResourceKind
+from .profile import (
+    MODE_TRANSITION_PROTOCOL,
+    PrivacyProfile,
+    ProfileResource,
+    ProtectedField,
+    ResourceKind,
+)
+
+
+SERVER_BOOT_EPOCH = "hp-boot-" + secrets.token_urlsafe(24)
 
 if TYPE_CHECKING:
     from .suite import ProfileIdentity
@@ -101,7 +112,14 @@ class AuthorizationHandle:
             pack_id=self.pack_id,
         )
 
-    def authorize_declassification(self, request, scope_id: str, target):
+    def authorize_declassification(
+        self,
+        request,
+        scope_id: str,
+        target,
+        *,
+        operation_id: str = "mode.transition",
+    ):
         """Issue one scope/target-bound, one-use transition capability."""
 
         self.require_ready()
@@ -110,7 +128,7 @@ class AuthorizationHandle:
 
         return authorize_privacy_request(
             request,
-            "mode.transition",
+            operation_id,
             pack_id=self.pack_id,
             declassification_scope_id=scope_id,
             declassification_target=normalize_declared_mode(target).value,
@@ -122,11 +140,16 @@ class AuthorizationHandle:
         self.require_ready()
         from .guard import PrivacyRouteDispatchError, dispatch_privacy_route
         from .mode import ModePolicyError, ModeTransitionError
-        from .mode_runtime import require_stable_bound_scope
+        from .mode_runtime import (
+            acquire_bound_mode_work_admission,
+            release_bound_mode_work_admission,
+        )
 
-        def require_stable(_authorization) -> None:
+        async def admitted_operation(authorization):
             try:
-                require_stable_bound_scope(self._installation, scope_id)
+                token = acquire_bound_mode_work_admission(
+                    self._installation, (scope_id,)
+                )
             except ModeTransitionError as exc:
                 raise PrivacyRouteDispatchError(exc.code, 409) from None
             except ModePolicyError as exc:
@@ -139,13 +162,17 @@ class AuthorizationHandle:
                     "PRIVACY_MODE_STATE_UNAVAILABLE",
                     409,
                 ) from None
+            try:
+                result = operation(authorization)
+                return await result if inspect.isawaitable(result) else result
+            finally:
+                release_bound_mode_work_admission(token)
 
         return await dispatch_privacy_route(
             request,
             operation_id,
-            operation,
+            admitted_operation,
             pack_id=self.pack_id,
-            before_dispatch=require_stable,
         )
 
 
@@ -165,7 +192,13 @@ class _ResourceHandle:
 class ProtectedOperationHandle(_ResourceHandle):
     """Typed backend projection seam for a declared protected operation."""
 
-    def project(self, operation_id: str, value: object):
+    def project(
+        self,
+        operation_id: str,
+        value: object,
+        *,
+        subject_mode=None,
+    ):
         self.readiness.require_ready()
         from .protected_operations import project_protected_operation
         from .suite_runtime import require_active_process_suite
@@ -178,6 +211,177 @@ class ProtectedOperationHandle(_ResourceHandle):
             resource_id=self.resource_id,
             operation_id=operation_id,
             value=value,
+            subject_mode=subject_mode,
+        )
+
+    async def dispatch(
+        self,
+        request: object,
+        operation_id: str,
+        input_value: object,
+        *,
+        references: object = None,
+    ):
+        self.readiness.require_ready()
+        from .protected_operations import dispatch_protected_operation
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
+        return await dispatch_protected_operation(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            request=request,
+            operation_id=operation_id,
+            input_value=input_value,
+            references={} if references is None else references,
+        )
+
+    def defer(
+        self,
+        operation_id: str,
+        adapter_result: object,
+        *,
+        subject_mode,
+    ):
+        self.readiness.require_ready()
+        from .associations import defer_operation_association
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
+        return defer_operation_association(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            operation_id=operation_id,
+            adapter_result=adapter_result,
+            subject_mode=subject_mode,
+        )
+
+    def source_leases(self, operation_id: str):
+        self.readiness.require_ready()
+        from .artifact_publication import _ProfileBoundSourceLeasePublisher
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
+        declaration = next(
+            (
+                item
+                for item in self._installation.profile.protected_operations
+                if item.id == operation_id
+                and item.resource_id == self.resource_id
+                and item.returns_lease
+                and not item.artifact_dependencies
+            ),
+            None,
+        )
+        if declaration is None:
+            raise UnknownResourceError()
+        adapter = self._installation.adapters.get(declaration.adapter_slot)
+        has_dependencies = bool(
+            declaration.record_dependencies
+            or declaration.singleton_dependencies
+            or declaration.artifact_dependencies
+        )
+        bind_method = (
+            "bind_source_with_dependencies" if has_dependencies else "bind_source"
+        )
+        if adapter is None or not callable(getattr(adapter, bind_method, None)):
+            raise UnknownResourceError()
+        return _ProfileBoundSourceLeasePublisher(
+            self._installation,
+            declaration,
+            adapter,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SubjectModeHandle:
+    pack_id: str
+    binding_id: str
+    _installation: _Installation = field(repr=False, compare=False)
+
+    @property
+    def readiness(self) -> ReadinessHandle:
+        return ReadinessHandle(self._installation)
+
+    @property
+    def _binding(self):
+        binding = next(
+            (
+                item
+                for item in self._installation.profile.subject_mode_bindings
+                if item.id == self.binding_id
+            ),
+            None,
+        )
+        if binding is None:
+            raise UnknownResourceError()
+        return binding
+
+    def prepare(
+        self,
+        subject_id: object,
+        declaration: object,
+        facts,
+        authorization,
+    ):
+        self.readiness.require_ready()
+        from .guard import require_current_authorization
+        from .mode_runtime import resolve_bound_declaration
+        from .subject_mode import prepare_subject_mode_reference
+        from .suite_runtime import require_active_process_suite
+
+        require_active_process_suite()
+        require_current_authorization(
+            authorization,
+            "subject-mode.prepare",
+            pack_id=self.pack_id,
+        )
+        binding = self._binding
+        scope = next(
+            item
+            for item in self._installation.profile.scopes
+            if item.id == binding.scope_id
+        )
+        resolution = resolve_bound_declaration(
+            self._installation,
+            scope.mode_resource_id,
+            scope.id,
+            declaration,
+            facts,
+        )
+        return prepare_subject_mode_reference(
+            profile=self._installation.profile,
+            binding=binding,
+            subject_id=subject_id,
+            effective=resolution.effective,
+            authorization=authorization,
+            installation=self._installation,
+        )
+
+    def consume(self, reference: object, subject_id: object):
+        self.readiness.require_ready()
+        from .subject_mode import consume_subject_mode_reference
+
+        return consume_subject_mode_reference(
+            reference,
+            profile=self._installation.profile,
+            binding=self._binding,
+            subject_id=subject_id,
+        )
+
+    def revoke(self, reference: object, authorization) -> bool:
+        self.readiness.require_ready()
+        from .subject_mode import revoke_subject_mode_reference
+
+        return revoke_subject_mode_reference(
+            reference,
+            profile=self._installation.profile,
+            binding=self._binding,
+            authorization=authorization,
         )
 
 
@@ -323,10 +527,24 @@ class RecordHandle(_ResourceHandle):
         from .records import list_record_shells
 
         return list_record_shells(
+            installation=self._installation,
             profile=self._installation.profile,
             adapters=self._installation.adapters,
             resource_id=self.resource_id,
             record_kind=record_kind,
+        )
+
+    def authorize_request(self, record_kind: str, request, operation_id: str):
+        self._require_active()
+        from .records import record_authorization_for_request
+
+        return record_authorization_for_request(
+            installation=self._installation,
+            profile=self._installation.profile,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            request=request,
+            operation_id=operation_id,
         )
 
     def reveal(
@@ -347,6 +565,31 @@ class RecordHandle(_ResourceHandle):
             record_kind=record_kind,
             record_id=record_id,
             operation=operation,
+            authorization=authorization,
+        )
+
+    def audit_legacy(
+        self,
+        record_kind: str,
+        record_id: str,
+        scope_id: str,
+        item_id: str,
+        binding_id: str,
+        authorization,
+    ) -> bool:
+        self._require_active()
+        from .records import audit_legacy_record_source
+
+        return audit_legacy_record_source(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            record_id=record_id,
+            scope_id=scope_id,
+            item_id=item_id,
+            binding_id=binding_id,
             authorization=authorization,
         )
 
@@ -420,6 +663,48 @@ class RecordHandle(_ResourceHandle):
             record_id=record_id,
             protected_value=protected_value,
             confirmation=confirmation,
+        )
+
+    def migrate_legacy_reference(
+        self,
+        record_kind: str,
+        migration_id: str,
+        legacy_reference: object,
+        authorization,
+    ):
+        self._require_active()
+        from .record_relocation import migrate_legacy_record_reference
+
+        return migrate_legacy_record_reference(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            migration_id=migration_id,
+            legacy_reference=legacy_reference,
+            authorization=authorization,
+        )
+
+    def resolve_legacy_reference(
+        self,
+        record_kind: str,
+        migration_id: str,
+        legacy_reference: object,
+        authorization,
+    ):
+        self._require_active()
+        from .record_relocation import resolve_legacy_record_reference
+
+        return resolve_legacy_record_reference(
+            installation=self._installation,
+            profile=self._installation.profile,
+            adapters=self._installation.adapters,
+            resource_id=self.resource_id,
+            record_kind=record_kind,
+            migration_id=migration_id,
+            legacy_reference=legacy_reference,
+            authorization=authorization,
         )
 
 
@@ -635,6 +920,23 @@ class ArtifactHandle(_ResourceHandle):
             owner_id=owner_id,
         )
 
+    async def reconcile_owner(
+        self,
+        artifact_kind: str,
+        owner_id: str,
+        keep=(),
+    ) -> int:
+        self.readiness.require_ready()
+        from .artifacts import reconcile_owner_artifacts
+
+        return await reconcile_owner_artifacts(
+            installation=self._installation,
+            resource_id=self.resource_id,
+            artifact_kind=artifact_kind,
+            owner_id=owner_id,
+            keep=keep,
+        )
+
     async def sweep(self):
         self.readiness.require_ready()
         from .artifacts import sweep_artifacts
@@ -646,7 +948,7 @@ class ArtifactHandle(_ResourceHandle):
         artifact_kind: str,
         reference: object,
         operation: str,
-        authorization,
+        authorization=None,
     ):
         self.readiness.require_ready()
         from .artifacts import issue_artifact_lease
@@ -675,6 +977,8 @@ class ExecutionHandle(_ResourceHandle):
         projection_id: str,
         protected_fields: Mapping[str, object],
         authorization,
+        *,
+        subject_id: object,
     ):
         self.readiness.require_ready()
         from .execution import prepare_execution
@@ -684,11 +988,19 @@ class ExecutionHandle(_ResourceHandle):
             profile=self._installation.profile,
             execution_resource_id=self.resource_id,
             projection_id=projection_id,
+            subject_id=subject_id,
             protected_fields=protected_fields,
             authorization=authorization,
         )
 
-    def dispatch(self, reference: object, context: object = None):
+    def dispatch(
+        self,
+        reference: object,
+        context: object = None,
+        *,
+        subject_id: object,
+        cache_discriminator: object = None,
+    ):
         self.readiness.require_ready()
         from .execution import dispatch_execution
 
@@ -699,6 +1011,19 @@ class ExecutionHandle(_ResourceHandle):
             execution_resource_id=self.resource_id,
             reference=reference,
             context=context,
+            subject_id=subject_id,
+            cache_discriminator=cache_discriminator,
+        )
+
+    def revoke(self, reference: object, authorization) -> bool:
+        self.readiness.require_ready()
+        from .execution import revoke_execution_reference
+
+        return revoke_execution_reference(
+            reference,
+            pack_id=self.pack_id,
+            execution_resource_id=self.resource_id,
+            authorization=authorization,
         )
 
     def cache_store(self, cache_identity: str, value: object) -> None:
@@ -784,6 +1109,16 @@ class BoundPrivacyPack:
     def execution(self, resource_id: str) -> ExecutionHandle:
         return self._resource(resource_id, ResourceKind.EXECUTION, ExecutionHandle)
 
+    def subject_modes(self, binding_id: str) -> SubjectModeHandle:
+        if self._installation.status is InstallationStatus.CONFLICT:
+            raise PackBlockedError()
+        if not any(
+            binding.id == binding_id
+            for binding in self.profile.subject_mode_bindings
+        ):
+            raise UnknownResourceError()
+        return SubjectModeHandle(self.profile.id, binding_id, self._installation)
+
     def operations(self, resource_id: str) -> ProtectedOperationHandle:
         if self._installation.status is InstallationStatus.CONFLICT:
             raise PackBlockedError()
@@ -859,6 +1194,8 @@ def _declared_snapshot_field(
 
 _LOCK = RLock()
 _INSTALLATIONS: dict[str, _Installation] = {}
+_SWEPT_MODE_STATE_PATHS: set[str] = set()
+_SWEPT_EXTERNAL_OPERATION_STATE_PATHS: set[str] = set()
 
 
 def install(
@@ -871,11 +1208,30 @@ def install(
 
     require_registered_readers(profile)
     bound_adapters = _validate_adapter_bindings(profile, adapters)
-    if profile.artifacts:
-        from .artifacts import initialize_artifact_service
-
-        initialize_artifact_service(profile)
     with _LOCK:
+        from .mode_state import mode_state_path, sweep_all_unreferenced_mode_journals
+
+        mode_path = str(mode_state_path().resolve())
+        if not _INSTALLATIONS and mode_path not in _SWEPT_MODE_STATE_PATHS:
+            sweep_all_unreferenced_mode_journals()
+            _SWEPT_MODE_STATE_PATHS.add(mode_path)
+        from .external_operation_state import (
+            external_operation_state_path,
+            sweep_unreferenced_external_operation_journals,
+        )
+
+        external_operation_path = str(external_operation_state_path().resolve())
+        if (
+            not _INSTALLATIONS
+            and external_operation_path
+            not in _SWEPT_EXTERNAL_OPERATION_STATE_PATHS
+        ):
+            sweep_unreferenced_external_operation_journals()
+            _SWEPT_EXTERNAL_OPERATION_STATE_PATHS.add(external_operation_path)
+        if profile.artifacts:
+            from .artifacts import initialize_artifact_service
+
+            initialize_artifact_service(profile)
         existing = _INSTALLATIONS.get(profile.id)
         if existing is not None:
             if existing.status is InstallationStatus.CONFLICT:
@@ -887,6 +1243,13 @@ def install(
 
                 invalidate_artifact_profile(profile.id)
                 invalidate_execution_profile(profile.id)
+                from .subject_mode import invalidate_subject_mode_profile
+                from .associations import invalidate_association_session
+                from .opaque_references import invalidate_opaque_reference_session
+
+                invalidate_subject_mode_profile(profile.id)
+                invalidate_association_session("profile-conflict")
+                invalidate_opaque_reference_session("profile-conflict")
                 raise ProfileConflictError("profile_fingerprint_conflict")
             if existing.pack is None:  # Defensive invariant; never expose a partial pack.
                 existing.status = InstallationStatus.CONFLICT
@@ -933,6 +1296,8 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
             "id": profile.id,
             "distribution": profile.distribution,
             "contract": profile.contract,
+            "modeTransitionProtocol": MODE_TRANSITION_PROTOCOL,
+            "serverBootEpoch": SERVER_BOOT_EPOCH,
             "fingerprint": profile.fingerprint,
             "status": installation.status.value,
             "requiredBrowserAdapters": [
@@ -985,6 +1350,7 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "id": projection.id,
                     "executionResourceId": projection.execution_resource_id,
                     "workflowResourceId": projection.workflow_resource_id,
+                    "subjectModeBindingId": projection.subject_mode_binding_id,
                     "inputName": projection.input_name,
                 }
                 for projection in profile.execution_projections
@@ -1006,7 +1372,11 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "id": singleton.id,
                     "resourceId": singleton.resource_id,
                     "scopeId": singleton.scope_id,
+                    "currentSchema": singleton.current_schema,
+                    "purpose": singleton.purpose,
+                    "storeAdapter": singleton.store_adapter,
                     "payloadKind": singleton.payload_kind.value,
+                    "legacyReaderIds": list(singleton.legacy_reader_ids),
                 }
                 for singleton in profile.singletons
             ],
@@ -1018,35 +1388,148 @@ def profile_attestation(pack_id: str) -> dict[str, object]:
                     "retention": artifact.retention.value,
                     "operations": list(artifact.operations),
                     "mediaType": artifact.media_type,
+                    "payloadMode": artifact.payload_mode.value,
+                    "streamContract": (
+                        {
+                            "codecSchema": artifact.stream_contract.codec_schema,
+                            "codecVersion": artifact.stream_contract.codec_version,
+                            "maxPlaintextBytes": artifact.stream_contract.max_plaintext_bytes,
+                            "maxOwnerPlaintextBytes": artifact.stream_contract.max_owner_plaintext_bytes,
+                            "decodedOutput": artifact.stream_contract.decoded_output.value,
+                            "maxMaterializedOutputBytes": (
+                                artifact.stream_contract.max_materialized_output_bytes
+                            ),
+                        }
+                        if artifact.stream_contract is not None
+                        else None
+                    ),
                 }
                 for artifact in profile.artifacts
             ],
             "protectedOperations": [
-                {
-                    "id": operation.id,
-                    "resourceId": operation.resource_id,
-                    "route": operation.route,
-                    "method": operation.method,
-                    "scopeId": operation.scope_id,
-                    "sensitiveFields": [
-                        {
-                            "path": field.path,
-                            "class": field.field_class.value,
-                        }
-                        for field in operation.sensitive_fields
-                    ],
-                    "safeProjection": [
-                        {"path": field.path, "kind": field.kind.value}
-                        for field in operation.safe_projection
-                    ],
-                }
+                _protected_operation_attestation(operation)
                 for operation in profile.protected_operations
-                if operation.route is not None
+            ],
+            "subjectModeBindings": [
+                {
+                    "id": binding.id,
+                    "scopeId": binding.scope_id,
+                    "inputName": binding.input_name,
+                    "nodeTypes": list(binding.node_types),
+                }
+                for binding in profile.subject_mode_bindings
             ],
         }
+    if profile.record_reference_migrations:
+        result["recordReferenceMigrations"] = [
+            {
+                "id": migration.id,
+                "resourceId": migration.resource_id,
+                "recordKind": migration.record_kind,
+                "legacyBindingId": migration.legacy_binding_id,
+            }
+            for migration in profile.record_reference_migrations
+        ]
+    if profile.opaque_reference_kinds:
+        result["opaqueReferenceKinds"] = [
+            {
+                "id": item.id,
+                "resourceId": item.resource_id,
+                "scopeId": item.scope_id,
+            }
+            for item in profile.opaque_reference_kinds
+        ]
+    if profile.safe_payload_projections:
+        result["safePayloadProjections"] = [
+            {
+                "id": item.id,
+                "operationId": item.operation_id,
+                "schema": item.schema,
+                "purpose": item.purpose,
+                "safeLeaves": [
+                    {"path": leaf.path, "kind": leaf.kind.value}
+                    for leaf in item.safe_leaves
+                ],
+            }
+            for item in profile.safe_payload_projections
+        ]
     from .suite_runtime import process_suite_status_payload
 
     return {**result, **process_suite_status_payload()}
+
+
+def _protected_operation_attestation(operation) -> dict[str, object]:
+    value = {
+        "id": operation.id,
+        "resourceId": operation.resource_id,
+        "route": operation.route,
+        "method": operation.method,
+        "scopeId": operation.scope_id,
+        "subjectModeBindingId": operation.subject_mode_binding_id,
+        "sensitiveFields": [
+            {"path": field.path, "class": field.field_class.value}
+            for field in operation.sensitive_fields
+        ],
+        "safeProjection": [
+            {"path": field.path, "kind": field.kind.value}
+            for field in operation.safe_projection
+        ],
+    }
+    if operation.reference_inputs or operation.reference_outputs or operation.returns_lease:
+        value.update(
+            {
+                "referenceInputs": [
+                    {
+                        "name": item.name,
+                        "referenceKindId": item.reference_kind_id,
+                        "revokeOnSuccess": item.revoke_on_success,
+                    }
+                    for item in operation.reference_inputs
+                ],
+                "referenceOutputs": [
+                    {
+                        "referenceKindId": item.reference_kind_id,
+                        "minimum": item.minimum,
+                        "maximum": item.maximum,
+                    }
+                    for item in operation.reference_outputs
+                ],
+                "returnsLease": operation.returns_lease,
+            }
+        )
+    if operation.safe_payload_projection_id is not None or operation.deferred_ui:
+        value.update(
+            {
+                "safePayloadProjectionId": operation.safe_payload_projection_id,
+                "deferredUi": operation.deferred_ui,
+            }
+        )
+    if operation.record_dependencies:
+        value["recordDependencies"] = [
+            {
+                "resourceId": item.resource_id,
+                "recordKind": item.record_kind,
+                "operation": item.operation,
+            }
+            for item in operation.record_dependencies
+        ]
+    if operation.singleton_dependencies:
+        value["singletonDependencies"] = [
+            {
+                "singletonId": item.singleton_id,
+                "verbs": list(item.verbs),
+            }
+            for item in operation.singleton_dependencies
+        ]
+    if operation.artifact_dependencies:
+        value["artifactDependencies"] = [
+            {
+                "artifactKind": item.artifact_kind,
+                "verbs": list(item.verbs),
+            }
+            for item in operation.artifact_dependencies
+        ]
+    return value
 
 
 def bound_privacy_pack(pack_id: str) -> BoundPrivacyPack:
@@ -1085,6 +1568,24 @@ def installed_profile_identities() -> tuple[ProfileIdentity, ...]:
                     for installation in _INSTALLATIONS.values()
                 ),
                 key=lambda identity: identity.id,
+            )
+        )
+
+
+def submission_profile_snapshot() -> tuple[tuple[PrivacyProfile, bool], ...]:
+    """Return immutable declarations and generic readiness for pre-route checks."""
+
+    with _LOCK:
+        if any(
+            installation.status is InstallationStatus.CONFLICT
+            for installation in _INSTALLATIONS.values()
+        ):
+            raise ProfileConflictError("profile_registry_conflict")
+        return tuple(
+            (installation.profile, installation.status is InstallationStatus.READY)
+            for installation in sorted(
+                _INSTALLATIONS.values(),
+                key=lambda item: item.profile.id,
             )
         )
 
