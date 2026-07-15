@@ -929,16 +929,47 @@ exact local candidate and its entire zero-waiver acceptance result.
 
 **Blocked by:** Publish the immutable cutover-pending artifacts.
 
-- [ ] Install only from public dependency/manager metadata in fresh supported
+- [x] Install only from public dependency/manager metadata in fresh supported
       environment tuples with no checkout, local wheel, editable install, or
       resolver override.
-- [ ] Reproduce all five hashes, the suite digest, profile fingerprints, 24
+- [x] Reproduce all five hashes, the suite digest, profile fingerprints, 24
       load-order results, negative blocked states, full repository checks,
       rendered scenarios, leak oracle, and fault campaigns.
-- [ ] Emit and sign the complete acceptance evidence manifest bound to the
+- [x] Emit and sign the complete acceptance evidence manifest bound to the
       public suite digest, exact tuples, renderers, seeds, and artifacts.
 - [ ] If any cell differs or fails, leave the candidate pending/failed and
       create new immutable versions rather than altering published artifacts.
+
+Public reproduction status: **failed**. The immutable downloads reproduced the
+five artifact hashes, suite digest, profile fingerprints, 24 load orders, 13
+negative installation cases, and all repository/fault/lifecycle checks. The
+legacy renderer leaked the synthetic private prompt through its accessibility
+snapshot, and Nodes 2.0/Vue displayed the encrypted envelope as the editable
+prompt. Signed failed evidence manifest:
+`1ebbaa4ca562b9cd02e2bcf5135dfb76f853d0fe819b6837256537690657d6f0`.
+The candidate remains `cutover-pending`; no published artifact was modified.
+
+## Correct renderer privacy failures and publish a replacement candidate
+
+**What to build:** Both supported renderers keep private plaintext out of
+serialized and accessibility sinks while preserving the intended editable
+hover behavior, and the correction ships under new immutable identities.
+
+**Blocked by:** Reproduce acceptance from public artifacts.
+
+- [ ] Replace the legacy masked-textarea behavior so idle private plaintext is
+      absent from the accessibility tree without breaking hover reveal,
+      keyboard editing, focus, or mouse selection retention.
+- [ ] Add a Nodes 2.0/Vue privacy bridge that exposes editable live plaintext
+      only through the authorized reveal state while keeping the encrypted
+      envelope in workflow storage and never rendering envelope JSON as prompt
+      text.
+- [ ] Add real accessibility-snapshot and renderer-switch regression checks so
+      a visually masked DOM value or visible envelope cannot satisfy the
+      rendered/leak acceptance cell.
+- [ ] Publish the corrected AIO artifact and replacement immutable suite under
+      new versions, then repeat the complete public-only reproduction with a
+      zero-waiver pass.
 
 ## Promote the suite and verify the operator-blind cutover procedure
 
@@ -946,7 +977,8 @@ exact local candidate and its entire zero-waiver acceptance result.
 installation procedure proves exact readiness without exposing plaintext or
 activating automatically.
 
-**Blocked by:** Reproduce acceptance from public artifacts.
+**Blocked by:** Correct renderer privacy failures and publish a replacement
+candidate.
 
 - [ ] Obtain fresh user authorization before promoting release state or
       changing the user's installed repositories/service.

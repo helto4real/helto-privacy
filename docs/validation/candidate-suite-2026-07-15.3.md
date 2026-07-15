@@ -1,9 +1,11 @@
 # Candidate suite `helto-suite-2026-07-15.3`
 
-This is the signed local `cutover-pending` candidate assembled after exact
+This is the signed `cutover-pending` candidate assembled after local
 clean-install, registration, negative-installation, rendered, leak, fault,
-lifecycle, and repository checks. It is not published, supported, activatable
-on a real installation, or authorized for production use.
+lifecycle, and repository checks and subsequently published as immutable
+GitHub prereleases. Public-artifact reproduction later found two renderer
+defects, so the candidate remains unsupported, non-activatable on a real
+installation, and unauthorized for production use.
 
 ## Immutable candidate identities
 
@@ -85,6 +87,34 @@ The suite index is the signed annotated tag and prerelease
 signed candidate and evidence records, proof index, trust metadata, and exact
 checksums. None of these prereleases is a ready-promotion record.
 
+## Public-artifact reproduction outcome
+
+Fresh public downloads reproduced all five artifact hashes, the suite digest,
+all four profile fingerprints, all 24 load orders, all 13 negative inventory
+cases, and the full repository/fault/lifecycle suites. The zero-waiver gate
+still failed in the disposable rendered checks:
+
+- Legacy visually masked the private prompt and serialized only an encrypted
+  envelope, but its native textarea exposed the synthetic plaintext canary in
+  the accessibility tree.
+- Nodes 2.0/Vue rendered the encrypted JSON envelope itself as an editable,
+  visible prompt value. The Vue widget had no private-state attributes or
+  masking bridge.
+
+The signed failed reproduction evidence is bound to the unchanged public suite
+digest. Its manifest SHA-256 is
+`1ebbaa4ca562b9cd02e2bcf5135dfb76f853d0fe819b6837256537690657d6f0`;
+the proof-index SHA-256 is
+`52fe0b73ebdb24770db15a91b3ca1738f62687f8503785e884fdc4c0704e555b`.
+See `public-reproduction-2026-07-15.3.json`,
+`public-reproduction-evidence-2026-07-15.3.signed.json`, and
+`public-reproduction-proof-index-2026-07-15.3.json`.
+
+No published artifact, tag, release, manifest, or acceptance record was
+altered. This suite must not be promoted. A corrected AIO artifact and a new
+immutable suite identity are required, followed by another public-only
+zero-waiver reproduction.
+
 ## Clean install and registration
 
 - A new Python `3.13.14` virtual environment installed the shared wheel and
@@ -103,8 +133,11 @@ checksums. None of these prereleases is a ready-promotion record.
 
 ## Rendered and leak evidence
 
-Disposable ComfyUI roots and isolated `chrome-devtools-axi` profiles exercised
-both renderers with synthetic prompts only.
+The pre-publication rehearsal used disposable ComfyUI roots and isolated
+`chrome-devtools-axi` profiles with synthetic prompts only. Its summarized
+renderer claims below are retained as historical evidence, but the later
+public-artifact run disproved their completeness because it inspected the real
+accessibility snapshot and switched the live frontend between both renderers.
 
 - Legacy and Vue both showed explicit-public prompts, auto-masked private idle
   prompts, retained the live editable value, and preserved the selected range
@@ -152,4 +185,5 @@ private keys are untracked, repository-local files under
 The five package branches, signed tags, and cutover-pending prereleases were
 published after separate explicit user authorization. No live installation,
 activation, promotion, or real ComfyUI workflow/browser/runtime access
-occurred. Public-artifact acceptance reproduction is the next release gate.
+occurred. Public-artifact acceptance reproduction failed, so renderer
+remediation and a replacement immutable candidate are the next release gate.
