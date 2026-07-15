@@ -957,19 +957,30 @@ hover behavior, and the correction ships under new immutable identities.
 
 **Blocked by:** Reproduce acceptance from public artifacts.
 
-- [ ] Replace the legacy masked-textarea behavior so idle private plaintext is
+- [x] Replace the legacy masked-textarea behavior so idle private plaintext is
       absent from the accessibility tree without breaking hover reveal,
       keyboard editing, focus, or mouse selection retention.
-- [ ] Add a Nodes 2.0/Vue privacy bridge that exposes editable live plaintext
+- [x] Add a Nodes 2.0/Vue privacy bridge that exposes editable live plaintext
       only through the authorized reveal state while keeping the encrypted
       envelope in workflow storage and never rendering envelope JSON as prompt
       text.
-- [ ] Add real accessibility-snapshot and renderer-switch regression checks so
+- [x] Add real accessibility-snapshot and renderer-switch regression checks so
       a visually masked DOM value or visible envelope cannot satisfy the
       rendered/leak acceptance cell.
 - [ ] Publish the corrected AIO artifact and replacement immutable suite under
       new versions, then repeat the complete public-only reproduction with a
       zero-waiver pass.
+
+Corrective source status: AIO commit `13bff80` now keeps private idle DOM values
+empty in legacy and Nodes 2.0, targets Vue widget rows through the exact frontend
+`label` structure, preserves protected widget/workflow storage, and prevents the
+legacy DOM widget's duplicate callback sequence from erasing the authorized live
+plaintext. The AIO suite passes `354` Python tests and `26/26` direct privacy
+browser-module subtests. A disposable ComfyUI `0.27.0` / frontend `1.45.20` run
+proved idle accessibility snapshots contain neither synthetic plaintext nor
+rendered envelope JSON, hover/leave and editing work in both renderers, mouse
+selection survives `pointerup`, and serialized workflows contain only the
+AES-256-GCM envelope. No replacement artifact or suite has been published yet.
 
 ## Promote the suite and verify the operator-blind cutover procedure
 
