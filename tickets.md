@@ -834,13 +834,13 @@ Activate the AIO profile and remove its local privacy core; Activate the
 Director profile and delete every local fallback; Activate the Smart Prompt
 profile and remove its local privacy core.
 
-- [ ] Build `helto-privacy` and all four consumers from exact source identities
+- [x] Build `helto-privacy` and all four consumers from exact source identities
       with target versions, artifact hashes, profile fingerprints, environment
       tuples, previous suite, and rollback class.
-- [ ] Verify every requirements, project, manager, lock/install,
+- [x] Verify every requirements, project, manager, lock/install,
       documentation, browser asset, and embedded profile declaration names the
       same exact candidate without local paths or floating ranges.
-- [ ] Inspect artifact contents for all required modules/assets and reject
+- [x] Inspect artifact contents for all required modules/assets and reject
       consumer-local privacy engines, Director fallback files, duplicated UI,
       stale constants, or undeclared dependencies.
 - [ ] Sign the immutable `cutover-pending` candidate manifest without treating
