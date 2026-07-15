@@ -127,8 +127,22 @@ export function installPrivacyConnectionSerializationGate(app) {
       state.refreshGraphs();
     },
   });
+  registerConnectionGateLifecycleRefresh(state);
   APP_CONNECTION_GATES.set(app, state);
   return beginConnectionAttempt(state);
+}
+
+function registerConnectionGateLifecycleRefresh(state) {
+  const { app } = state;
+  if (typeof app?.registerExtension !== "function") return;
+  const refresh = () => state.refreshGraphs();
+  app.registerExtension({
+    name: "helto.privacy.connection-serialization-gate",
+    setup: refresh,
+    beforeRegisterNodeDef: refresh,
+    nodeCreated: refresh,
+    loadedGraphNode: refresh,
+  });
 }
 
 function beginConnectionAttempt(state) {

@@ -648,7 +648,7 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         assert.equal(pack.readiness.state, "ready");
         assert.equal(pack.suiteManifestDigest, suiteDigest);
         pack.readiness.requireReady();
-        assert.equal(app.registerCount, 1);
+        assert.equal(app.registerCount, 2);
         assert.deepEqual(calls, [
           ["HeltoTimeline", "definition-existing"],
           [1, "existing"],
@@ -861,7 +861,7 @@ def test_browser_connection_attests_and_reconciles_existing_and_future_nodes(tmp
         ]);
 
         assert.equal(await privacy.connectPrivacyPack(options), pack);
-        assert.equal(app.registerCount, 1);
+        assert.equal(app.registerCount, 2);
         assert(!JSON.stringify(pack).includes("MUST_NOT_ESCAPE"));
         assert.equal("token" in pack, false);
         assert.equal("decrypt" in pack, false);
@@ -1506,7 +1506,7 @@ def test_same_identity_concurrent_connections_share_one_installation(tmp_path):
         const [firstPack, secondPack] = await Promise.all([first, second]);
         assert.equal(firstPack, secondPack);
         assert.equal(profileFetches, 1);
-        assert.equal(app.registerCount, 1);
+        assert.equal(app.registerCount, 2);
         assert.deepEqual(graph.serialize(), { nodes: [] });
         """,
     )

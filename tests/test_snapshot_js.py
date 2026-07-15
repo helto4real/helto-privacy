@@ -59,6 +59,39 @@ def run_node_module_test(tmp_path, body: str) -> None:
     assert result.returncode == 0, result.stderr + result.stdout
 
 
+def test_connection_gate_wraps_graph_created_after_extension_import(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        const extensions = [];
+        class TestApi {
+          async fetchApi() { return new Response(); }
+          async queuePrompt() { return {}; }
+        }
+        class TestApp {
+          constructor() { this.api = new TestApi(); }
+          registerExtension(extension) { extensions.push(extension); }
+          async graphToPrompt() { return { workflow: { nodes: [] }, output: {} }; }
+          async queuePrompt() { return {}; }
+        }
+        const app = new TestApp();
+        const attempt = installPrivacyConnectionSerializationGate(app);
+        attempt.markUnavailable();
+        assert.equal(extensions.length, 1);
+
+        app.rootGraph = {
+          serialize: () => ({ nodes: [{ type: "SyntheticNode", private: "PLAINTEXT" }] }),
+        };
+        extensions[0].nodeCreated({ type: "SyntheticNode" });
+
+        assert.throws(
+          () => app.rootGraph.serialize(),
+          (error) => error.code === "PRIVACY_PROFILE_UNAVAILABLE",
+        );
+        """,
+    )
+
+
 def test_equal_concurrent_preparation_is_deduplicated_and_stale_result_loses(tmp_path):
     run_node_module_test(
         tmp_path,
