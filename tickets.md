@@ -843,15 +843,15 @@ profile and remove its local privacy core.
 - [x] Inspect artifact contents for all required modules/assets and reject
       consumer-local privacy engines, Director fallback files, duplicated UI,
       stale constants, or undeclared dependencies.
-- [ ] Sign the immutable `cutover-pending` candidate manifest without treating
+- [x] Sign the immutable `cutover-pending` candidate manifest without treating
       the local build as a public or supported release.
 
-Pre-sign rehearsal status: unsigned candidate `helto-suite-2026-07-15.3` has
-complete zero-waiver proof records for both renderers, all 24 registration
-orders, 13 negative-installation cells, and all five repository check sets.
-The manifest and evidence remain unsigned, so this ticket and its blocked
-downstream tickets intentionally remain open pending fresh signing
-authorization.
+Signed local-candidate status: `helto-suite-2026-07-15.3` has an Ed25519-signed
+manifest and separately signed zero-waiver acceptance evidence bound to the
+exact manifest digest. Both renderers, all 24 registration orders, 13
+negative-installation cells, and all five repository check sets passed. This
+closes local candidate assembly without publishing, supporting, installing,
+activating, or promoting the suite.
 
 ## Prove clean installs and all 24 registration orders
 
@@ -861,16 +861,16 @@ browser consumer load order.
 
 **Blocked by:** Assemble the signed five-artifact candidate suite.
 
-- [ ] For each supported environment tuple, install into empty site-packages
+- [x] For each supported environment tuple, install into empty site-packages
       and isolated ComfyUI/browser state using the tuple's exact interpreter,
       with no editable install, checkout `PYTHONPATH`, sibling import, existing
       privacy state, or browser cache.
-- [ ] Exercise all 24 consumer registration orders before/after shared route
+- [x] Exercise all 24 consumer registration orders before/after shared route
       attachment and duplicate identical imports.
-- [ ] Require one canonical runtime, route family, browser module, UI mount,
+- [x] Require one canonical runtime, route family, browser module, UI mount,
       suite digest, and four exact fingerprints with no duplicate handlers or
       order-dependent state.
-- [ ] Prove missing/stale shared or consumer artifacts, digest drift, corrupt
+- [x] Prove missing/stale shared or consumer artifacts, digest drift, corrupt
       profiles/adapters, duplicate IDs, and interrupted installation block
       generically before privacy-bearing configuration or serialization.
 
@@ -881,17 +881,17 @@ synthetic browser and fault evidence for the exact local candidate.
 
 **Blocked by:** Prove clean installs and all 24 registration orders.
 
-- [ ] Use disposable ComfyUI roots and isolated `chrome-devtools-axi` sessions
+- [x] Use disposable ComfyUI roots and isolated `chrome-devtools-axi` sessions
       for both legacy canvas and Nodes 2.0/Vue without attaching to the user's
       live service, browser, workflows, media, keys, or models.
-- [ ] Cover private defaults, blocked/verification UI, locked byte-preserving
+- [x] Cover private defaults, blocked/verification UI, locked byte-preserving
       saves, explicit reveal, cross-pack sessions, barriers, legacy receipts,
       recovery, transitions, records, leases, restart invalidation, and replay
       grants.
-- [ ] Run the synthetic canary leak oracle over serialized state, routes, URLs,
+- [x] Run the synthetic canary leak oracle over serialized state, routes, URLs,
       headers, DOM/accessibility, logs/errors, console/network, files, caches,
       sidecars, metadata, and outputs; key bytes are never permitted.
-- [ ] Run deterministic encryption/persistence/replace/cleanup/streaming/
+- [x] Run deterministic encryption/persistence/replace/cleanup/streaming/
       cancellation/`BaseException`/timing/cache/process fault campaigns and
       require reproducible no-retry results with no partial success or
       plaintext staging.

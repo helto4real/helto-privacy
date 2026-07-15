@@ -1,11 +1,11 @@
 # Candidate suite `helto-suite-2026-07-15.3`
 
-This is the final unsigned local candidate assembled after exact clean-install,
-registration, negative-installation, rendered, leak, fault, lifecycle, and
-repository checks. It is not signed, published, supported, activatable on a
-real installation, or authorized for production use.
+This is the signed local `cutover-pending` candidate assembled after exact
+clean-install, registration, negative-installation, rendered, leak, fault,
+lifecycle, and repository checks. It is not published, supported, activatable
+on a real installation, or authorized for production use.
 
-## Immutable unsigned identities
+## Immutable candidate identities
 
 - Candidate manifest SHA-256:
   `f0901ec02c1a614633503c3eff768af5a1dda070ef272b2ad86e38de2dbdadb7`
@@ -17,15 +17,28 @@ real installation, or authorized for production use.
   `b57d738cf5ab5978fcf05fc9f3873230ea75157f8a216002a2956a7f2febfd9b`
 - Historical fixture catalog SHA-256:
   `99f22f0faa3e7bddadd672878ac14ef846e70efe1cabda94416eca241f8295d8`
+- Signed candidate record SHA-256:
+  `1c6c02086d5c3e9881478c90fc676e0994d08a72cbecf35ec74e7404aa995db8`
+- Signed acceptance record SHA-256:
+  `907b2e133951acbd402db0550a3f8f6d95317b47065791d4a4794780e4a0b826`
+- Trusted-signer registry SHA-256:
+  `a4ab1ade9593c6bed6f6bcf4b722948032815eebadf4f98a4c7626f76ee285b9`
+- Manifest signer:
+  `helto-suite-release-ed25519-e94ef2d597eb4276`
+- Acceptance signer:
+  `helto-acceptance-ed25519-734747580e2c6208`
 - Previous supported suite: none
 - Rollback class: `data-snapshot-required-after-activation`
 - Local artifact staging: `/tmp/helto-suite-20260715-4/artifacts`
 
-The canonical unsigned records are:
+The canonical source and signed records are:
 
 - `candidate-manifest-2026-07-15.3.unsigned.json`
+- `candidate-manifest-2026-07-15.3.signed.json`
 - `acceptance-evidence-2026-07-15.3.unsigned.json`
+- `acceptance-evidence-2026-07-15.3.signed.json`
 - `acceptance-proof-index-2026-07-15.3.json`
+- `trusted-signers-2026.json` and its referenced public keys
 
 The evidence contains both declared tuples: Python `3.13.14`, ComfyUI backend
 `0.27.0+e2a6e30d892402ffcf01d6280c8e2744a4448b9d`, frontend `1.45.20`,
@@ -106,9 +119,14 @@ transaction rollback/resume, cache/session cleanup, private defaults, locked
 byte preservation, legacy readers, records, artifacts/leases, execution grants,
 and cross-pack snapshot barriers with synthetic fixtures.
 
-## Authorization boundary
+## Signature verification and authorization boundary
 
-No candidate or acceptance record has been signed. No tag, release, push,
-publication, live installation, activation, promotion, key change, or real
-ComfyUI workflow/browser/runtime access occurred. The next action is candidate
-and evidence signing, which requires fresh explicit user authorization.
+The exact candidate manifest and local pre-publication acceptance evidence were
+Ed25519-signed after explicit user authorization. Verification used the tracked
+public keys and returned `cutover-pending`; no promotion signature exists. The
+private keys are untracked, repository-local files under
+`.git/helto-signing/`, with a `0700` directory and `0600` key files.
+
+No tag, release, push, publication, live installation, activation, promotion,
+or real ComfyUI workflow/browser/runtime access occurred. Publishing the exact
+artifacts remains a separate action requiring fresh user authorization.
