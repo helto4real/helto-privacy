@@ -903,16 +903,24 @@ public GitHub artifacts while remaining explicitly non-activatable.
 
 **Blocked by:** Prove rendered, leak, fault and lifecycle acceptance.
 
-- [ ] Obtain fresh user authorization before creating tags, releases, pushes,
+- [x] Obtain fresh user authorization before creating tags, releases, pushes,
       or any other external state.
-- [ ] Publish and verify the shared immutable tag/artifact first, then publish
+- [x] Publish and verify the shared immutable tag/artifact first, then publish
       each already-tested consumer artifact with its exact shared dependency
       pin and suite identity.
-- [ ] Verify public source/tag identities and downloaded hashes match the signed
+- [x] Verify public source/tag identities and downloaded hashes match the signed
       candidate manifest; never rebuild or mutate an existing artifact in
       place.
-- [ ] Mark the suite `cutover-pending` so installation permits verification but
+- [x] Mark the suite `cutover-pending` so installation permits verification but
       activation remains impossible.
+
+Publication status: all five package branches were fast-forwarded, their exact
+candidate revisions received signed annotated version tags, and GitHub
+prereleases published the already-tested artifacts as `cutover-pending`. Fresh
+downloads and public tag dereferences matched every signed manifest identity.
+GitHub release immutability is enabled on all five repositories and each
+package release reports `immutable: true`. The suite index is
+`helto-suite-2026-07-15.3`; no ready promotion exists.
 
 ## Reproduce acceptance from public artifacts
 

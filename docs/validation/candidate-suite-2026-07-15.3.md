@@ -39,6 +39,7 @@ The canonical source and signed records are:
 - `acceptance-evidence-2026-07-15.3.signed.json`
 - `acceptance-proof-index-2026-07-15.3.json`
 - `trusted-signers-2026.json` and its referenced public keys
+- `publication-2026-07-15.3.json`
 
 The evidence contains both declared tuples: Python `3.13.14`, ComfyUI backend
 `0.27.0+e2a6e30d892402ffcf01d6280c8e2744a4448b9d`, frontend `1.45.20`,
@@ -62,6 +63,27 @@ artifacts from the corrected `.2` inventory. All four consumers retain the
 exact `helto-privacy==0.4.0` requirement and contain no local path, editable
 reference, Git dependency, floating range, consumer-local privacy engine, or
 vendored fallback.
+
+## Public cutover-pending publication
+
+Each exact source revision has a signed annotated version tag and an immutable
+GitHub prerelease containing the already-tested artifact. Fresh downloads from
+all five releases matched the signed candidate hashes. Repository release
+immutability is enabled, and GitHub reports every package release as
+`immutable: true`.
+
+| Distribution | Tag | Public release |
+| --- | --- | --- |
+| `helto-privacy` | `v0.4.0` | [cutover-pending release](https://github.com/helto4real/helto-privacy/releases/tag/v0.4.0) |
+| `comfyui-utils` | `v0.1.0` | [cutover-pending release](https://github.com/helto4real/comfyui-utils/releases/tag/v0.1.0) |
+| `comfyui-all-on-one-image-generation-node` | `v0.1.0` | [cutover-pending release](https://github.com/helto4real/comfyui-all-on-one-image-generation-node/releases/tag/v0.1.0) |
+| `comfyui-helto-director` | `v0.0.1` | [cutover-pending release](https://github.com/helto4real/comfyui-helto-director/releases/tag/v0.0.1) |
+| `comfyui-helto-smartprompt` | `v0.1.0` | [cutover-pending release](https://github.com/helto4real/comfyui-helto-smartprompt/releases/tag/v0.1.0) |
+
+The suite index is the signed annotated tag and prerelease
+`helto-suite-2026-07-15.3` in `helto-privacy`. It contains the five artifacts,
+signed candidate and evidence records, proof index, trust metadata, and exact
+checksums. None of these prereleases is a ready-promotion record.
 
 ## Clean install and registration
 
@@ -127,6 +149,7 @@ public keys and returned `cutover-pending`; no promotion signature exists. The
 private keys are untracked, repository-local files under
 `.git/helto-signing/`, with a `0700` directory and `0600` key files.
 
-No tag, release, push, publication, live installation, activation, promotion,
-or real ComfyUI workflow/browser/runtime access occurred. Publishing the exact
-artifacts remains a separate action requiring fresh user authorization.
+The five package branches, signed tags, and cutover-pending prereleases were
+published after separate explicit user authorization. No live installation,
+activation, promotion, or real ComfyUI workflow/browser/runtime access
+occurred. Public-artifact acceptance reproduction is the next release gate.
