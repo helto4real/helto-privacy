@@ -846,6 +846,13 @@ profile and remove its local privacy core.
 - [ ] Sign the immutable `cutover-pending` candidate manifest without treating
       the local build as a public or supported release.
 
+Pre-sign rehearsal status: unsigned candidate `helto-suite-2026-07-15.3` has
+complete zero-waiver proof records for both renderers, all 24 registration
+orders, 13 negative-installation cells, and all five repository check sets.
+The manifest and evidence remain unsigned, so this ticket and its blocked
+downstream tickets intentionally remain open pending fresh signing
+authorization.
+
 ## Prove clean installs and all 24 registration orders
 
 **What to build:** The local candidate installs only from its declared

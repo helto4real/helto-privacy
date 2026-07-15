@@ -1,5 +1,9 @@
 # Candidate suite `helto-suite-2026-07-15.2`
 
+> Superseded by `helto-suite-2026-07-15.3` after rendered Vue validation
+> found that the connected Nodes 2.0 prompt control needed an explicit managed
+> DOM bridge. This candidate must not be signed or published.
+
 This is the unsigned local build and registration inventory for the corrected
 coordinated candidate. It is not a public, supported,
 installable-on-production, or activatable release. The immutable signed
