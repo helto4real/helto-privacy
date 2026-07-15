@@ -1,5 +1,10 @@
 # Candidate suite `helto-suite-2026-07-15.1`
 
+> Rejected and superseded by `helto-suite-2026-07-15.2`. Its consumer
+> artifacts used direct Git dependencies, which forced a network source fetch
+> instead of accepting the already-installed candidate wheel. It therefore
+> could not satisfy the exact-artifact clean-install contract.
+
 This is the unsigned local build inventory for the coordinated candidate. It
 is not a public, supported, installable-on-production, or activatable release.
 The immutable signed `cutover-pending` manifest remains intentionally absent
