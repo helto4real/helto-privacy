@@ -79,6 +79,11 @@ fresh wheel environment plus canonical archive extraction reproduced the same
 legacy and Vue production-bootstrap transition. The public-reproduction record
 is signed and bound to the exact suite manifest.
 
+The ready suite prerelease was then published with 22 assets. A fresh download
+verified every one of the 21 entries in `SHA256SUMS`, the OpenPGP suite tag, the
+signed manifest, the complete signed acceptance evidence, the signed public
+reproduction record, and the signed readiness promotion.
+
 ## Safety and authorization boundary
 
 All accepted browser and ComfyUI runs used `--cpu`, isolated HOME, XDG,
