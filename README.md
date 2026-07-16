@@ -241,7 +241,7 @@ this public-data-only shape:
   "signedManifest": { "schema": "helto.privacy.signed-suite-manifest.v1" },
   "promotion": { "schema": "helto.privacy.signed-suite-promotion.v1" },
   "artifactFiles": {
-    "helto-privacy": "/absolute/path/to/helto_privacy-0.4.1-py3-none-any.whl"
+    "helto-privacy": "/absolute/path/to/helto_privacy-0.4.2-py3-none-any.whl"
   },
   "environment": {
     "python": "3.13.14",

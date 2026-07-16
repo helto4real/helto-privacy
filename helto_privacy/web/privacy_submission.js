@@ -1,11 +1,19 @@
 // Prompt-submission ownership, transport integrity, and completion mechanics.
 
+// KJNodes.CrossGraphSetGet from kijai/ComfyUI-KJNodes (main, 2026-07-16).
+// The exact Function#toString digest is release-bound through the signed
+// helto-privacy artifact. Unknown or changed interpositions remain blocked.
+const TRUSTED_GRAPH_TO_PROMPT_INTERPOSITION_DIGESTS = Object.freeze([
+  "1f3ba5a17e1b1982ad544a96179bd1eec331a83a3f3068a6e8fcd83c6508c42a",
+]);
+
 export function installPrivacySubmissionOwnership({
   app,
   createError,
   requireAvailable,
   onConflict,
   refresh = () => {},
+  trustedGraphToPromptDigests = TRUSTED_GRAPH_TO_PROMPT_INTERPOSITION_DIGESTS,
 }) {
   if (
     !app
@@ -20,8 +28,13 @@ export function installPrivacySubmissionOwnership({
   if (!api || (typeof api !== "object" && typeof api !== "function")) {
     throw createError("PRIVACY_PROFILE_UNAVAILABLE");
   }
+  const graphToPrompt = captureGraphToPromptMethod(
+    app,
+    createError,
+    trustedGraphToPromptDigests,
+  );
   const core = Object.freeze({
-    graphToPrompt: capturePrototypeMethod(app, "graphToPrompt", createError),
+    graphToPrompt: graphToPrompt.method,
     appQueuePrompt: capturePrototypeMethod(app, "queuePrompt", createError),
     apiQueuePrompt: capturePrototypeMethod(api, "queuePrompt", createError),
     fetchApi: capturePrototypeMethod(api, "fetchApi", createError),
@@ -95,8 +108,10 @@ export function installPrivacySubmissionOwnership({
     api,
     core,
     get ready() {
-      return Object.values(handlers).every((handler) => typeof handler === "function");
+      return graphToPrompt.verified
+        && Object.values(handlers).every((handler) => typeof handler === "function");
     },
+    verifyCompatibility: () => graphToPrompt.verify(),
     installHandlers(next) {
       if (
         !next
@@ -357,6 +372,81 @@ function capturePrototypeMethod(instance, methodName, createError) {
   return method;
 }
 
+function captureGraphToPromptMethod(instance, createError, trustedDigests) {
+  const own = Object.getOwnPropertyDescriptor(instance, "graphToPrompt");
+  if (!own) {
+    const method = capturePrototypeMethod(instance, "graphToPrompt", createError);
+    return Object.freeze({
+      method,
+      get verified() { return true; },
+      verify: async () => {},
+    });
+  }
+  if (
+    own.configurable === false
+    || !Object.hasOwn(own, "value")
+    || typeof own.value !== "function"
+  ) throw createError("PRIVACY_PROFILE_UNAVAILABLE");
+
+  const prototypeMethod = captureMethodFromPrototype(
+    instance,
+    "graphToPrompt",
+    createError,
+  );
+  if (instance.graphToPrompt !== own.value || own.value === prototypeMethod) {
+    throw createError("PRIVACY_PROFILE_UNAVAILABLE");
+  }
+  const allowed = normalizeTrustedDigests(trustedDigests, createError);
+  const source = Function.prototype.toString.call(own.value);
+  let status = "pending";
+  const verification = rawSha256Digest(
+    source,
+    createError,
+    "PRIVACY_PROFILE_UNAVAILABLE",
+  ).then((digest) => {
+    if (!allowed.some((candidate) => constantStringEqual(candidate, digest))) {
+      throw createError("PRIVACY_PROFILE_UNAVAILABLE");
+    }
+    status = "verified";
+  }).catch(() => {
+    status = "failed";
+    throw createError("PRIVACY_PROFILE_UNAVAILABLE");
+  });
+  verification.catch(() => {});
+  return Object.freeze({
+    method: own.value,
+    get verified() { return status === "verified"; },
+    verify: () => verification,
+  });
+}
+
+function captureMethodFromPrototype(instance, methodName, createError) {
+  let prototype = Object.getPrototypeOf(instance);
+  while (prototype && prototype !== Object.prototype) {
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, methodName);
+    if (descriptor) {
+      if (
+        typeof descriptor.value !== "function"
+        || descriptor.get
+        || descriptor.set
+      ) throw createError("PRIVACY_PROFILE_UNAVAILABLE");
+      return descriptor.value;
+    }
+    prototype = Object.getPrototypeOf(prototype);
+  }
+  throw createError("PRIVACY_PROFILE_UNAVAILABLE");
+}
+
+function normalizeTrustedDigests(value, createError) {
+  if (
+    !Array.isArray(value)
+    || value.some((item) => (
+      typeof item !== "string" || !/^[0-9a-f]{64}$/.test(item)
+    ))
+  ) throw createError("PRIVACY_PROFILE_UNAVAILABLE");
+  return Object.freeze([...new Set(value)]);
+}
+
 function installGuardedMethod(target, methodName, guardedMethod, fail) {
   const own = Object.getOwnPropertyDescriptor(target, methodName);
   Object.defineProperty(target, methodName, {
@@ -593,15 +683,19 @@ function normalizePromptPath(pathname) {
   return `/${segments.join("/")}`;
 }
 
-async function rawSubmissionDigest(value, error) {
+async function rawSha256Digest(value, error, code) {
   const cryptoApi = globalThis.crypto?.subtle;
   if (!cryptoApi || typeof cryptoApi.digest !== "function" || typeof value !== "string") {
-    throw error("PRIVACY_SNAPSHOT_OPERATION_INVALID");
+    throw error(code);
   }
   const digest = new Uint8Array(
     await cryptoApi.digest("SHA-256", new TextEncoder().encode(value)),
   );
   return [...digest].map((item) => item.toString(16).padStart(2, "0")).join("");
+}
+
+async function rawSubmissionDigest(value, error) {
+  return rawSha256Digest(value, error, "PRIVACY_SNAPSHOT_OPERATION_INVALID");
 }
 
 function constantStringEqual(left, right) {

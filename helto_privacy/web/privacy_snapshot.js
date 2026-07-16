@@ -169,14 +169,21 @@ function beginConnectionAttempt(state) {
       state.pendingAttempts.delete(token);
       openConnectionGateIfReady(state);
     },
-    takeOwnership() {
+    async takeOwnership() {
       if (settled) {
-        return Promise.reject(
-          new PrivacySnapshotError("PRIVACY_PROFILE_UNAVAILABLE"),
-        );
+        throw new PrivacySnapshotError("PRIVACY_PROFILE_UNAVAILABLE");
       }
       settled = true;
       state.pendingAttempts.delete(token);
+      try {
+        await state.submissionOwnership?.verifyCompatibility?.();
+      } catch {
+        state.failed = true;
+        state.phase = "unavailable";
+        notifyConnectionGateConflict(state);
+        rejectConnectionOwnershipWaiters(state);
+        throw new PrivacySnapshotError("PRIVACY_PROFILE_UNAVAILABLE");
+      }
       if (
         state.failed
         || !state.submissionOwnership?.ready
@@ -188,16 +195,14 @@ function beginConnectionAttempt(state) {
         state.phase = "unavailable";
         notifyConnectionGateConflict(state);
         rejectConnectionOwnershipWaiters(state);
-        return Promise.reject(
-          new PrivacySnapshotError("PRIVACY_PROFILE_UNAVAILABLE"),
-        );
+        throw new PrivacySnapshotError("PRIVACY_PROFILE_UNAVAILABLE");
       }
       state.refreshGraphs();
       if (!state.pendingAttempts.size) {
         openConnectionGateIfReady(state);
-        return Promise.resolve();
+        return;
       }
-      return new Promise((resolve, reject) => {
+      await new Promise((resolve, reject) => {
         state.ownershipWaiters.add({ resolve, reject });
       });
     },

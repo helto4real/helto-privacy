@@ -146,3 +146,102 @@ def test_submission_service_direct_body_route_header_and_permit_contract(tmp_pat
         check=False,
     )
     assert result.returncode == 0, result.stderr + result.stdout
+
+
+def test_graph_to_prompt_interposition_requires_an_exact_trusted_digest(tmp_path):
+    (tmp_path / "package.json").write_text('{"type":"module"}', encoding="utf-8")
+    module_path = tmp_path / "privacy_submission.js"
+    module_path.write_text(SUBMISSION.read_text(encoding="utf-8"), encoding="utf-8")
+    script = tmp_path / "test.mjs"
+    script.write_text(
+        textwrap.dedent(
+            f"""
+            import assert from "node:assert/strict";
+            import {{ installPrivacySubmissionOwnership }} from {module_path.as_uri()!r};
+
+            class TestError extends Error {{
+              constructor(code) {{ super("submission failed"); this.code = code; }}
+            }}
+            const createError = (code) => new TestError(code);
+            class TestApi {{
+              async fetchApi() {{ return {{ ok: true }}; }}
+              async queuePrompt() {{ return {{ ok: true }}; }}
+            }}
+            class TestApp {{
+              constructor() {{ this.api = new TestApi(); }}
+              async graphToPrompt() {{ return {{ workflow: {{}}, output: {{}} }}; }}
+              async queuePrompt() {{ return true; }}
+            }}
+            async function digest(value) {{
+              const bytes = new Uint8Array(
+                await globalThis.crypto.subtle.digest(
+                  "SHA-256",
+                  new TextEncoder().encode(value),
+                ),
+              );
+              return [...bytes]
+                .map((item) => item.toString(16).padStart(2, "0"))
+                .join("");
+            }}
+
+            let wrapperCalls = 0;
+            const app = new TestApp();
+            const original = TestApp.prototype.graphToPrompt;
+            app.graphToPrompt = async function trustedCompatibility(...args) {{
+              wrapperCalls += 1;
+              return original.apply(this, args);
+            }};
+            const source = Function.prototype.toString.call(app.graphToPrompt);
+            const ownership = installPrivacySubmissionOwnership({{
+              app,
+              createError,
+              requireAvailable() {{}},
+              onConflict() {{ throw createError("PRIVACY_PROFILE_UNAVAILABLE"); }},
+              trustedGraphToPromptDigests: [await digest(source)],
+            }});
+            assert.equal(ownership.ready, false);
+            await ownership.verifyCompatibility();
+            ownership.installHandlers({{
+              graphToPrompt: (captured, receiver, args) => captured.apply(receiver, args),
+              appQueuePrompt: (captured, receiver, args) => captured.apply(receiver, args),
+              apiQueuePrompt: (captured, receiver, args) => captured.apply(receiver, args),
+              fetchApi: (captured, receiver, args) => captured.apply(receiver, args),
+            }});
+            assert.equal(ownership.ready, true);
+            assert.deepEqual(await app.graphToPrompt(), {{ workflow: {{}}, output: {{}} }});
+            assert.equal(wrapperCalls, 1);
+            assert.equal(
+              Object.getOwnPropertyDescriptor(app, "graphToPrompt").configurable,
+              false,
+            );
+
+            let unknownCalls = 0;
+            const unknown = new TestApp();
+            unknown.graphToPrompt = async function unknownCompatibility() {{
+              unknownCalls += 1;
+              return {{ workflow: {{}}, output: {{}} }};
+            }};
+            const blocked = installPrivacySubmissionOwnership({{
+              app: unknown,
+              createError,
+              requireAvailable() {{}},
+              onConflict() {{ throw createError("PRIVACY_PROFILE_UNAVAILABLE"); }},
+            }});
+            await assert.rejects(
+              blocked.verifyCompatibility(),
+              (error) => error.code === "PRIVACY_PROFILE_UNAVAILABLE",
+            );
+            assert.equal(blocked.ready, false);
+            assert.equal(unknownCalls, 0);
+            """
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        ["node", str(script)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
