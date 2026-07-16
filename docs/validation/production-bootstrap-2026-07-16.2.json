@@ -1,0 +1,47 @@
+{
+  "schema": "helto.privacy.production-bootstrap-proof.v1",
+  "suiteId": "helto-suite-2026-07-16.2",
+  "manifestDigest": "67be7afd73534b8a0c53ab67e17678d69fc8ca20aee60e545200533c1413236e",
+  "interpreter": "/tmp/helto-suite-20260716-2/clean/venv/bin/python-release",
+  "python": "3.13.14",
+  "comfyuiBackend": "0.27.0+e2a6e30d892402ffcf01d6280c8e2744a4448b9d",
+  "comfyuiFrontend": "1.45.20",
+  "device": "cpu",
+  "canonicalNodeDirectories": [
+    "comfyui-all-on-one-image-generation-node",
+    "comfyui-helto-director",
+    "comfyui-helto-smartprompt",
+    "comfyui-utils"
+  ],
+  "renderers": {
+    "legacy": {
+      "instanceId": "comfyui-utils-20260716-153627-b8a1b9",
+      "browserSession": "comfyui-node-test-comfyui-utils-20260716-153627-b8a1b9",
+      "setting": false,
+      "vueNodeCount": 0,
+      "statusBeforeBrowser": "ready",
+      "statusAfterBrowser": "activation-required",
+      "issueAfterBrowser": "explicit_activation_required",
+      "keystoreInitialized": false,
+      "privacyProfileConflict": false
+    },
+    "vue": {
+      "instanceId": "comfyui-utils-20260716-154311-0895cb",
+      "browserSession": "comfyui-node-test-comfyui-utils-20260716-154311-0895cb",
+      "setting": true,
+      "vueNodeCount": 10,
+      "statusBeforeBrowser": "ready",
+      "statusAfterBrowser": "activation-required",
+      "issueAfterBrowser": "explicit_activation_required",
+      "keystoreInitialized": false,
+      "extensionResourceCount": 48,
+      "uniqueExtensionResourceCount": 48,
+      "nonCanonicalExtensionResources": [],
+      "privacyProfileConflict": false
+    }
+  },
+  "activationPerformed": false,
+  "syntheticOnly": true,
+  "realProductDataRead": false,
+  "realProductDataWritten": false
+}
