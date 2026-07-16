@@ -1583,8 +1583,17 @@ def test_multiple_packs_share_gate_readiness_and_failure_state(tmp_path):
         });
         assert.equal(primaryPack.readiness.state, "connecting");
         assert.equal(secondaryPack.readiness.state, "connecting");
+        let primaryReadyAgain = false;
+        const primaryReady = primaryPack.readiness.waitUntilReady().then(() => {
+          primaryReadyAgain = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(primaryReadyAgain, false);
         releaseThird();
         const tertiaryPack = await tertiary;
+        await primaryReady;
+        assert.equal(primaryReadyAgain, true);
+        primaryPack.authorization.requireReady();
         assert.equal(primaryPack.readiness.state, "ready");
         assert.equal(secondaryPack.readiness.state, "ready");
         assert.equal(tertiaryPack.readiness.state, "ready");

@@ -74,6 +74,18 @@ export class BrowserReadinessHandle {
       throw new PrivacyPackConnectionError("browser_pack_blocked");
     }
   }
+
+  async waitUntilReady() {
+    const entry = HANDLE_ENTRIES.get(this);
+    if (entry.status === STATUS.READY) return;
+    if (entry.status === STATUS.CONFLICT) {
+      throw new PrivacyPackConnectionError("browser_pack_blocked");
+    }
+    await new Promise((resolve, reject) => {
+      entry.readinessWaiters.add({ resolve, reject });
+    });
+    this.requireReady();
+  }
 }
 
 export class BrowserAuthorizationHandle {
@@ -2093,12 +2105,12 @@ async function connectPrivacyPackAfterGate({
       || existing.suiteManifestDigest !== suiteDigest
       || existing.app !== app
     ) {
-      existing.status = STATUS.CONFLICT;
+      transitionEntryStatus(existing, STATUS.CONFLICT);
       throw new PrivacyPackConnectionError("browser_profile_conflict");
     }
     await resolveBrowserAdapterBindings(existing, adapters, adapterFactories);
     await existing.serializationBarrier.takeOwnership(connectionGate);
-    existing.status = STATUS.READY;
+    transitionEntryStatus(existing, STATUS.READY);
     return existing.pack;
   }
 
@@ -2309,6 +2321,7 @@ async function connectPrivacyPackAfterGate({
     sessionUnsubscribe: null,
     surface: null,
     status: STATUS.CONNECTING,
+    readinessWaiters: new Set(),
     pack: null,
   };
   pendingConnection.entry = entry;
@@ -2320,7 +2333,7 @@ async function connectPrivacyPackAfterGate({
       adapterFactories,
     );
   } catch {
-    entry.status = STATUS.CONFLICT;
+    transitionEntryStatus(entry, STATUS.CONFLICT);
     throw new PrivacyPackConnectionError("browser_adapter_mismatch");
   }
   entry.snapshotCoordinator = createPrivacySnapshotCoordinator({
@@ -2380,13 +2393,13 @@ async function connectPrivacyPackAfterGate({
   entry.sessionUnsubscribe = subscribePrivacySession((session) => {
     entry.sessionState = session;
     entry.snapshotCoordinator.onSessionChange(session).catch(() => {
-      entry.status = STATUS.CONFLICT;
+      transitionEntryStatus(entry, STATUS.CONFLICT);
     });
     for (const adapter of Object.values(entry.adapters)) {
       try {
         adapter.onPrivacySessionChange(session);
       } catch {
-        entry.status = STATUS.CONFLICT;
+        transitionEntryStatus(entry, STATUS.CONFLICT);
       }
     }
   }, { emitCurrent: true });
@@ -2408,10 +2421,10 @@ async function connectPrivacyPackAfterGate({
     await reconcileExistingNodeDefinitions(app, entry);
     await reconcileExistingPrivacyNodes(app, entry);
     await entry.serializationBarrier.takeOwnership(connectionGate);
-    entry.status = STATUS.READY;
+    transitionEntryStatus(entry, STATUS.READY);
   } catch {
     entry.sessionUnsubscribe?.();
-    entry.status = STATUS.CONFLICT;
+    transitionEntryStatus(entry, STATUS.CONFLICT);
     throw new PrivacyPackConnectionError("browser_lifecycle_registration_failed");
   }
   entry.surface = mountSharedPrivacySurface({
@@ -2496,23 +2509,36 @@ function adapterBindingIdentity(options) {
 function markAppEntriesConnecting(app) {
   for (const entry of CONNECTED_PRIVACY_PACKS.values()) {
     if (entry.app === app && entry.status !== STATUS.CONFLICT) {
-      entry.status = STATUS.CONNECTING;
+      transitionEntryStatus(entry, STATUS.CONNECTING);
     }
   }
 }
 
 function markAppEntriesConflict(app) {
   for (const entry of CONNECTED_PRIVACY_PACKS.values()) {
-    if (entry.app === app) entry.status = STATUS.CONFLICT;
+    if (entry.app === app) transitionEntryStatus(entry, STATUS.CONFLICT);
   }
 }
 
 function markAppEntriesReady(app) {
   for (const entry of CONNECTED_PRIVACY_PACKS.values()) {
     if (entry.app === app && entry.status !== STATUS.CONFLICT) {
-      entry.status = STATUS.READY;
+      transitionEntryStatus(entry, STATUS.READY);
     }
   }
+}
+
+function transitionEntryStatus(entry, status) {
+  entry.status = status;
+  if (status === STATUS.CONNECTING || !entry.readinessWaiters?.size) return;
+  const waiters = [...entry.readinessWaiters];
+  entry.readinessWaiters.clear();
+  if (status === STATUS.READY) {
+    for (const waiter of waiters) waiter.resolve();
+    return;
+  }
+  const error = new PrivacyPackConnectionError("browser_pack_blocked");
+  for (const waiter of waiters) waiter.reject(error);
 }
 
 function validArtifactStreamAttestation(artifact) {
