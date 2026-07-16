@@ -1,0 +1,9 @@
+Suite: helto-suite-2026-07-16.3
+Renderers: legacy, vue
+Workflow surface: newly created blank workflow
+Helto privacy surface: Locked pending explicit activation
+Prompt text present: no
+Workflow content present: no
+Expected fail-closed alert: Privacy snapshot operation could not complete
+Sensitive values captured: no
+Real product data accessed: no
