@@ -11,6 +11,7 @@ from threading import RLock
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 
+from ._suite_codec import is_stable_id
 from .suite import (
     AcceptanceEvidence,
     ArtifactIdentity,
@@ -33,6 +34,7 @@ from .suite_runtime import (
 
 
 PROCESS_SUITE_CONFIG_SCHEMA_V1 = "helto.privacy.process-suite-config.v1"
+PROCESS_SUITE_CONFIG_SCHEMA_V2 = "helto.privacy.process-suite-config.v2"
 DEFAULT_PROCESS_SUITE_CONFIG = Path("~/.config/helto/process-suite.json")
 MANIFEST_SIGNER_KEY_ID = "helto-suite-release-ed25519-e94ef2d597eb4276"
 PROMOTION_SIGNER_KEY_ID = "helto-suite-promotion-ed25519-96aad83c09c02860"
@@ -105,9 +107,15 @@ def bootstrap_configured_process_suite() -> bool:
                 activation_record = Path(str(activation_path))
                 if not activation_record.is_absolute():
                     raise SuiteBootstrapError("activation_record_path_not_absolute")
+            activation_keys = (
+                _activation_public_keys(payload.get("activationPublicKeys"))
+                if payload.get("schema") == PROCESS_SUITE_CONFIG_SCHEMA_V2
+                else {}
+            )
             installation = SuiteInstallation(
                 release,
                 activation_store=FileActivationRecordStore(activation_record),
+                trusted_activation_keys=activation_keys,
             )
             register_process_suite(installation)
             configure_process_suite_verification(
@@ -129,7 +137,10 @@ def _read_config(path: Path) -> Mapping[str, object]:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError):
         raise SuiteBootstrapError("suite_config_invalid") from None
-    if not isinstance(payload, Mapping) or payload.get("schema") != PROCESS_SUITE_CONFIG_SCHEMA_V1:
+    if not isinstance(payload, Mapping) or payload.get("schema") not in {
+        PROCESS_SUITE_CONFIG_SCHEMA_V1,
+        PROCESS_SUITE_CONFIG_SCHEMA_V2,
+    }:
         raise SuiteBootstrapError("suite_config_schema_mismatch")
     return payload
 
@@ -142,6 +153,27 @@ def _public_key(path: Path) -> Ed25519PublicKey:
     if not isinstance(key, Ed25519PublicKey):
         raise SuiteBootstrapError("suite_trust_root_invalid")
     return key
+
+
+def _activation_public_keys(value: object) -> dict[str, Ed25519PublicKey]:
+    payload = _mapping(value, "activation_public_keys_invalid")
+    if not payload or len(payload) > 16:
+        raise SuiteBootstrapError("activation_public_keys_invalid")
+    result: dict[str, Ed25519PublicKey] = {}
+    for key_id, configured_path in payload.items():
+        if not is_stable_id(key_id):
+            raise SuiteBootstrapError("activation_public_keys_invalid")
+        path = Path(str(configured_path))
+        if not path.is_absolute():
+            raise SuiteBootstrapError("activation_public_key_path_not_absolute")
+        try:
+            key = serialization.load_pem_public_key(path.read_bytes())
+        except (OSError, ValueError, TypeError):
+            raise SuiteBootstrapError("activation_public_key_invalid") from None
+        if not isinstance(key, Ed25519PublicKey):
+            raise SuiteBootstrapError("activation_public_key_invalid")
+        result[str(key_id)] = key
+    return result
 
 
 def _signed_manifest(value: object) -> SignedSuiteManifest:
@@ -281,6 +313,7 @@ def _sequence(value: object) -> tuple[object, ...]:
 __all__ = [
     "DEFAULT_PROCESS_SUITE_CONFIG",
     "PROCESS_SUITE_CONFIG_SCHEMA_V1",
+    "PROCESS_SUITE_CONFIG_SCHEMA_V2",
     "SuiteBootstrapError",
     "bootstrap_configured_process_suite",
     "configured_process_suite_path",

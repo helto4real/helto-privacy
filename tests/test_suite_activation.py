@@ -60,6 +60,7 @@ def test_explicit_digest_bound_activation_persists_rollback_boundary(
     assert process_suite_status_payload()["suiteStatus"] == "active"
     assert record.manifest_digest == release.manifest.digest
     assert record.inventory_digest == request.inventory_digest
+    assert record.process_nonce == request.process_nonce
     assert record.previous_suite_id == release.manifest.previous_suite_id
     assert record.pre_activation_snapshot_digest == "d" * 64
     assert record.rollback == release.manifest.rollback
@@ -96,6 +97,10 @@ def test_explicit_digest_bound_activation_persists_rollback_boundary(
     replay_report = replay_guard._verify_inventory(inventory)
     assert replay_report.status is SuiteStatus.ACTIVATION_REQUIRED
     assert replay_report.issue_codes == ("explicit_process_activation_required",)
+
+    with pytest.raises(SuiteActivationError) as replayed:
+        replay_guard.activate(authorization)
+    assert replayed.value.code == "activation_process_mismatch"
 
     monkeypatch.setattr(store, "block", original_block)
     reauthorization = sign_activation_authorization(

@@ -8,9 +8,12 @@ import helto_privacy.runtime as runtime
 import helto_privacy.suite_bootstrap as suite_bootstrap
 import helto_privacy.suite_runtime as suite_runtime
 from helto_privacy.suite import sign_suite_manifest, sign_suite_promotion
+from helto_privacy.suite_activation import sign_activation_authorization
 from helto_privacy.suite_runtime import (
     ConsumerSuiteDeclaration,
     SuiteStatus,
+    activate_process_suite,
+    process_suite_activation_request,
     process_suite_status_payload,
     record_browser_manifest_attestation,
     register_consumer_suite_declaration,
@@ -88,6 +91,7 @@ def test_detached_ready_suite_bootstraps_then_verifies_after_browser_attestation
     )
     manifest_key = Ed25519PrivateKey.generate()
     promotion_key = Ed25519PrivateKey.generate()
+    activation_key = Ed25519PrivateKey.generate()
     signed = sign_suite_manifest(
         manifest,
         suite_bootstrap.MANIFEST_SIGNER_KEY_ID,
@@ -103,13 +107,15 @@ def test_detached_ready_suite_bootstraps_then_verifies_after_browser_attestation
     promotion_public = tmp_path / "promotion.pub.pem"
     _public_key(manifest_public, manifest_key)
     _public_key(promotion_public, promotion_key)
+    activation_public = tmp_path / "activation.pub.pem"
+    _public_key(activation_public, activation_key)
     monkeypatch.setattr(suite_bootstrap, "_MANIFEST_PUBLIC_KEY", manifest_public)
     monkeypatch.setattr(suite_bootstrap, "_PROMOTION_PUBLIC_KEY", promotion_public)
     config = tmp_path / "process-suite.json"
     config.write_text(
         json.dumps(
             {
-                "schema": suite_bootstrap.PROCESS_SUITE_CONFIG_SCHEMA_V1,
+                "schema": suite_bootstrap.PROCESS_SUITE_CONFIG_SCHEMA_V2,
                 "signedManifest": _signed_manifest_payload(signed),
                 "promotion": _promotion_payload(promotion),
                 "artifactFiles": {
@@ -120,6 +126,10 @@ def test_detached_ready_suite_bootstraps_then_verifies_after_browser_attestation
                     "python": manifest.environments[0].python,
                     "comfyuiBackend": manifest.environments[0].comfyui_backend,
                     "comfyuiFrontend": manifest.environments[0].comfyui_frontend,
+                },
+                "activationRecord": str(tmp_path / "activation.json"),
+                "activationPublicKeys": {
+                    "user-activation-2026": str(activation_public),
                 },
             }
         ),
@@ -140,6 +150,18 @@ def test_detached_ready_suite_bootstraps_then_verifies_after_browser_attestation
 
     assert report.status is SuiteStatus.ACTIVATION_REQUIRED
     assert report.issue_codes == ("explicit_activation_required",)
+    request = process_suite_activation_request()
+    authorization = sign_activation_authorization(
+        request,
+        pre_activation_snapshot_digest="d" * 64,
+        authorization_id="activation-bootstrap-test",
+        authorized_at="2026-07-17T08:00:00Z",
+        signer_key_id="user-activation-2026",
+        private_key=activation_key,
+    )
+    record = activate_process_suite(authorization)
+    assert record.process_nonce == request.process_nonce
+    assert process_suite_status_payload()["suiteStatus"] == "active"
     assert suite_bootstrap.bootstrap_configured_process_suite() is True
 
 

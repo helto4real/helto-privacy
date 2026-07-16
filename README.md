@@ -237,7 +237,7 @@ this public-data-only shape:
 
 ```json
 {
-  "schema": "helto.privacy.process-suite-config.v1",
+  "schema": "helto.privacy.process-suite-config.v2",
   "signedManifest": { "schema": "helto.privacy.signed-suite-manifest.v1" },
   "promotion": { "schema": "helto.privacy.signed-suite-promotion.v1" },
   "artifactFiles": {
@@ -248,6 +248,9 @@ this public-data-only shape:
     "comfyuiBackend": "<exact revision identity>",
     "comfyuiFrontend": "<exact version>"
   },
+  "activationPublicKeys": {
+    "user-activation-2026": "/absolute/path/to/operator-activation.pub.pem"
+  },
   "activationRecord": "/absolute/optional/path/to/suite-activation.json"
 }
 ```
@@ -255,7 +258,9 @@ this public-data-only shape:
 `artifactFiles` must contain all five manifest distributions, not only the
 abbreviated example entry. The shared wheel embeds the fixed public manifest
 and promotion trust roots. The config contains no private key, workflow,
-prompt, media, queue/history, credential, or decrypted value.
+prompt, media, queue/history, credential, or decrypted value. Version 1 remains
+readable for pre-activation compatibility but cannot authorize activation
+because it declares no trusted operator key.
 
 Verification hashes the five immutable artifact files and reads profile
 fingerprints and embedded suite declarations from the live process registries.
@@ -266,12 +271,34 @@ installed suite. Callers do not construct or assert their own inventory. A
 promoted exact process moves from `ready` to `activation-required`; this
 bootstrap never activates it.
 
-Activation does not decrypt product data. It atomically records the signed
-authorization and the pre-activation snapshot digest as the rollback boundary,
-then changes the installation to `active`. The record remains the rollback
-boundary, but activation is process-scoped: every new ComfyUI process verifies
-the record and still re-enters `activation-required`. This prevents a crashed
-or storage-failed blocked process from replaying an old activation.
+Activation does not decrypt product data. The local operator first creates a
+complete byte-for-byte pre-activation backup outside this package and supplies
+only its SHA-256 digest. The product-data-free operator CLI signs that digest
+together with the exact manifest, measured inventory, and a fresh process
+nonce. The server atomically records the signed authorization and backup digest
+as the rollback boundary, then changes the installation to `active`. Every new
+ComfyUI process verifies the record and still re-enters `activation-required`;
+the prior authorization contains the previous process nonce and cannot be
+replayed.
+
+Generate the operator key once, install only its public half in the version 2
+process config, then activate after the manual backup is complete:
+
+```bash
+helto-privacy-activate generate-key \
+  --private-key /absolute/private/operator-activation.pem \
+  --public-key /absolute/public/operator-activation.pub.pem
+
+helto-privacy-activate activate \
+  --server http://127.0.0.1:8188 \
+  --private-key /absolute/private/operator-activation.pem \
+  --signer-key-id user-activation-2026 \
+  --pre-activation-snapshot-digest <sha256-of-complete-manual-backup>
+```
+
+The CLI accepts only a loopback HTTP server, refuses group/world-readable
+private keys, emits no key bytes or activation signature, and returns only the
+sanitized suite status.
 
 The activation inventory digest also binds a measured installation generation
 derived from the five artifact files. Reinstalling or repairing exact bytes
@@ -950,6 +977,8 @@ Registration is idempotent across packs (first pack wins). The temporary
 legacy-directory argument exists only for coordinated cutover. It registers:
 
 - `GET  /helto_privacy/status`
+- `GET  /helto_privacy/suite/activation-request`
+- `POST /helto_privacy/suite/activate`
 - `GET  /helto_privacy/profiles/{pack_id}`
 - `GET  /helto_privacy/profiles/{pack_id}/modes`
 - `POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition`

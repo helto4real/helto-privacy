@@ -175,6 +175,106 @@ def _profile():
     )
 
 
+def test_operator_activation_routes_expose_and_accept_only_signed_public_state(
+    monkeypatch,
+):
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    from helto_privacy.suite import RollbackClass
+    from helto_privacy.suite_activation import (
+        ActivationRequest,
+        sign_activation_authorization,
+    )
+
+    monkeypatch.setattr(comfy_ui, "_ROUTES_REGISTERED", False)
+    monkeypatch.setattr(comfy_ui, "_LEGACY_KEY_DIRS", [])
+    web = types.SimpleNamespace(
+        json_response=lambda data, **kwargs: _Response(data, **kwargs),
+        Response=_Response,
+        StreamResponse=_StreamResponse,
+    )
+    aiohttp = types.ModuleType("aiohttp")
+    aiohttp.web = web
+    monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
+    prompt_server = types.SimpleNamespace(routes=_Routes(), app=_App())
+    assert comfy_ui.register_helto_privacy_ui(prompt_server=prompt_server) is True
+
+    activation_request = ActivationRequest(
+        manifest_digest="a" * 64,
+        inventory_digest="b" * 64,
+        process_nonce="c" * 64,
+        previous_suite_id="helto-suite-previous",
+        rollback=RollbackClass.DATA_SNAPSHOT_REQUIRED_AFTER_ACTIVATION,
+    )
+    monkeypatch.setattr(
+        suite_runtime,
+        "process_suite_activation_request",
+        lambda: activation_request,
+    )
+    request_handler = prompt_server.routes.handlers[
+        ("GET", f"{comfy_ui.ROUTE_PREFIX}/suite/activation-request")
+    ]
+    response = asyncio.run(request_handler(types.SimpleNamespace()))
+    assert response.status == 200
+    assert response.data == {
+        "ok": True,
+        "manifestDigest": "a" * 64,
+        "inventoryDigest": "b" * 64,
+        "processNonce": "c" * 64,
+        "previousSuiteId": "helto-suite-previous",
+        "rollback": "data-snapshot-required-after-activation",
+    }
+
+    key = Ed25519PrivateKey.generate()
+    authorization = sign_activation_authorization(
+        activation_request,
+        pre_activation_snapshot_digest="d" * 64,
+        authorization_id="activation-route-test",
+        authorized_at="2026-07-17T08:00:00Z",
+        signer_key_id="operator-test",
+        private_key=key,
+    )
+    captured = {}
+    monkeypatch.setattr(
+        suite_runtime,
+        "activate_process_suite",
+        lambda value: captured.setdefault("authorization", value),
+    )
+    monkeypatch.setattr(
+        suite_runtime,
+        "process_suite_status_payload",
+        lambda: {
+            "suiteStatus": "active",
+            "suiteManifestDigest": "a" * 64,
+            "suiteIssueCodes": [],
+        },
+    )
+    activate_handler = prompt_server.routes.handlers[
+        ("POST", f"{comfy_ui.ROUTE_PREFIX}/suite/activate")
+    ]
+    activated = asyncio.run(
+        activate_handler(
+            _mutation_request(
+                {
+                    "manifestDigest": authorization.manifest_digest,
+                    "inventoryDigest": authorization.inventory_digest,
+                    "processNonce": authorization.process_nonce,
+                    "preActivationSnapshotDigest": (
+                        authorization.pre_activation_snapshot_digest
+                    ),
+                    "authorizationId": authorization.authorization_id,
+                    "authorizedAt": authorization.authorized_at,
+                    "signerKeyId": authorization.signer_key_id,
+                    "signature": authorization.signature,
+                }
+            )
+        )
+    )
+    assert activated.status == 200
+    assert activated.data["suiteStatus"] == "active"
+    assert captured["authorization"] == authorization
+
+
 def test_external_transition_routes_bound_streaming_json_and_use_capability_headers(
     monkeypatch,
 ):
@@ -459,6 +559,16 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     bootstrap_payloads = {
         f"{comfy_ui.ROUTE_PREFIX}/suite/browser-attestation": {
             "manifestDigest": "a" * 64,
+        },
+        f"{comfy_ui.ROUTE_PREFIX}/suite/activate": {
+            "manifestDigest": "a" * 64,
+            "inventoryDigest": "b" * 64,
+            "processNonce": "c" * 64,
+            "preActivationSnapshotDigest": "d" * 64,
+            "authorizationId": "activation-test",
+            "authorizedAt": "2026-07-17T08:00:00Z",
+            "signerKeyId": "operator-test",
+            "signature": "synthetic",
         },
         f"{comfy_ui.ROUTE_PREFIX}/unlock": {"password": "synthetic password"},
         f"{comfy_ui.ROUTE_PREFIX}/lock": {},

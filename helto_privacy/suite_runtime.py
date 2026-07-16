@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import platform
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from enum import Enum
@@ -154,6 +155,7 @@ class SuiteInstallation:
         self._release = release
         self._activation_store = activation_store
         self._trusted_activation_keys = dict(trusted_activation_keys or {})
+        self._process_nonce = secrets.token_hex(32)
         self._lock = RLock()
         self._restart_required = False
         self._status = (
@@ -320,6 +322,7 @@ class SuiteInstallation:
             return ActivationRequest(
                 manifest_digest=self.manifest.digest,
                 inventory_digest=self._inventory.digest,
+                process_nonce=self._process_nonce,
                 previous_suite_id=self.manifest.previous_suite_id,
                 rollback=self.manifest.rollback,
             )
@@ -336,6 +339,8 @@ class SuiteInstallation:
                 raise SuiteActivationError("activation_manifest_mismatch")
             if authorization.inventory_digest != request.inventory_digest:
                 raise SuiteActivationError("activation_inventory_mismatch")
+            if authorization.process_nonce != request.process_nonce:
+                raise SuiteActivationError("activation_process_mismatch")
             verify_activation_authorization(
                 authorization,
                 self._trusted_activation_keys,
@@ -343,6 +348,7 @@ class SuiteInstallation:
             record = ActivationRecord(
                 manifest_digest=authorization.manifest_digest,
                 inventory_digest=authorization.inventory_digest,
+                process_nonce=authorization.process_nonce,
                 pre_activation_snapshot_digest=(
                     authorization.pre_activation_snapshot_digest
                 ),
@@ -388,6 +394,7 @@ class SuiteInstallation:
         authorization = SignedActivationAuthorization(
             manifest_digest=record.manifest_digest,
             inventory_digest=record.inventory_digest,
+            process_nonce=record.process_nonce,
             pre_activation_snapshot_digest=record.pre_activation_snapshot_digest,
             authorization_id=record.authorization_id,
             authorized_at=record.activated_at,
@@ -787,6 +794,30 @@ def verify_configured_process_suite() -> SuiteReadinessReport:
         artifact_files=artifact_files,
         environment=environment,
     )
+
+
+def process_suite_activation_request() -> ActivationRequest:
+    """Return the process-bound request for an exact verified installation."""
+
+    verify_configured_process_suite()
+    with _PROCESS_SUITE_LOCK:
+        if _PROCESS_SUITE_CONFLICT or _PROCESS_SUITE_INSTALLATION is None:
+            raise SuiteBlockedError("suite_incomplete")
+        installation = _PROCESS_SUITE_INSTALLATION
+    return installation.activation_request()
+
+
+def activate_process_suite(
+    authorization: SignedActivationAuthorization,
+) -> ActivationRecord:
+    """Activate the exact verified process with a trusted signed authorization."""
+
+    verify_configured_process_suite()
+    with _PROCESS_SUITE_LOCK:
+        if _PROCESS_SUITE_CONFLICT or _PROCESS_SUITE_INSTALLATION is None:
+            raise SuiteBlockedError("suite_incomplete")
+        installation = _PROCESS_SUITE_INSTALLATION
+    return installation.activate(authorization)
 
 
 def block_process_suite_configuration() -> None:

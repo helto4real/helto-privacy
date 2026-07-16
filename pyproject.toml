@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "helto-privacy"
-version = "0.4.2"
+version = "0.4.3"
 description = "Shared privacy keystore and envelope helpers for Helto node packs."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,6 +15,9 @@ authors = [
 dependencies = [
     "cryptography>=42.0",
 ]
+
+[project.scripts]
+helto-privacy-activate = "helto_privacy.operator_activation:main"
 
 [tool.setuptools.packages.find]
 include = ["helto_privacy*"]

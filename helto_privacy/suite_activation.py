@@ -25,7 +25,7 @@ from ._suite_codec import (
 from .suite import RollbackClass
 
 
-_ACTIVATION_SIGNATURE_DOMAIN = b"helto.privacy.suite-activation.v1\x00"
+_ACTIVATION_SIGNATURE_DOMAIN = b"helto.privacy.suite-activation.v2\x00"
 
 
 class SuiteActivationError(RuntimeError):
@@ -40,12 +40,14 @@ class SuiteActivationError(RuntimeError):
 class ActivationRequest:
     manifest_digest: str
     inventory_digest: str
+    process_nonce: str
     previous_suite_id: str | None
     rollback: RollbackClass
 
     def __post_init__(self) -> None:
         _require_sha256(self.manifest_digest, "invalid_activation_manifest")
         _require_sha256(self.inventory_digest, "invalid_activation_inventory")
+        _require_sha256(self.process_nonce, "invalid_activation_process_nonce")
         if self.previous_suite_id is not None:
             _require_stable_id(self.previous_suite_id, "invalid_previous_suite")
         if not isinstance(self.rollback, RollbackClass):
@@ -56,6 +58,7 @@ class ActivationRequest:
 class SignedActivationAuthorization:
     manifest_digest: str
     inventory_digest: str
+    process_nonce: str
     pre_activation_snapshot_digest: str
     authorization_id: str
     authorized_at: str
@@ -65,6 +68,7 @@ class SignedActivationAuthorization:
     def __post_init__(self) -> None:
         _require_sha256(self.manifest_digest, "invalid_activation_manifest")
         _require_sha256(self.inventory_digest, "invalid_activation_inventory")
+        _require_sha256(self.process_nonce, "invalid_activation_process_nonce")
         _require_sha256(
             self.pre_activation_snapshot_digest,
             "invalid_snapshot_digest",
@@ -80,6 +84,7 @@ class SignedActivationAuthorization:
             {
                 "manifestDigest": self.manifest_digest,
                 "inventoryDigest": self.inventory_digest,
+                "processNonce": self.process_nonce,
                 "preActivationSnapshotDigest": self.pre_activation_snapshot_digest,
                 "authorizationId": self.authorization_id,
                 "authorizedAt": self.authorized_at,
@@ -91,6 +96,7 @@ class SignedActivationAuthorization:
 class ActivationRecord:
     manifest_digest: str
     inventory_digest: str
+    process_nonce: str
     pre_activation_snapshot_digest: str
     authorization_id: str
     activated_at: str
@@ -102,6 +108,7 @@ class ActivationRecord:
     def __post_init__(self) -> None:
         _require_sha256(self.manifest_digest, "invalid_activation_manifest")
         _require_sha256(self.inventory_digest, "invalid_activation_inventory")
+        _require_sha256(self.process_nonce, "invalid_activation_process_nonce")
         _require_sha256(
             self.pre_activation_snapshot_digest,
             "invalid_snapshot_digest",
@@ -142,6 +149,7 @@ class FileActivationRecordStore:
             return ActivationRecord(
                 manifest_digest=str(payload["manifestDigest"]),
                 inventory_digest=str(payload["inventoryDigest"]),
+                process_nonce=str(payload["processNonce"]),
                 pre_activation_snapshot_digest=str(
                     payload["preActivationSnapshotDigest"]
                 ),
@@ -166,6 +174,7 @@ class FileActivationRecordStore:
             {
                 "manifestDigest": record.manifest_digest,
                 "inventoryDigest": record.inventory_digest,
+                "processNonce": record.process_nonce,
                 "preActivationSnapshotDigest": record.pre_activation_snapshot_digest,
                 "authorizationId": record.authorization_id,
                 "activatedAt": record.activated_at,
@@ -218,6 +227,7 @@ def sign_activation_authorization(
     unsigned = SignedActivationAuthorization(
         manifest_digest=request.manifest_digest,
         inventory_digest=request.inventory_digest,
+        process_nonce=request.process_nonce,
         pre_activation_snapshot_digest=pre_activation_snapshot_digest,
         authorization_id=authorization_id,
         authorized_at=authorized_at,
@@ -232,6 +242,7 @@ def sign_activation_authorization(
     return SignedActivationAuthorization(
         manifest_digest=unsigned.manifest_digest,
         inventory_digest=unsigned.inventory_digest,
+        process_nonce=unsigned.process_nonce,
         pre_activation_snapshot_digest=unsigned.pre_activation_snapshot_digest,
         authorization_id=unsigned.authorization_id,
         authorized_at=unsigned.authorized_at,
@@ -248,6 +259,10 @@ def verify_activation_authorization(
         raise SuiteActivationError("invalid_activation_authorization")
     _require_sha256(authorization.manifest_digest, "invalid_activation_manifest")
     _require_sha256(authorization.inventory_digest, "invalid_activation_inventory")
+    _require_sha256(
+        authorization.process_nonce,
+        "invalid_activation_process_nonce",
+    )
     _require_sha256(
         authorization.pre_activation_snapshot_digest,
         "invalid_snapshot_digest",

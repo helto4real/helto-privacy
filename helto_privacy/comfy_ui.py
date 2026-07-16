@@ -8,6 +8,8 @@ later calls only contribute their legacy key directory.
 Registered surface (pack-neutral, stable):
 
 - ``GET  /helto_privacy/status``
+- ``GET  /helto_privacy/suite/activation-request``
+- ``POST /helto_privacy/suite/activate``
 - ``GET  /helto_privacy/profiles/{pack_id}`` — safe profile attestation
 - ``GET  /helto_privacy/profiles/{pack_id}/modes`` — safe mode status
 - ``POST /helto_privacy/profiles/{pack_id}/modes/{scope_id}/transition``
@@ -275,6 +277,76 @@ def register_helto_privacy_ui(
         except (SuiteBlockedError, SuiteInventoryError):
             return web.json_response(
                 {"ok": False, "error": "PRIVACY_SUITE_ASSET_MISMATCH"},
+                status=409,
+                headers={"Cache-Control": "no-store"},
+            )
+
+    @routes.get(f"{ROUTE_PREFIX}/suite/activation-request")
+    async def get_helto_privacy_suite_activation_request(_request):
+        from .suite_activation import SuiteActivationError
+        from .suite_runtime import process_suite_activation_request
+
+        try:
+            activation = process_suite_activation_request()
+            return web.json_response(
+                {
+                    "ok": True,
+                    "manifestDigest": activation.manifest_digest,
+                    "inventoryDigest": activation.inventory_digest,
+                    "processNonce": activation.process_nonce,
+                    "previousSuiteId": activation.previous_suite_id,
+                    "rollback": activation.rollback.value,
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+        except (SuiteActivationError, SuiteBlockedError):
+            return web.json_response(
+                {"ok": False, "error": "PRIVACY_SUITE_ACTIVATION_UNAVAILABLE"},
+                status=409,
+                headers={"Cache-Control": "no-store"},
+            )
+
+    @routes.post(f"{ROUTE_PREFIX}/suite/activate")
+    async def post_helto_privacy_suite_activate(request):
+        from .suite_activation import (
+            SignedActivationAuthorization,
+            SuiteActivationError,
+        )
+        from .suite_runtime import activate_process_suite, process_suite_status_payload
+
+        denied = _bootstrap_mutation_denial(request, require_json=True)
+        if denied is not None:
+            return _privacy_error_response(web, *denied)
+        try:
+            payload = await request.json()
+            if not isinstance(payload, Mapping):
+                raise SuiteActivationError("invalid_activation_authorization")
+            authorization = SignedActivationAuthorization(
+                manifest_digest=str(payload["manifestDigest"]),
+                inventory_digest=str(payload["inventoryDigest"]),
+                process_nonce=str(payload["processNonce"]),
+                pre_activation_snapshot_digest=str(
+                    payload["preActivationSnapshotDigest"]
+                ),
+                authorization_id=str(payload["authorizationId"]),
+                authorized_at=str(payload["authorizedAt"]),
+                signer_key_id=str(payload["signerKeyId"]),
+                signature=str(payload["signature"]),
+            )
+            activate_process_suite(authorization)
+            return web.json_response(
+                {"ok": True, **process_suite_status_payload()},
+                headers={"Cache-Control": "no-store"},
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            SuiteActivationError,
+            SuiteBlockedError,
+        ):
+            return web.json_response(
+                {"ok": False, "error": "PRIVACY_SUITE_ACTIVATION_FAILED"},
                 status=409,
                 headers={"Cache-Control": "no-store"},
             )

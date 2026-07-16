@@ -85,6 +85,14 @@ def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path, monkeypatch):
     assert ("GET", comfy_ui.SNAPSHOT_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.SUBMISSION_MODULE_ROUTE) in server.routes.paths
     assert ("GET", comfy_ui.PROFILE_MODULE_ROUTE) in server.routes.paths
+    assert (
+        "GET",
+        f"{comfy_ui.ROUTE_PREFIX}/suite/activation-request",
+    ) in server.routes.paths
+    assert (
+        "POST",
+        f"{comfy_ui.ROUTE_PREFIX}/suite/activate",
+    ) in server.routes.paths
     assert ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}") in server.routes.paths
     assert (
         "POST",
