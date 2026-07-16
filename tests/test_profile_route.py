@@ -1444,15 +1444,29 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
     browser_attestation_handler = prompt_server.routes.handlers[
         ("POST", f"{comfy_ui.ROUTE_PREFIX}/suite/browser-attestation")
     ]
+    invalid_renderer = asyncio.run(
+        browser_attestation_handler(
+            _mutation_request(
+                {"manifestDigest": release.manifest.digest, "renderer": "canvas"}
+            )
+        )
+    )
+    assert invalid_renderer.status == 409
+    assert suite_runtime.process_suite_status_payload()["suiteStatus"] == (
+        "cutover-pending"
+    )
     browser_attestation = asyncio.run(
         browser_attestation_handler(
-            _mutation_request({"manifestDigest": release.manifest.digest})
+            _mutation_request(
+                {"manifestDigest": release.manifest.digest, "renderer": "legacy"}
+            )
         )
     )
     assert browser_attestation.status == 200
     assert browser_attestation.data == {
         "ok": True,
         "suiteManifestDigest": release.manifest.digest,
+        "suiteStatus": "cutover-pending",
     }
     module_request = types.SimpleNamespace(
         match_info={"manifest_digest": release.manifest.digest}
@@ -1486,7 +1500,7 @@ def test_profile_routes_are_safe_and_independent_of_aiohttp(
 
     conflicting_browser = asyncio.run(
         browser_attestation_handler(
-            _mutation_request({"manifestDigest": "e" * 64})
+            _mutation_request({"manifestDigest": "e" * 64, "renderer": "legacy"})
         )
     )
     assert conflicting_browser.status == 409

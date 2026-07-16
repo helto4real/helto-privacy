@@ -178,6 +178,9 @@ def register_helto_privacy_ui(
     """
     global _ROUTES_REGISTERED
     register_legacy_key_dir(legacy_key_dir)
+    from .suite_bootstrap import bootstrap_configured_process_suite
+
+    bootstrap_configured_process_suite()
     if _ROUTES_REGISTERED:
         return True
 
@@ -237,8 +240,11 @@ def register_helto_privacy_ui(
     @routes.post(f"{ROUTE_PREFIX}/suite/browser-attestation")
     async def post_helto_privacy_browser_attestation(request):
         from .suite_runtime import (
+            SuiteBlockedError,
             SuiteInventoryError,
+            process_suite_status_payload,
             record_browser_manifest_attestation,
+            verify_configured_process_suite,
         )
 
         denied = _bootstrap_mutation_denial(request, require_json=True)
@@ -246,13 +252,27 @@ def register_helto_privacy_ui(
             return _privacy_error_response(web, *denied)
         try:
             payload = await request.json()
+            if not isinstance(payload, Mapping):
+                raise SuiteInventoryError("invalid_browser_attestation")
             digest = str(payload.get("manifestDigest") or "")
-            record_browser_manifest_attestation(digest)
+            renderer = str(payload.get("renderer") or "")
+            record_browser_manifest_attestation(digest, renderer)
+            try:
+                report = verify_configured_process_suite()
+                status = report.status.value
+            except SuiteBlockedError as exc:
+                if exc.code != "suite_verification_not_configured":
+                    raise
+                status = process_suite_status_payload()["suiteStatus"]
             return web.json_response(
-                {"ok": True, "suiteManifestDigest": digest},
+                {
+                    "ok": True,
+                    "suiteManifestDigest": digest,
+                    "suiteStatus": status,
+                },
                 headers={"Cache-Control": "no-store"},
             )
-        except SuiteInventoryError:
+        except (SuiteBlockedError, SuiteInventoryError):
             return web.json_response(
                 {"ok": False, "error": "PRIVACY_SUITE_ASSET_MISMATCH"},
                 status=409,

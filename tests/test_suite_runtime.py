@@ -63,7 +63,6 @@ def _inventory(manifest):
             ConsumerSuiteDeclaration(
                 distribution=profile.distribution,
                 suite_id=manifest.id,
-                manifest_digest=manifest.digest,
             )
             for profile in manifest.profiles
         ),
@@ -166,7 +165,6 @@ def test_public_verification_hashes_artifacts_and_live_profile_registry(
             ConsumerSuiteDeclaration(
                 distribution=profile.distribution,
                 suite_id=manifest.id,
-                manifest_digest=manifest.digest,
             )
         )
 
@@ -176,7 +174,7 @@ def test_public_verification_hashes_artifacts_and_live_profile_registry(
     )
     assert unattested.status is SuiteStatus.INCOMPLETE
 
-    record_browser_manifest_attestation(manifest.digest)
+    record_browser_manifest_attestation(manifest.digest, environment.renderer)
     installation = SuiteInstallation(release)
     exact = installation.verify_installed(
         artifact_files=artifact_files,

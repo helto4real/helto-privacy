@@ -227,14 +227,44 @@ are `conflict`. An exact promoted installation becomes
 authorized activation is signed for both the manifest digest and measured
 inventory digest.
 
-Production callers use `SuiteInstallation.verify_installed(...)`, which hashes
-the five immutable artifact files and reads profile fingerprints and embedded
-suite declarations from the live process registries. The loaded browser module
-posts its observed manifest digest to the canonical attestation route, and that
-server-recorded value is included in verification. Callers do not construct or
-assert their own inventory. The interpreter identity is measured by
-`measure_runtime_environment(...)`; the ComfyUI backend/frontend identities and
-renderer come from the host installation probe.
+Production ComfyUI processes load the detached records through
+`bootstrap_configured_process_suite()`, which is invoked automatically when a
+consumer registers the shared UI. The default operator file is
+`~/.config/helto/process-suite.json`; `HELTO_PRIVACY_SUITE_CONFIG` may override
+it with an absolute path. An absent file leaves the process `incomplete`, while
+an invalid, untrusted, or inconsistent file latches it `conflict`. The file has
+this public-data-only shape:
+
+```json
+{
+  "schema": "helto.privacy.process-suite-config.v1",
+  "signedManifest": { "schema": "helto.privacy.signed-suite-manifest.v1" },
+  "promotion": { "schema": "helto.privacy.signed-suite-promotion.v1" },
+  "artifactFiles": {
+    "helto-privacy": "/absolute/path/to/helto_privacy-0.4.1-py3-none-any.whl"
+  },
+  "environment": {
+    "python": "3.13.14",
+    "comfyuiBackend": "<exact revision identity>",
+    "comfyuiFrontend": "<exact version>"
+  },
+  "activationRecord": "/absolute/optional/path/to/suite-activation.json"
+}
+```
+
+`artifactFiles` must contain all five manifest distributions, not only the
+abbreviated example entry. The shared wheel embeds the fixed public manifest
+and promotion trust roots. The config contains no private key, workflow,
+prompt, media, queue/history, credential, or decrypted value.
+
+Verification hashes the five immutable artifact files and reads profile
+fingerprints and embedded suite declarations from the live process registries.
+The loaded browser module posts its observed manifest digest and actual
+`legacy` or `vue` renderer to the canonical attestation route. The server binds
+that renderer to the signed environment tuple and only then measures the
+installed suite. Callers do not construct or assert their own inventory. A
+promoted exact process moves from `ready` to `activation-required`; this
+bootstrap never activates it.
 
 Activation does not decrypt product data. It atomically records the signed
 authorization and the pre-activation snapshot digest as the rollback boundary,

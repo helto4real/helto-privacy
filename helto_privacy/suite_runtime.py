@@ -42,7 +42,10 @@ _PROCESS_SUITE_INSTALLATION: SuiteInstallation | None = None
 _PROCESS_SUITE_CONFLICT = False
 _PROCESS_CONSUMER_DECLARATIONS: list[ConsumerSuiteDeclaration] = []
 _PROCESS_BROWSER_MANIFEST_DIGEST: str | None = None
+_PROCESS_BROWSER_RENDERER: str | None = None
 _PROCESS_BROWSER_CONFLICT = False
+_PROCESS_ARTIFACT_FILES: Mapping[str, str | Path] | None = None
+_PROCESS_ENVIRONMENTS: Mapping[str, EnvironmentTuple] | None = None
 
 
 class SuiteStatus(str, Enum):
@@ -75,13 +78,10 @@ class SuiteInventoryError(ValueError):
 class ConsumerSuiteDeclaration:
     distribution: str
     suite_id: str
-    manifest_digest: str
 
     def __post_init__(self) -> None:
         if not is_stable_id(self.distribution) or not is_stable_id(self.suite_id):
             raise SuiteInventoryError("invalid_consumer_suite_declaration")
-        if not is_sha256(self.manifest_digest):
-            raise SuiteInventoryError("invalid_consumer_manifest_digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -224,15 +224,15 @@ class SuiteInstallation:
                 )
 
             declaration_pairs = {
-                (declaration.suite_id, declaration.manifest_digest)
+                declaration.suite_id
                 for declaration in inventory.consumer_declarations
             }
-            declarations_by_distribution: dict[str, set[tuple[str, str]]] = {}
+            declarations_by_distribution: dict[str, set[str]] = {}
             for declaration in inventory.consumer_declarations:
                 declarations_by_distribution.setdefault(
                     declaration.distribution,
                     set(),
-                ).add((declaration.suite_id, declaration.manifest_digest))
+                ).add(declaration.suite_id)
             if (
                 len(declaration_pairs) > 1
                 or any(
@@ -270,7 +270,6 @@ class SuiteInstallation:
                 ConsumerSuiteDeclaration(
                     distribution=profile.distribution,
                     suite_id=self.manifest.id,
-                    manifest_digest=self.manifest.digest,
                 )
                 for profile in self.manifest.profiles
             }
@@ -512,14 +511,12 @@ def _inventory_canonical_bytes(inventory: InstalledSuiteInventory) -> bytes:
                 {
                     "distribution": declaration.distribution,
                     "suiteId": declaration.suite_id,
-                    "manifestDigest": declaration.manifest_digest,
                 }
                 for declaration in sorted(
                     inventory.consumer_declarations,
                     key=lambda item: (
                         item.distribution,
                         item.suite_id,
-                        item.manifest_digest,
                     ),
                 )
             ],
@@ -566,13 +563,16 @@ def register_consumer_suite_declaration(
     return declaration
 
 
-def record_browser_manifest_attestation(manifest_digest: str) -> str:
-    """Record the manifest digest observed by the loaded browser runtime."""
+def record_browser_manifest_attestation(
+    manifest_digest: str,
+    renderer: str,
+) -> str:
+    """Record the manifest digest and renderer observed by the browser runtime."""
 
     global _PROCESS_BROWSER_CONFLICT, _PROCESS_BROWSER_MANIFEST_DIGEST
-    global _PROCESS_SUITE_CONFLICT
-    if not is_sha256(manifest_digest):
-        raise SuiteInventoryError("invalid_browser_manifest_digest")
+    global _PROCESS_BROWSER_RENDERER, _PROCESS_SUITE_CONFLICT
+    if not is_sha256(manifest_digest) or renderer not in {"legacy", "vue"}:
+        raise SuiteInventoryError("invalid_browser_attestation")
     with _PROCESS_SUITE_LOCK:
         if _PROCESS_BROWSER_CONFLICT:
             raise SuiteInventoryError("browser_manifest_conflict")
@@ -589,6 +589,12 @@ def record_browser_manifest_attestation(manifest_digest: str) -> str:
             _PROCESS_BROWSER_CONFLICT = True
             _PROCESS_SUITE_CONFLICT = True
             raise SuiteInventoryError("browser_manifest_conflict")
+        if _PROCESS_BROWSER_RENDERER is None:
+            _PROCESS_BROWSER_RENDERER = renderer
+        elif _PROCESS_BROWSER_RENDERER != renderer:
+            _PROCESS_BROWSER_CONFLICT = True
+            _PROCESS_SUITE_CONFLICT = True
+            raise SuiteInventoryError("browser_renderer_conflict")
         return manifest_digest
 
 
@@ -718,6 +724,77 @@ def register_process_suite(installation: SuiteInstallation) -> SuiteInstallation
             _PROCESS_SUITE_CONFLICT = True
             raise SuiteBlockedError("suite_process_conflict")
         return _PROCESS_SUITE_INSTALLATION
+
+
+def configure_process_suite_verification(
+    installation: SuiteInstallation,
+    *,
+    artifact_files: Mapping[str, str | Path],
+    environments: tuple[EnvironmentTuple, ...],
+) -> SuiteInstallation:
+    """Bind product-data-free installed-byte inputs to the one process suite."""
+
+    global _PROCESS_ARTIFACT_FILES, _PROCESS_ENVIRONMENTS, _PROCESS_SUITE_CONFLICT
+    if not isinstance(installation, SuiteInstallation):
+        raise SuiteBlockedError("invalid_process_suite")
+    if not isinstance(artifact_files, Mapping) or not isinstance(environments, tuple):
+        raise SuiteBlockedError("invalid_suite_verification_configuration")
+    normalized = {
+        str(distribution): Path(path)
+        for distribution, path in artifact_files.items()
+    }
+    normalized_environments: dict[str, EnvironmentTuple] = {}
+    for environment in environments:
+        if not isinstance(environment, EnvironmentTuple):
+            raise SuiteBlockedError("invalid_suite_verification_configuration")
+        if environment.renderer in normalized_environments:
+            raise SuiteBlockedError("invalid_suite_verification_configuration")
+        normalized_environments[environment.renderer] = environment
+    if not normalized_environments:
+        raise SuiteBlockedError("invalid_suite_verification_configuration")
+    with _PROCESS_SUITE_LOCK:
+        if _PROCESS_SUITE_INSTALLATION is not installation:
+            _PROCESS_SUITE_CONFLICT = True
+            raise SuiteBlockedError("suite_process_conflict")
+        if _PROCESS_ARTIFACT_FILES is None:
+            _PROCESS_ARTIFACT_FILES = normalized
+            _PROCESS_ENVIRONMENTS = normalized_environments
+        elif (
+            dict(_PROCESS_ARTIFACT_FILES) != normalized
+            or dict(_PROCESS_ENVIRONMENTS or {}) != normalized_environments
+        ):
+            _PROCESS_SUITE_CONFLICT = True
+            raise SuiteBlockedError("suite_verification_configuration_conflict")
+    return installation
+
+
+def verify_configured_process_suite() -> SuiteReadinessReport:
+    """Measure the configured process suite after browser attestation."""
+
+    with _PROCESS_SUITE_LOCK:
+        if _PROCESS_SUITE_CONFLICT or _PROCESS_SUITE_INSTALLATION is None:
+            raise SuiteBlockedError("suite_incomplete")
+        if _PROCESS_ARTIFACT_FILES is None or _PROCESS_ENVIRONMENTS is None:
+            raise SuiteBlockedError("suite_verification_not_configured")
+        if _PROCESS_BROWSER_RENDERER is None:
+            raise SuiteBlockedError("suite_browser_not_attested")
+        installation = _PROCESS_SUITE_INSTALLATION
+        artifact_files = dict(_PROCESS_ARTIFACT_FILES)
+        environment = _PROCESS_ENVIRONMENTS.get(_PROCESS_BROWSER_RENDERER)
+        if environment is None:
+            raise SuiteBlockedError("suite_renderer_not_configured")
+    return installation.verify_installed(
+        artifact_files=artifact_files,
+        environment=environment,
+    )
+
+
+def block_process_suite_configuration() -> None:
+    """Fail closed after a configured suite record cannot be trusted."""
+
+    global _PROCESS_SUITE_CONFLICT
+    with _PROCESS_SUITE_LOCK:
+        _PROCESS_SUITE_CONFLICT = True
 
 
 def require_active_process_suite() -> SuiteInstallation:

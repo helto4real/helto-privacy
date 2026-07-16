@@ -3,7 +3,7 @@
 `helto-privacy` owns the release-gate vocabulary and evidence verifier for the
 coordinated five-artifact suite. The built-in catalogs are:
 
-- `helto_privacy/acceptance/data/catalog-v1.json`
+- `helto_privacy/acceptance/data/catalog-v2.json`
 - `helto_privacy/acceptance/data/historical-fixtures-v1.json`
 
 The acceptance catalog declares stable evidence IDs, exact supported
@@ -28,6 +28,12 @@ fault results. `verify_acceptance_evidence()` accepts a manifest only when:
 compiled shared handle it reached. Consumer source/artifact scans use
 `scan_consumer_privacy_duplication()` to reject local crypto, token authority,
 privacy route, or vendored fallback implementations.
+
+`installation.production-bootstrap` starts from only the five public artifacts
+plus detached signed suite records. It must use the packaged trust roots and
+consumer declarations—not a test-only bootstrap—connect a real browser in
+verification mode, and prove the process changes from `ready` to
+`activation-required` without activation or access to live product data.
 
 ## Synthetic-only leak and fault testing
 

@@ -3,8 +3,10 @@
 This immutable `cutover-pending` suite replaces the failed
 `helto-suite-2026-07-15.3` candidate. Its signed manifest contains the corrected
 AIO `v0.1.1` artifact and the four unchanged artifacts from the previous
-candidate. The complete public-only zero-waiver reproduction now passes, but no
-promotion signature or real-install activation has been authorized.
+candidate. The original public-only reproduction passed its declared catalog,
+but the later promotion preflight found that the catalog had not exercised a
+production process-suite bootstrap. The suite is therefore not promotable and
+is superseded by a new immutable candidate rather than modified.
 
 ## Signed identities
 
@@ -91,3 +93,20 @@ custom-node link, credential, or key content was inspected or changed. Every
 temporary browser and ComfyUI process is stopped. The suite remains
 `cutover-pending`; public reproduction success does not itself authorize a
 promotion signature, real installation, activation, or old-workflow access.
+
+## Promotion preflight failure
+
+The authorized promotion preflight proved three missing production paths that
+the disposable acceptance bootstrap had supplied only for the test process:
+
+- no published component loaded the detached signed manifest and promotion into
+  the real ComfyUI process;
+- none of the four published consumers registered its suite declaration; and
+- consumer frontends required `active` before connecting, so they could not
+  submit the browser attestation needed to reach `activation-required`.
+
+Installing the five immutable artifacts would consequently leave the real
+server `incomplete`. No real installation was attempted, and the locally
+created promotion record was discarded before commit or publication. The
+replacement candidate must exercise its packaged bootstrap from a public-only
+install and prove the full `ready` to `activation-required` transition.

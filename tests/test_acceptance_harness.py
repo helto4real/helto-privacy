@@ -94,6 +94,7 @@ def test_builtin_catalogs_are_exactly_bound_and_historical_fixtures_regenerate()
     root = Path(__file__).parent / "fixtures" / "historical"
 
     assert catalog.fixture_catalog_sha256 == fixture_catalog.digest
+    assert catalog.version == 2
     assert {environment.renderer for environment in catalog.environments} == {
         "legacy",
         "vue",
@@ -101,6 +102,7 @@ def test_builtin_catalogs_are_exactly_bound_and_historical_fixtures_regenerate()
     assert {requirement.id for requirement in catalog.requirements} >= {
         "fixtures.historical-readers",
         "consumer.real-adapters",
+        "installation.production-bootstrap",
         "registration.all-orders",
         "oracle.synthetic-canaries",
         "faults.deterministic-campaigns",

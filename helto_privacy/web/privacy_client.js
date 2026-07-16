@@ -411,6 +411,7 @@ export async function connectAttestedPrivacyProfileClient({
   packId,
   profileFingerprint,
   suiteManifestDigest,
+  renderer = "legacy",
   promptUnlock = async () => null,
 }) {
   const identity = normalizeAttestedBrowserIdentity({
@@ -428,7 +429,7 @@ export async function connectAttestedPrivacyProfileClient({
   ) {
     throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_ATTESTATION_DRIFT");
   }
-  await attestFixedBrowserManifest(identity.suiteManifestDigest);
+  await attestFixedBrowserManifest(identity.suiteManifestDigest, renderer);
   const requestClient = createAttestedPrivacyRequestClient({
     packId: identity.packId,
     profileFingerprint: identity.profileFingerprint,
@@ -1462,7 +1463,10 @@ async function fetchFixedAttestation(target) {
   return payload;
 }
 
-async function attestFixedBrowserManifest(manifestDigest) {
+async function attestFixedBrowserManifest(manifestDigest, renderer) {
+  if (!["legacy", "vue"].includes(renderer)) {
+    throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_ATTESTATION_UNAVAILABLE");
+  }
   let response;
   try {
     response = await globalThis.fetch(`${ROUTE_PREFIX}/suite/browser-attestation`, {
@@ -1473,7 +1477,7 @@ async function attestFixedBrowserManifest(manifestDigest) {
       },
       credentials: "same-origin",
       cache: "no-store",
-      body: JSON.stringify({ manifestDigest }),
+      body: JSON.stringify({ manifestDigest, renderer }),
     });
   } catch {
     throw new PrivacyBrowserRequestError("PRIVACY_BROWSER_ATTESTATION_UNAVAILABLE");

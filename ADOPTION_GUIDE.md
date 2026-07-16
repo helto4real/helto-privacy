@@ -129,6 +129,27 @@ from helto_privacy import register_helto_privacy_ui
 register_helto_privacy_ui()
 ```
 
+The managed profile installation must also embed the coordinated suite ID and
+register it only after the profile has installed successfully:
+
+```python
+from helto_privacy import (
+    ConsumerSuiteDeclaration,
+    register_consumer_suite_declaration,
+)
+
+SUITE_ID = "<coordinated immutable suite id>"
+
+# After install(profile, adapters) has returned successfully:
+register_consumer_suite_declaration(
+    ConsumerSuiteDeclaration(profile.distribution, SUITE_ID)
+)
+```
+
+Do not embed a manifest digest in the consumer artifact. The detached manifest
+binds the immutable suite ID to the consumer artifact hash, avoiding a circular
+artifact-hash dependency.
+
 This one call (idempotent across packs — the first pack in the ComfyUI
 process wins) registers the
 canonical endpoints `/helto_privacy/status`, `/unlock`, `/lock`,

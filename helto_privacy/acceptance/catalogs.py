@@ -11,7 +11,7 @@ from .models import AcceptanceCatalog, AcceptanceError, load_acceptance_catalog
 
 
 ACCEPTANCE_DATA_ROOT = Path(__file__).resolve().parent / "data"
-BUILTIN_ACCEPTANCE_CATALOG = ACCEPTANCE_DATA_ROOT / "catalog-v1.json"
+BUILTIN_ACCEPTANCE_CATALOG = ACCEPTANCE_DATA_ROOT / "catalog-v2.json"
 BUILTIN_HISTORICAL_FIXTURE_CATALOG = (
     ACCEPTANCE_DATA_ROOT / "historical-fixtures-v1.json"
 )

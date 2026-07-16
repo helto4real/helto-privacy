@@ -40,7 +40,10 @@ def isolated_privacy_paths(tmp_path, monkeypatch):
     monkeypatch.setattr(suite_runtime, "_PROCESS_SUITE_CONFLICT", False)
     monkeypatch.setattr(suite_runtime, "_PROCESS_CONSUMER_DECLARATIONS", [])
     monkeypatch.setattr(suite_runtime, "_PROCESS_BROWSER_MANIFEST_DIGEST", None)
+    monkeypatch.setattr(suite_runtime, "_PROCESS_BROWSER_RENDERER", None)
     monkeypatch.setattr(suite_runtime, "_PROCESS_BROWSER_CONFLICT", False)
+    monkeypatch.setattr(suite_runtime, "_PROCESS_ARTIFACT_FILES", None)
+    monkeypatch.setattr(suite_runtime, "_PROCESS_ENVIRONMENTS", None)
     return (
         active_operation_gate,
         active_route_gate,

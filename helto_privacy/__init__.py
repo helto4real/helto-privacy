@@ -385,6 +385,8 @@ from .suite_runtime import (
     SuiteInventoryError,
     SuiteReadinessReport,
     SuiteStatus,
+    block_process_suite_configuration,
+    configure_process_suite_verification,
     measure_installed_suite,
     measure_runtime_environment,
     process_suite_status_payload,
@@ -392,6 +394,14 @@ from .suite_runtime import (
     register_consumer_suite_declaration,
     register_process_suite,
     require_active_process_suite,
+    verify_configured_process_suite,
+)
+from .suite_bootstrap import (
+    DEFAULT_PROCESS_SUITE_CONFIG,
+    PROCESS_SUITE_CONFIG_SCHEMA_V1,
+    SuiteBootstrapError,
+    bootstrap_configured_process_suite,
+    configured_process_suite_path,
 )
 
 __all__ = [
@@ -405,6 +415,7 @@ __all__ = [
     "ActivationRecord",
     "ActivationRecordStore",
     "ActivationRequest",
+    "DEFAULT_PROCESS_SUITE_CONFIG",
     "AdapterBindingError",
     "AdapterSlot",
     "ArtifactDeclaration",
@@ -527,6 +538,7 @@ __all__ = [
     "ExternalJsonValueTransitionAdapter",
     "ProfileConflictError",
     "ProfileIdentity",
+    "PROCESS_SUITE_CONFIG_SCHEMA_V1",
     "ProfileResource",
     "ProfileValidationError",
     "ProtectedField",
@@ -616,6 +628,7 @@ __all__ = [
     "SourceIdentity",
     "SuiteActivationError",
     "SuiteBlockedError",
+    "SuiteBootstrapError",
     "SuiteInstallation",
     "SuiteInventoryError",
     "SuiteManifest",
@@ -646,6 +659,8 @@ __all__ = [
     "add_keys_to_keystore",
     "aiohttp_check_privacy_token",
     "aio_v1_reader_unit",
+    "block_process_suite_configuration",
+    "bootstrap_configured_process_suite",
     "authorize_privacy_request",
     "apply_external_operation",
     "change_keystore_password",
@@ -656,6 +671,8 @@ __all__ = [
     "commit_artifact_mode_transition",
     "commit_record_mode_transition_value",
     "commit_singleton_mode_transition_value",
+    "configure_process_suite_verification",
+    "configured_process_suite_path",
     "confirm_record_mutation",
     "generate_artifact_owner_id",
     "generate_private_record_id",
@@ -730,4 +747,5 @@ __all__ = [
     "verify_singleton_mode_transition_value",
     "verify_suite_manifest",
     "verify_suite_release",
+    "verify_configured_process_suite",
 ]

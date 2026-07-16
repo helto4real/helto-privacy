@@ -2108,6 +2108,7 @@ async function connectPrivacyPackAfterGate({
       packId: id,
       profileFingerprint: fingerprint,
       suiteManifestDigest: suiteDigest,
+      renderer: detectComfyRenderer(app),
       promptUnlock: ({ error }) => showPrivacyKeystoreDialog(
         isPrivacySetupRequiredError(error) ? "setup" : "unlock",
       ),
@@ -2421,6 +2422,26 @@ async function connectPrivacyPackAfterGate({
   });
   entry.surface?.refresh().catch(() => {});
   return entry.pack;
+}
+
+function detectComfyRenderer(app) {
+  const readSetting = (name) => {
+    const setting = app?.extensionManager?.setting?.get?.(name)
+      ?? app?.ui?.settings?.getSettingValue?.(name);
+    if (typeof setting === "object" && setting !== null) {
+      return setting.value ?? setting.id ?? setting.name ?? setting.text;
+    }
+    return setting;
+  };
+  const renderer = String(readSetting("Comfy.Graph.Renderer") ?? "").toLowerCase();
+  if (/litegraph|canvas|classic|legacy/.test(renderer)) return "legacy";
+  if (/vue|dom|modern|nodes?\s*2|2\.0/.test(renderer)) return "vue";
+  const vueNodes = readSetting("Comfy.VueNodes.Enabled");
+  const vueValue = String(vueNodes ?? "").toLowerCase();
+  if (vueNodes === true || vueValue === "true" || vueValue === "enabled") return "vue";
+  if (vueNodes === false || vueValue === "false" || vueValue === "disabled") return "legacy";
+  if (globalThis.document?.querySelector?.(".lg-node")) return "vue";
+  return "legacy";
 }
 
 function connectionIdentity(options) {
