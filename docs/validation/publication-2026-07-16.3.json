@@ -1,0 +1,93 @@
+{
+  "schema": "helto.privacy.suite-publication.v1",
+  "suiteId": "helto-suite-2026-07-16.3",
+  "manifestDigest": "946a3a4eb4be098adc7abf53ab33f6ee39b015a03e67a028a679f25e1f848ecf",
+  "status": "ready",
+  "immutableReleaseSettingsEnabled": true,
+  "tagSignature": {
+    "algorithm": "OpenPGP",
+    "primaryKeyFingerprint": "3C05EB796A428085D295B340392AFB734FE22D59"
+  },
+  "packages": [
+    {
+      "distribution": "comfyui-all-on-one-image-generation-node",
+      "repository": "https://github.com/helto4real/comfyui-all-on-one-image-generation-node",
+      "sourceRevision": "cf025e8381bb4a40b34a84426347192840daf900",
+      "tag": "v0.1.3",
+      "tagObject": "a1c28aa297bcf68b20b794e77795d8e65279df15",
+      "releaseUrl": "https://github.com/helto4real/comfyui-all-on-one-image-generation-node/releases/tag/v0.1.3",
+      "prerelease": true,
+      "immutable": true,
+      "artifact": {
+        "filename": "comfyui-all-on-one-image-generation-node-0.1.3+cf025e8.tar",
+        "sha256": "57c4f9351b11e8f744c60834b31ca3b98db8c5a3fa7d1c01d8bf3c3748c4ca7c"
+      }
+    },
+    {
+      "distribution": "comfyui-helto-director",
+      "repository": "https://github.com/helto4real/comfyui-helto-director",
+      "sourceRevision": "b29105ccc09aa4b5849c81adde1ebbdd58875c03",
+      "tag": "v0.0.3",
+      "tagObject": "958fe5254738035cfb87cf0dd0da65c40282b443",
+      "releaseUrl": "https://github.com/helto4real/comfyui-helto-director/releases/tag/v0.0.3",
+      "prerelease": true,
+      "immutable": true,
+      "artifact": {
+        "filename": "comfyui-helto-director-0.0.3+b29105c.tar",
+        "sha256": "7bb2f15e57af98f5e54ac6b51836ee6c8758be0e941cf20cb24083afb4dc48cf"
+      }
+    },
+    {
+      "distribution": "comfyui-helto-smartprompt",
+      "repository": "https://github.com/helto4real/comfyui-helto-smartprompt",
+      "sourceRevision": "6e2e5c7d5b6af63185de1eec0946370d5cf9150e",
+      "tag": "v0.1.2",
+      "tagObject": "f0a068ab3e5904c3ccfaa653519d0d339bb7f99c",
+      "releaseUrl": "https://github.com/helto4real/comfyui-helto-smartprompt/releases/tag/v0.1.2",
+      "prerelease": true,
+      "immutable": true,
+      "artifact": {
+        "filename": "comfyui-helto-smartprompt-0.1.2+6e2e5c7.tar",
+        "sha256": "5096a408ce02b57995004f81a6667429fce35c85bcaab6c081702249b6652e0e"
+      }
+    },
+    {
+      "distribution": "comfyui-utils",
+      "repository": "https://github.com/helto4real/comfyui-utils",
+      "sourceRevision": "77872eba9874f9b32644b65f2449e183df62daff",
+      "tag": "v0.1.2",
+      "tagObject": "4d6ca494223bbba9314d8a9c53d62cae3122eb8f",
+      "releaseUrl": "https://github.com/helto4real/comfyui-utils/releases/tag/v0.1.2",
+      "prerelease": true,
+      "immutable": true,
+      "artifact": {
+        "filename": "comfyui-utils-0.1.2+77872eb.tar",
+        "sha256": "aa454c1979f9e3b49d350335b862756873f471aae4eccb9b6545ba394a488265"
+      }
+    },
+    {
+      "distribution": "helto-privacy",
+      "repository": "https://github.com/helto4real/helto-privacy",
+      "sourceRevision": "4a48ff0bb518eee385881d30cf8632f29a65cb03",
+      "tag": "v0.4.2",
+      "tagObject": "168f0cad089554e708e3aaf40ad6e576d08b3277",
+      "releaseUrl": "https://github.com/helto4real/helto-privacy/releases/tag/v0.4.2",
+      "prerelease": true,
+      "immutable": true,
+      "artifact": {
+        "filename": "helto_privacy-0.4.2-py3-none-any.whl",
+        "sha256": "2e0c31106383cb245cb479155fa2778b5fc86c32ab142be0a290c236a3a8c8bf"
+      }
+    }
+  ],
+  "suiteRelease": {
+    "repository": "https://github.com/helto4real/helto-privacy",
+    "tag": "helto-suite-2026-07-16.3",
+    "tagObject": "7629889b00909b5c7fed0052c448c5fca56bdceb",
+    "releaseUrl": "https://github.com/helto4real/helto-privacy/releases/tag/helto-suite-2026-07-16.3",
+    "prerelease": true,
+    "immutable": true,
+    "assetCount": 22
+  },
+  "verifiedAt": "2026-07-16T16:29:35Z"
+}
