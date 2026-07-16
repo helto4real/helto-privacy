@@ -1486,7 +1486,10 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
   if (mode === "auto") {
     const status = await fetchPrivacyStatus();
     if (!status.keystoreInitialized) mode = "setup";
-    else if (status.keystoreLocked) mode = "unlock";
+    else if (
+      status.keystoreLocked
+      || privacySessionSnapshot().state !== "unlocked"
+    ) mode = "unlock";
     else return status;
   }
   const spec = MODES[mode] ?? MODES.unlock;

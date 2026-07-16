@@ -2,6 +2,8 @@ import subprocess
 import textwrap
 from pathlib import Path
 
+import pytest
+
 from tests.privacy_js_test_support import write_privacy_client_dependencies
 
 
@@ -207,7 +209,11 @@ def test_reencrypt_writes_registered_json_envelope(tmp_path):
     )
 
 
-def test_locked_encryption_opens_auto_unlock_flow_and_retries(tmp_path):
+@pytest.mark.parametrize("backend_locked", [True, False])
+def test_missing_browser_token_opens_auto_unlock_flow_and_retries(
+    tmp_path,
+    backend_locked,
+):
     run_node_module_test(
         tmp_path,
         """
@@ -284,7 +290,11 @@ def test_locked_encryption_opens_auto_unlock_flow_and_retries(tmp_path):
         globalThis.fetch = async (url) => {
           fetchCalls.push(String(url));
           if (String(url).endsWith("/status")) {
-            return fakeResponse({ ok: true, keystoreInitialized: true, keystoreLocked: true });
+            return fakeResponse({
+              ok: true,
+              keystoreInitialized: true,
+              keystoreLocked: __BACKEND_LOCKED__,
+            });
           }
           if (String(url).endsWith("/unlock")) {
             return fakeResponse({ ok: true, token: "token-1", keystoreInitialized: true, keystoreLocked: false });
@@ -315,7 +325,7 @@ def test_locked_encryption_opens_auto_unlock_flow_and_retries(tmp_path):
         assert(fetchCalls.some((url) => url.endsWith("/status")));
         assert(fetchCalls.some((url) => url.endsWith("/unlock")));
         assert.equal(storage.get("helto_privacy_token"), "token-1");
-        """,
+        """.replace("__BACKEND_LOCKED__", str(backend_locked).lower()),
     )
 
 
