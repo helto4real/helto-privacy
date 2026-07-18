@@ -29,6 +29,11 @@ ENVELOPE_VERSION = 1
 ALGORITHM = "AES-256-GCM"
 KEY_FILE_NAME = "privacy_key.json"
 BYTE_CHUNK_SIZE = 64 * 1024 * 1024
+ERROR_KEY_MISSING = "PRIVACY_KEY_MISSING"
+ERROR_KEY_INVALID = "PRIVACY_KEY_INVALID"
+ERROR_KEY_MISMATCH = "PRIVACY_KEY_MISMATCH"
+ERROR_DECRYPT_FAILED = "PRIVACY_DECRYPT_FAILED"
+ERROR_PAYLOAD_INVALID = "PRIVACY_PAYLOAD_INVALID"
 
 
 class PrivacyError(RuntimeError):
@@ -136,9 +141,9 @@ class PrivacyEnvelopeCodec:
             try:
                 payload = json.loads(payload)
             except Exception as exc:
-                raise PrivacyError(f"Encrypted state payload is not valid JSON: {exc}") from exc
+                raise PrivacyError(f"{ERROR_PAYLOAD_INVALID}: Encrypted state payload is not valid JSON: {exc}") from exc
         if not self.is_encrypted_payload(payload):
-            raise PrivacyError("Data is not an encrypted privacy payload.")
+            raise PrivacyError(f"{ERROR_PAYLOAD_INVALID}: Data is not an encrypted privacy payload.")
         key_id = str(payload.get("keyId", ""))
         key = self._key_for_payload(
             key_id,
@@ -153,9 +158,9 @@ class PrivacyEnvelopeCodec:
         except PrivacyError:
             raise
         except Exception as exc:  # noqa: BLE001 - auth/tag/key failures should be user-readable.
-            raise PrivacyError(f"Could not decrypt state payload: {exc}") from exc
+            raise PrivacyError(f"{ERROR_DECRYPT_FAILED}: Could not decrypt state payload: {exc}") from exc
         if not isinstance(loaded, Mapping):
-            raise PrivacyError("Encrypted state payload did not contain an object.")
+            raise PrivacyError(f"{ERROR_PAYLOAD_INVALID}: Encrypted state payload did not contain an object.")
         return dict(loaded)
 
     def encrypt_bytes(
@@ -239,13 +244,13 @@ class PrivacyEnvelopeCodec:
                 key = _b64url_decode(str(payload.get("key", "")))
                 key_id = str(payload.get("keyId", "")).strip()
             except Exception as exc:  # noqa: BLE001 - bad local key should become a readable privacy error.
-                raise PrivacyError(f"Could not read privacy key file '{path}': {exc}") from exc
+                raise PrivacyError(f"{ERROR_KEY_INVALID}: Could not read privacy key file '{path}': {exc}") from exc
             if len(key) != 32 or not key_id:
-                raise PrivacyError(f"Privacy key file '{path}' is malformed.")
+                raise PrivacyError(f"{ERROR_KEY_INVALID}: Privacy key file '{path}' is malformed.")
             return key, key_id
 
         if not create:
-            raise PrivacyError(f"Privacy key file is missing: {path}")
+            raise PrivacyError(f"{ERROR_KEY_MISSING}: Privacy key file is missing: {path}")
 
         key = secrets.token_bytes(32)
         key_id = _b64url_encode(hashlib.sha256(key).digest()[:12])
@@ -273,7 +278,7 @@ class PrivacyEnvelopeCodec:
             alt = self.key_provider.session_key_for(payload_key_id)
             if alt is not None:
                 return alt
-        raise PrivacyError(mismatch_error)
+        raise PrivacyError(f"{ERROR_KEY_MISMATCH}: {mismatch_error}")
 
     def _aad(self, key_id: str) -> bytes:
         return f"{self.schema}|{ENVELOPE_VERSION}|{ALGORITHM}|{key_id}".encode("utf-8")

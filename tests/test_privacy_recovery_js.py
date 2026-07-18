@@ -319,3 +319,115 @@ def test_fail_closed_helper_rejects_invalid_encryption_response(tmp_path):
         );
         """,
     )
+
+
+def test_unreadable_value_classifier_preserves_locked_envelopes(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_LOCKED: locked")), false);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_TOKEN_REQUIRED: unlock")), false);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_KEYSTORE_UNINITIALIZED: missing")), true);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_KEY_MISMATCH: wrong key")), true);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_DECRYPT_FAILED: invalid tag")), true);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("Failed to fetch")), false);
+
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_KEYSTORE_UNINITIALIZED: missing")), true);
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_KEY_MISSING: gone")), true);
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_KEY_MISMATCH: wrong key")), false);
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_LOCKED: locked")), false);
+        """,
+    )
+
+
+def test_unreadable_reset_confirmation_is_single_flight_and_defaults_to_keep(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        class FakeElement {
+          constructor(tag, ownerDocument) {
+            this.tagName = tag.toUpperCase();
+            this.ownerDocument = ownerDocument;
+            this.children = [];
+            this.listeners = {};
+            this.className = "";
+            this.textContent = "";
+            this.parentNode = null;
+          }
+          append(...items) {
+            for (const item of items) {
+              item.parentNode = this;
+              this.children.push(item);
+            }
+          }
+          remove() {
+            if (!this.parentNode) return;
+            const index = this.parentNode.children.indexOf(this);
+            if (index >= 0) this.parentNode.children.splice(index, 1);
+            this.parentNode = null;
+          }
+          setAttribute() {}
+          focus() { this.ownerDocument.activeElement = this; }
+          addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+          click() {
+            const event = { target: this };
+            for (const fn of this.listeners.click ?? []) fn(event);
+          }
+          querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+          querySelectorAll(selector) {
+            const found = [];
+            const matches = (element) => {
+              if (selector === "button") return element.tagName === "BUTTON";
+              if (selector.startsWith(".")) {
+                return String(element.className).split(/\\s+/).includes(selector.slice(1));
+              }
+              return false;
+            };
+            const visit = (element) => {
+              if (matches(element)) found.push(element);
+              for (const child of element.children || []) visit(child);
+            };
+            visit(this);
+            return found;
+          }
+        }
+
+        class FakeDocument {
+          constructor() {
+            this.head = new FakeElement("head", this);
+            this.body = new FakeElement("body", this);
+            this.activeElement = null;
+          }
+          createElement(tag) { return new FakeElement(tag, this); }
+          getElementById(id) {
+            return [...this.head.children, ...this.body.children].find((item) => item.id === id) || null;
+          }
+          querySelector(selector) { return this.body.querySelector(selector); }
+          querySelectorAll(selector) { return this.body.querySelectorAll(selector); }
+        }
+
+        const documentRef = new FakeDocument();
+        const first = privacy.confirmUnreadablePrivacyReset({ documentRef });
+        const second = privacy.confirmUnreadablePrivacyReset({ documentRef });
+
+        assert.equal(privacy.isUnreadablePrivacyResetDialogOpen(documentRef), true);
+        assert.equal(documentRef.querySelectorAll(".helto-privacy-unreadable-dialog").length, 1);
+        const buttons = documentRef.querySelectorAll("button");
+        assert.deepEqual(buttons.map((button) => button.textContent), [
+          "Keep encrypted values",
+          "Reset affected values",
+        ]);
+        assert.equal(documentRef.activeElement, buttons[0]);
+        assert.equal(buttons[1].className, "danger");
+
+        buttons[0].click();
+        assert.equal(await first, false);
+        assert.equal(await second, false);
+        assert.equal(privacy.isUnreadablePrivacyResetDialogOpen(documentRef), false);
+
+        const destructive = privacy.confirmUnreadablePrivacyReset({ documentRef });
+        documentRef.querySelectorAll("button")[1].click();
+        assert.equal(await destructive, true);
+        assert.equal(await privacy.confirmUnreadablePrivacyReset({ documentRef: null }), false);
+        """,
+    )

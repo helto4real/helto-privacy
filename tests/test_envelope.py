@@ -43,6 +43,32 @@ def test_state_envelope_round_trip_and_structure(tmp_path):
     assert codec.decrypt_state(payload, base_dir=tmp_path) == {"secret": "prompt", "count": 2}
 
 
+def test_state_envelope_reports_missing_key_with_stable_code(tmp_path):
+    codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
+    payload = codec.encrypt_state({"secret": "prompt"}, base_dir=tmp_path / "source")
+
+    with pytest.raises(PrivacyError, match="PRIVACY_KEY_MISSING"):
+        codec.decrypt_state(payload, base_dir=tmp_path / "missing")
+
+
+def test_state_envelope_reports_wrong_key_with_stable_code(tmp_path):
+    codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
+    payload = codec.encrypt_state({"secret": "prompt"}, base_dir=tmp_path / "source")
+    codec.encrypt_state({"secret": "other"}, base_dir=tmp_path / "other")
+
+    with pytest.raises(PrivacyError, match="PRIVACY_KEY_MISMATCH"):
+        codec.decrypt_state(payload, base_dir=tmp_path / "other")
+
+
+def test_state_envelope_reports_tamper_with_stable_code(tmp_path):
+    codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
+    payload = codec.encrypt_state({"secret": "prompt"}, base_dir=tmp_path)
+    payload["ciphertext"] = "AA"
+
+    with pytest.raises(PrivacyError, match="PRIVACY_DECRYPT_FAILED"):
+        codec.decrypt_state(payload, base_dir=tmp_path)
+
+
 def test_director_schema_is_aes_gcm_aad_compatible_with_pre_extraction_code(tmp_path):
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
     state = {"secret": "prompt", "nested": {"a": 1}}

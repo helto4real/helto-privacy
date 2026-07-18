@@ -14,10 +14,31 @@ const PRIVACY_TOKEN_HEADER = "X-Helto-Privacy-Token";
 const PRIVACY_TOKEN_STORAGE_KEY = "helto_privacy_token";
 const PRIVACY_LOCKED_CODES = ["PRIVACY_LOCKED", "PRIVACY_TOKEN_REQUIRED"];
 const PRIVACY_SETUP_CODES = ["PRIVACY_KEYSTORE_UNINITIALIZED"];
+const PRIVACY_UNREADABLE_VALUE_CODES = [
+  "PRIVACY_KEYSTORE_UNINITIALIZED",
+  "PRIVACY_KEYSTORE_INVALID",
+  "PRIVACY_KEY_MISSING",
+  "PRIVACY_KEY_INVALID",
+  "PRIVACY_KEY_MISMATCH",
+  "PRIVACY_DECRYPT_FAILED",
+  "PRIVACY_PAYLOAD_INVALID",
+];
+const PRIVACY_UNREADABLE_VALUE_MESSAGES = [
+  "different local privacy key",
+  "privacy key file is missing",
+  "could not read privacy key file",
+  "could not decrypt state payload",
+  "could not decrypt timeline director data",
+  "unsupported legacy privacy schema",
+  "unsupported encrypted privacy schema",
+  "unsupported legacy aio privacy payload",
+  "unsupported aio privacy payload schema",
+];
 const PRIVACY_ENVELOPE_ALGORITHM = "AES-256-GCM";
 const LEGACY_ENCRYPTED_PREFIX = "__HELTO_ENC__:";
 const DIALOG_CLASS = "helto-privacy-keystore-dialog";
 const RECOVERY_DIALOG_CLASS = "helto-privacy-recovery-dialog";
+const UNREADABLE_DIALOG_CLASS = "helto-privacy-unreadable-dialog";
 const STYLE_ID = "helto-privacy-keystore-ui-style";
 const RECOVERY_ISSUE_TYPES = Object.freeze({
   LEGACY_VALUE: "legacy_encrypted_value",
@@ -31,6 +52,7 @@ export const PRIVACY_RECOVERY_ISSUE_TYPES = RECOVERY_ISSUE_TYPES;
 const RECOVERY_DESCRIPTORS = new Map();
 const OWNER_MEMOS = new WeakMap();
 const FALLBACK_OWNER = {};
+let unreadableResetDialogPromise = null;
 
 // ---------------------------------------------------------------------------
 // Token storage
@@ -86,6 +108,27 @@ export function isPrivacySetupRequiredError(error) {
 
 export function isPrivacyUnlockRequiredError(error) {
   return isPrivacyLockedError(error) || isPrivacySetupRequiredError(error);
+}
+
+export function isUnreadablePrivacyValueError(error) {
+  if (isPrivacyLockedError(error)) return false;
+  const message = String(error?.message ?? error ?? "").toLowerCase();
+  return PRIVACY_UNREADABLE_VALUE_CODES.some((code) => message.includes(code.toLowerCase()))
+    || PRIVACY_UNREADABLE_VALUE_MESSAGES.some((fragment) => message.includes(fragment));
+}
+
+export function isPrivacyKeyUnavailableError(error) {
+  if (isPrivacyLockedError(error)) return false;
+  const message = String(error?.message ?? error ?? "").toLowerCase();
+  return [
+    "PRIVACY_KEYSTORE_UNINITIALIZED",
+    "PRIVACY_KEYSTORE_INVALID",
+    "PRIVACY_KEY_MISSING",
+    "PRIVACY_KEY_INVALID",
+  ].some((code) => message.includes(code.toLowerCase()))
+    || message.includes("privacy key file is missing")
+    || message.includes("could not read privacy key file")
+    || (message.includes("privacy key file") && message.includes("malformed"));
 }
 
 // ---------------------------------------------------------------------------
@@ -1040,6 +1083,76 @@ export function isPrivacyRecoveryDialogOpen(documentRef = globalThis.document) {
   return Boolean(documentRef?.querySelector?.(`.${RECOVERY_DIALOG_CLASS}`));
 }
 
+export function isUnreadablePrivacyResetDialogOpen(documentRef = globalThis.document) {
+  return Boolean(documentRef?.querySelector?.(`.${UNREADABLE_DIALOG_CLASS}`));
+}
+
+export async function confirmUnreadablePrivacyReset({ documentRef = globalThis.document } = {}) {
+  if (unreadableResetDialogPromise) return unreadableResetDialogPromise;
+  if (!documentRef?.createElement || !documentRef.body) return false;
+  installStyles(documentRef);
+
+  const pending = new Promise((resolve) => {
+    const overlay = documentRef.createElement("div");
+    overlay.className = UNREADABLE_DIALOG_CLASS;
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-label", "Unreadable encrypted values");
+    overlay.tabIndex = -1;
+    const previousFocus = documentRef.activeElement;
+    const finish = (reset) => {
+      overlay.remove();
+      previousFocus?.focus?.();
+      resolve(Boolean(reset));
+    };
+
+    const panel = documentRef.createElement("div");
+    panel.className = "helto-privacy-keystore-panel helto-privacy-unreadable-panel";
+    const title = documentRef.createElement("h3");
+    title.textContent = "Encrypted values cannot be read";
+    const hint = documentRef.createElement("p");
+    hint.className = "helto-privacy-keystore-hint";
+    hint.textContent = "The original encrypted values are still preserved. Resetting replaces the affected values with safe defaults and cannot be undone.";
+    const actions = documentRef.createElement("div");
+    actions.className = "helto-privacy-keystore-actions";
+    const keepButton = documentRef.createElement("button");
+    keepButton.type = "button";
+    keepButton.textContent = "Keep encrypted values";
+    const resetButton = documentRef.createElement("button");
+    resetButton.type = "button";
+    resetButton.className = "danger";
+    resetButton.textContent = "Reset affected values";
+    actions.append(keepButton, resetButton);
+    panel.append(title, hint, actions);
+    overlay.append(panel);
+
+    keepButton.addEventListener("click", () => finish(false));
+    resetButton.addEventListener("click", () => finish(true));
+    overlay.addEventListener("click", (event) => {
+      if (event.target === overlay) finish(false);
+    });
+    overlay.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        finish(false);
+        return;
+      }
+      if (event.key === "Tab") trapFocus(event, overlay, documentRef);
+      event.stopPropagation();
+    });
+
+    documentRef.body.append(overlay);
+    keepButton.focus?.();
+  });
+  unreadableResetDialogPromise = pending;
+  try {
+    return await pending;
+  } finally {
+    if (unreadableResetDialogPromise === pending) unreadableResetDialogPromise = null;
+  }
+}
+
 // Shows the dialog for `mode` ("unlock" | "setup" | "change"). Resolves with
 // the endpoint result on success, or null when cancelled. `mode: "auto"`
 // picks setup/unlock from keystore status and resolves immediately with the
@@ -1320,14 +1433,15 @@ function installStyles(documentRef) {
   // helto-designsystem/reference/tokens.css). Body-mounted overlays scope
   // their own token block. Gold = selection/primary, blue = focus ring only.
   style.textContent = `
-    .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS} {
+    .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS}, .${UNREADABLE_DIALOG_CLASS} {
       --htd-bg: #0d1320; --htd-surface: #151c2a; --htd-surface-2: #1b2333; --htd-surface-3: #232d3f; --htd-surface-hover: #2c3850;
       --htd-border: #2a3346; --htd-border-strong: #3a465c; --htd-border-hover: #4c5970; --htd-text: #e7ebf3; --htd-text-dim: #9aa6bd; --htd-text-faint: #6f7c95;
       --htd-accent: #f1c75c; --htd-accent-strong: #ffd873; --htd-accent-border: rgba(241,199,92,0.55);
-      --htd-focus: #5e9bff; --htd-ring: 0 0 0 2px rgba(94,155,255,0.5); --htd-danger: #ec5a6b;
+      --htd-focus: #5e9bff; --htd-ring: 0 0 0 2px rgba(94,155,255,0.5); --htd-danger: #f38ba8;
+      --htd-danger-border: #96526a; --htd-danger-border-hover: #c56d8c; --htd-danger-gradient-start: #5c2c3d; --htd-danger-gradient-end: #482331; --htd-danger-gradient-hover-start: #6e3549; --htd-danger-gradient-hover-end: #5a2a3c; --htd-danger-text: #f9d4e0; --htd-danger-text-hover: #fdeef4;
       --htd-radius-sm: 5px; --htd-radius-lg: 10px; --htd-shadow-pop: 0 14px 36px rgba(0,0,0,0.55);
     }
-    .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS} { position: fixed; inset: 0; z-index: 10090; display: flex; align-items: center; justify-content: center; background: rgba(6,9,15,0.72); backdrop-filter: blur(4px); color: var(--htd-text-dim); font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
+    .${DIALOG_CLASS}, .${RECOVERY_DIALOG_CLASS}, .${UNREADABLE_DIALOG_CLASS} { position: fixed; inset: 0; z-index: 10090; display: flex; align-items: center; justify-content: center; background: rgba(6,9,15,0.72); backdrop-filter: blur(4px); color: var(--htd-text-dim); font: 12px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; -webkit-font-smoothing: antialiased; }
     .helto-privacy-keystore-panel { width: min(380px, calc(100vw - 28px)); display: flex; flex-direction: column; gap: 10px; background: linear-gradient(135deg, rgba(27,35,51,0.92), rgba(13,19,32,0.96)); border: 1px solid var(--htd-border-strong); border-radius: var(--htd-radius-lg); box-shadow: var(--htd-shadow-pop); padding: 16px; box-sizing: border-box; }
     .helto-privacy-keystore-panel h3 { margin: 0; font-size: 15px; font-weight: 700; color: var(--htd-text); }
     .helto-privacy-keystore-hint { margin: 0; color: var(--htd-text-dim); }
@@ -1342,6 +1456,9 @@ function installStyles(documentRef) {
     .helto-privacy-keystore-actions button:disabled { opacity: .48; cursor: not-allowed; }
     .helto-privacy-keystore-actions button.primary { border-color: var(--htd-accent-border); background: linear-gradient(180deg, #4f4322, #3c3318); color: var(--htd-accent-strong); }
     .helto-privacy-keystore-actions button.primary:hover:not(:disabled) { background: linear-gradient(180deg, #5b4d27, #46391b); color: #fff3cf; }
+    .helto-privacy-keystore-actions button.danger { border-color: var(--htd-danger-border); background: linear-gradient(180deg, var(--htd-danger-gradient-start), var(--htd-danger-gradient-end)); color: var(--htd-danger-text); }
+    .helto-privacy-keystore-actions button.danger:hover:not(:disabled) { border-color: var(--htd-danger-border-hover); background: linear-gradient(180deg, var(--htd-danger-gradient-hover-start), var(--htd-danger-gradient-hover-end)); color: var(--htd-danger-text-hover); }
+    .helto-privacy-unreadable-panel { width: min(460px, calc(100vw - 28px)); }
     .helto-privacy-recovery-panel { width: min(520px, calc(100vw - 28px)); max-height: min(620px, calc(100vh - 32px)); display: flex; flex-direction: column; gap: 10px; background: linear-gradient(135deg, rgba(27,35,51,0.94), rgba(13,19,32,0.98)); border: 1px solid var(--htd-border-strong); border-radius: var(--htd-radius-lg); box-shadow: var(--htd-shadow-pop); padding: 16px; box-sizing: border-box; }
     .helto-privacy-recovery-panel h3 { margin: 0; font-size: 15px; font-weight: 700; color: var(--htd-text); }
     .helto-privacy-recovery-counts { display: flex; flex-wrap: wrap; gap: 6px; }
