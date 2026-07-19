@@ -76,10 +76,9 @@ def initialize_keystore_with_legacy_migration(
         raise PrivacyError(str(exc)) from exc
 
     if legacy_keys:
-        migrated = path.with_name(path.name + ".migrated")
         try:
-            path.replace(migrated)
-            os.chmod(migrated, 0o600)
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + ".migrated").unlink(missing_ok=True)
         except OSError:
             pass
     return result
@@ -231,7 +230,12 @@ class PrivacyEnvelopeCodec:
         if not CRYPTO_AVAILABLE:
             raise PrivacyError(f"Python package 'cryptography' is required for privacy mode: {CRYPTO_IMPORT_ERROR}")
 
-        if base_dir is None and self.key_provider.keystore_exists():
+        if base_dir is None:
+            if not self.key_provider.keystore_exists():
+                raise PrivacyError(
+                    "PRIVACY_KEYSTORE_UNINITIALIZED: Privacy keystore has not been created yet. "
+                    "Open the Helto privacy dialog and set a privacy password."
+                )
             try:
                 return self.key_provider.primary_session_key()
             except PrivacyKeystoreError as exc:

@@ -51,6 +51,16 @@ SCRYPT_P = 1
 SCRYPT_SALT_BYTES = 16
 KEY_BYTES = 32
 MIN_PASSWORD_LENGTH = 8
+MAX_PASSWORD_BYTES = 4096
+MAX_KEYSTORE_BYTES = 1024 * 1024
+MAX_SESSION_BYTES = 1024 * 1024
+MAX_KEY_ENTRIES = 128
+MIN_SCRYPT_N = 2**10
+MAX_SCRYPT_N = 2**18
+MAX_SCRYPT_R = 16
+MAX_SCRYPT_P = 4
+MAX_SCRYPT_MEMORY_BYTES = 256 * 1024 * 1024
+MAX_SCRYPT_WORK = 2**22
 
 ERROR_LOCKED = "PRIVACY_LOCKED"
 ERROR_UNINITIALIZED = "PRIVACY_KEYSTORE_UNINITIALIZED"
@@ -96,8 +106,6 @@ def keystore_status() -> dict[str, Any]:
         "keystoreAvailable": KEYSTORE_CRYPTO_AVAILABLE,
         "keystoreInitialized": initialized,
         "keystoreLocked": initialized and session is None,
-        "keystorePath": str(keystore_path()),
-        "sessionPath": str(session_path()),
     }
 
 
@@ -116,7 +124,7 @@ def initialize_keystore(
     path = keystore_path()
     if path.is_file():
         raise PrivacyKeystoreError(
-            f"{ERROR_ALREADY_INITIALIZED}: Privacy keystore already exists: {path}"
+            f"{ERROR_ALREADY_INITIALIZED}: Privacy keystore already exists."
         )
 
     salt = secrets.token_bytes(SCRYPT_SALT_BYTES)
@@ -153,12 +161,13 @@ def initialize_keystore(
 
 def unlock_keystore(password: str) -> dict[str, Any]:
     _require_crypto()
+    password = _bounded_password(password)
     payload = _load_keystore()
     kdf = payload.get("kdf") or {}
     try:
         salt = _b64url_decode(str(kdf.get("salt", "")))
         kek = _derive_kek(
-            str(password or ""),
+            password,
             salt,
             int(kdf.get("n") or SCRYPT_N),
             int(kdf.get("r") or SCRYPT_R),
@@ -330,10 +339,19 @@ def _require_crypto() -> None:
 
 
 def _valid_password(password: str) -> str:
-    password = str(password or "")
+    password = _bounded_password(password)
     if len(password) < MIN_PASSWORD_LENGTH:
         raise PrivacyKeystoreError(
             f"{ERROR_PASSWORD_TOO_SHORT}: Privacy password must be at least {MIN_PASSWORD_LENGTH} characters."
+        )
+    return password
+
+
+def _bounded_password(password: str) -> str:
+    password = str(password or "")
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise PrivacyKeystoreError(
+            f"{ERROR_PASSWORD_INVALID}: Privacy password is too long."
         )
     return password
 
@@ -387,15 +405,76 @@ def _load_keystore() -> dict[str, Any]:
     path = keystore_path()
     if not path.is_file():
         raise PrivacyKeystoreError(
-            f"{ERROR_UNINITIALIZED}: Privacy keystore has not been created yet: {path}"
+            f"{ERROR_UNINITIALIZED}: Privacy keystore has not been created yet."
         )
     try:
+        if path.stat().st_size > MAX_KEYSTORE_BYTES:
+            raise PrivacyKeystoreError(
+                f"{ERROR_KEYSTORE_INVALID}: Keystore file is too large."
+            )
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except PrivacyKeystoreError:
+        raise
     except Exception as exc:  # noqa: BLE001 - unreadable keystore should be a readable error.
-        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Could not read keystore '{path}': {exc}") from exc
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Could not read privacy keystore: {exc}") from exc
+    return _validate_keystore_payload(payload)
+
+
+def _validate_keystore_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("schema") != KEYSTORE_SCHEMA:
-        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: File is not a Helto privacy keystore: {path}")
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: File is not a Helto privacy keystore.")
+    if payload.get("version") != KEYSTORE_VERSION:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore version is unsupported.")
+
+    kdf = payload.get("kdf")
+    if not isinstance(kdf, dict) or kdf.get("name") != "scrypt":
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore KDF is unsupported.")
+    try:
+        salt = _b64url_decode(str(kdf.get("salt") or ""))
+        n = _strict_int(kdf.get("n"))
+        r = _strict_int(kdf.get("r"))
+        p = _strict_int(kdf.get("p"))
+    except Exception as exc:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore KDF metadata is invalid.") from exc
+    if not 16 <= len(salt) <= 64:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore KDF salt is invalid.")
+    if n < MIN_SCRYPT_N or n > MAX_SCRYPT_N or n & (n - 1):
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore scrypt n is outside supported bounds.")
+    if not 1 <= r <= MAX_SCRYPT_R or not 1 <= p <= MAX_SCRYPT_P:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore scrypt parameters are outside supported bounds.")
+    if 128 * n * r > MAX_SCRYPT_MEMORY_BYTES or n * r * p > MAX_SCRYPT_WORK:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore scrypt cost is outside supported bounds.")
+
+    entries = payload.get("keys")
+    if not isinstance(entries, list) or not entries or len(entries) > MAX_KEY_ENTRIES:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key list is invalid.")
+    seen_ids: set[str] = set()
+    primary_count = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key entry is invalid.")
+        key_id = str(entry.get("keyId") or "").strip()
+        if not key_id or len(key_id) > 128 or key_id in seen_ids:
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key identifier is invalid.")
+        seen_ids.add(key_id)
+        try:
+            nonce = _b64url_decode(str(entry.get("nonce") or ""))
+            wrapped = _b64url_decode(str(entry.get("wrapped_key") or ""))
+        except Exception as exc:
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key encoding is invalid.") from exc
+        if len(nonce) != 12 or len(wrapped) != KEY_BYTES + 16:
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key entry is malformed.")
+        if entry.get("primary") is True:
+            primary_count += 1
+    if primary_count != 1:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore must contain one primary key.")
     return payload
+
+
+def _strict_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("parameter is not an integer")
+    return value
 
 
 def _require_session() -> dict[str, Any]:
@@ -414,6 +493,8 @@ def _require_session() -> dict[str, Any]:
 def _read_session() -> dict[str, Any] | None:
     path = session_path()
     try:
+        if path.stat().st_size > MAX_SESSION_BYTES:
+            return None
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
@@ -473,4 +554,4 @@ def _b64url_encode(data: bytes) -> str:
 
 def _b64url_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    return base64.b64decode((value + padding).encode("ascii"), altchars=b"-_", validate=True)

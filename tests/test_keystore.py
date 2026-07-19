@@ -68,6 +68,40 @@ def test_unlock_reads_kdf_params_from_file(monkeypatch):
     assert keystore.unlock_keystore(PASSWORD)["token"]
 
 
+def test_status_does_not_disclose_local_paths():
+    status = keystore.keystore_status()
+
+    assert "keystorePath" not in status
+    assert "sessionPath" not in status
+
+
+def test_unlock_rejects_unbounded_kdf_before_derivation(monkeypatch):
+    keystore.initialize_keystore(PASSWORD)
+    keystore.lock_keystore()
+    payload = json.loads(keystore.keystore_path().read_text(encoding="utf-8"))
+    payload["kdf"]["n"] = 2**30
+    keystore.keystore_path().write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        keystore,
+        "_derive_kek",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must reject before scrypt")),
+    )
+
+    with pytest.raises(PrivacyKeystoreError, match="outside supported bounds"):
+        keystore.unlock_keystore(PASSWORD)
+
+
+def test_unlock_rejects_oversized_password_before_reading_keystore(monkeypatch):
+    monkeypatch.setattr(
+        keystore,
+        "_load_keystore",
+        lambda: (_ for _ in ()).throw(AssertionError("must reject before reading keystore")),
+    )
+
+    with pytest.raises(PrivacyKeystoreError, match="password is too long"):
+        keystore.unlock_keystore("x" * (keystore.MAX_PASSWORD_BYTES + 1))
+
+
 def test_initialize_requires_minimum_password_length():
     with pytest.raises(PrivacyKeystoreError, match="PRIVACY_PASSWORD_TOO_SHORT"):
         keystore.initialize_keystore("short")
@@ -82,14 +116,15 @@ def test_initialize_twice_is_rejected():
 
 def test_legacy_key_is_imported_and_retired():
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
-    legacy_envelope = codec.encrypt_state({"old": "workflow"})
-    legacy_path = envelope_module.config_dir() / "privacy_key.json"
+    legacy_dir = envelope_module.config_dir()
+    legacy_envelope = codec.encrypt_state({"old": "workflow"}, base_dir=legacy_dir)
+    legacy_path = legacy_dir / "privacy_key.json"
     assert legacy_path.exists()
 
     initialize_keystore_with_legacy_migration(PASSWORD, envelope_module.config_dir())
 
     assert not legacy_path.exists()
-    assert legacy_path.with_name(legacy_path.name + ".migrated").exists()
+    assert not legacy_path.with_name(legacy_path.name + ".migrated").exists()
     assert codec.decrypt_state(legacy_envelope) == {"old": "workflow"}
     new_envelope = codec.encrypt_state({"new": "workflow"})
     assert new_envelope["keyId"] != legacy_envelope["keyId"]
@@ -180,6 +215,15 @@ def test_explicit_base_dir_keeps_legacy_behavior(tmp_path):
 
     envelope = codec.encrypt_state({"secret": "prompt"}, base_dir=tmp_path / "standalone")
     assert codec.decrypt_state(envelope, base_dir=tmp_path / "standalone") == {"secret": "prompt"}
+
+
+def test_default_codec_refuses_plaintext_key_fallback():
+    codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
+
+    with pytest.raises(PrivacyError, match="PRIVACY_KEYSTORE_UNINITIALIZED"):
+        codec.encrypt_state({"secret": "prompt"})
+
+    assert not (envelope_module.config_dir() / "privacy_key.json").exists()
 
 
 class _FakeRequest:

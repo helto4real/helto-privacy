@@ -66,7 +66,7 @@ Then pick your case:
 Add to the pack's `requirements.txt` (create it if missing):
 
 ```
-helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.3.0
+helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.5.0
 cryptography>=42.0
 ```
 

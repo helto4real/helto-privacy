@@ -82,7 +82,7 @@ def test_initialize_migrates_all_registered_legacy_keys(tmp_path):
 
     assert result["token"]
     assert not (pack_a / "privacy_key.json").exists()
-    assert (pack_a / "privacy_key.json.migrated").exists()
+    assert not (pack_a / "privacy_key.json.migrated").exists()
     assert not (pack_b / "privacy_key.json").exists()
     # Both packs' old envelopes decrypt through the keystore session.
     assert PrivacyEnvelopeCodec("helto.pack-a").decrypt_state(envelope_a) == {"secret": "legacy"}
@@ -102,8 +102,22 @@ def test_unlock_sweeps_legacy_keys_registered_after_init(tmp_path):
 
     assert result["token"]
     assert not (late_pack / "privacy_key.json").exists()
-    assert (late_pack / "privacy_key.json.migrated").exists()
+    assert not (late_pack / "privacy_key.json.migrated").exists()
     assert PrivacyEnvelopeCodec("helto.late-pack").decrypt_state(envelope) == {"secret": "legacy"}
+
+
+def test_unlock_removes_previously_retired_plaintext_key(tmp_path):
+    keystore.initialize_keystore(PASSWORD)
+    keystore.lock_keystore()
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    retired = pack / "privacy_key.json.migrated"
+    retired.write_text('{"key":"legacy-plaintext"}', encoding="utf-8")
+    register_legacy_key_dir(pack)
+
+    _unlock_and_migrate(PASSWORD)
+
+    assert not retired.exists()
 
 
 def test_unlock_without_legacy_keys_is_plain_unlock():

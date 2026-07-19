@@ -16,7 +16,7 @@ Registered surface (pack-neutral, stable):
 Legacy migration is automatic: packs register the directory holding their old
 plaintext ``privacy_key.json``; whenever the keystore is created or unlocked
 (the only moments the password is available), every registered legacy key is
-imported as a decrypt-only entry and its file renamed to ``.migrated``.
+imported as a decrypt-only entry and the plaintext key file is removed.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 
 _ROUTES_REGISTERED = False
 _LEGACY_KEY_DIRS: list[Path] = []
+_PASSWORD_OPERATION_SEMAPHORE = asyncio.Semaphore(1)
 
 
 def register_legacy_key_dir(path: str | os.PathLike[str] | None) -> None:
@@ -94,7 +95,8 @@ def register_helto_privacy_ui(
             payload = await request.json()
             password = str(payload.get("password") or "")
             # scrypt is deliberately slow; keep it off the event loop.
-            result = await asyncio.to_thread(_unlock_and_migrate, password)
+            async with _PASSWORD_OPERATION_SEMAPHORE:
+                result = await asyncio.to_thread(_unlock_and_migrate, password)
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -113,7 +115,8 @@ def register_helto_privacy_ui(
         try:
             payload = await request.json()
             password = str(payload.get("password") or "")
-            result = await asyncio.to_thread(_initialize_and_migrate, password)
+            async with _PASSWORD_OPERATION_SEMAPHORE:
+                result = await asyncio.to_thread(_initialize_and_migrate, password)
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -124,11 +127,12 @@ def register_helto_privacy_ui(
     async def post_helto_privacy_change_password(request):
         try:
             payload = await request.json()
-            result = await asyncio.to_thread(
-                keystore.change_keystore_password,
-                str(payload.get("current_password") or ""),
-                str(payload.get("new_password") or ""),
-            )
+            async with _PASSWORD_OPERATION_SEMAPHORE:
+                result = await asyncio.to_thread(
+                    keystore.change_keystore_password,
+                    str(payload.get("current_password") or ""),
+                    str(payload.get("new_password") or ""),
+                )
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -157,7 +161,7 @@ def _initialize_and_migrate(password: str) -> dict[str, Any]:
     result = keystore.initialize_keystore(
         password, legacy_keys=[(key_id, key) for key_id, key, _path in legacy]
     )
-    _retire_legacy_files([path for _key_id, _key, path in legacy])
+    _remove_registered_legacy_files()
     return result
 
 
@@ -170,7 +174,7 @@ def _unlock_and_migrate(password: str) -> dict[str, Any]:
         result = keystore.add_keys_to_keystore(
             password, [(key_id, key) for key_id, key, _path in legacy]
         )
-        _retire_legacy_files([path for _key_id, _key, path in legacy])
+    _remove_registered_legacy_files()
     return result
 
 
@@ -195,14 +199,17 @@ def _collect_legacy_keys() -> list[tuple[str, bytes, Path]]:
     return collected
 
 
-def _retire_legacy_files(paths: list[Path]) -> None:
-    for path in paths:
-        migrated = path.with_name(path.name + ".migrated")
-        try:
-            path.replace(migrated)
-            os.chmod(migrated, 0o600)
-        except OSError:
-            logging.warning("helto-privacy: could not retire legacy key file %s", path)
+def _remove_registered_legacy_files() -> None:
+    """Remove plaintext legacy keys only after keystore verification succeeds."""
+    for directory in _LEGACY_KEY_DIRS:
+        for path in (
+            directory / "privacy_key.json",
+            directory / "privacy_key.json.migrated",
+        ):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logging.warning("helto-privacy: could not remove legacy key file %s", path)
 
 
 def _b64url_decode(value: str) -> bytes:
