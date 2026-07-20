@@ -11,27 +11,19 @@ reboot/logout — together with a random bearer token for the HTTP routes.
 That gives the intended lifetime: unlock survives browser refreshes and
 ComfyUI restarts, and expires with the machine session.
 
-The cryptographic mechanics remain independent of ComfyUI. Public mutation and
-secret/session reads consult the exact-suite activation gate so verification
-mode cannot use this module as a bypass.
+This module is intentionally standalone (no imports from the rest of the
+pack) so other Helto repos can vendor or depend on it unchanged.
 """
 
 from __future__ import annotations
 
 import base64
-import fcntl
 import json
 import os
 import secrets
 import tempfile
-import hmac
 from pathlib import Path
-from contextlib import contextmanager
-from threading import RLock, local
 from typing import Any
-
-from .suite_runtime import require_active_process_suite
-from ._atomic_file import atomic_write_private_bytes
 
 try:
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -59,8 +51,16 @@ SCRYPT_P = 1
 SCRYPT_SALT_BYTES = 16
 KEY_BYTES = 32
 MIN_PASSWORD_LENGTH = 8
-_KEYSTORE_MUTATION_LOCK = RLock()
-_KEYSTORE_MUTATION_LOCAL = local()
+MAX_PASSWORD_BYTES = 4096
+MAX_KEYSTORE_BYTES = 1024 * 1024
+MAX_SESSION_BYTES = 1024 * 1024
+MAX_KEY_ENTRIES = 128
+MIN_SCRYPT_N = 2**10
+MAX_SCRYPT_N = 2**18
+MAX_SCRYPT_R = 16
+MAX_SCRYPT_P = 4
+MAX_SCRYPT_MEMORY_BYTES = 256 * 1024 * 1024
+MAX_SCRYPT_WORK = 2**22
 
 ERROR_LOCKED = "PRIVACY_LOCKED"
 ERROR_UNINITIALIZED = "PRIVACY_KEYSTORE_UNINITIALIZED"
@@ -72,49 +72,6 @@ ERROR_KEYSTORE_INVALID = "PRIVACY_KEYSTORE_INVALID"
 
 class PrivacyKeystoreError(RuntimeError):
     """Raised when the privacy keystore cannot complete an operation."""
-
-
-@contextmanager
-def _exclusive_keystore_mutation():
-    """Serialize every keystore/session mutation across threads and processes."""
-
-    with _KEYSTORE_MUTATION_LOCK:
-        depth = int(getattr(_KEYSTORE_MUTATION_LOCAL, "depth", 0))
-        if depth:
-            _KEYSTORE_MUTATION_LOCAL.depth = depth + 1
-            try:
-                yield
-            finally:
-                _KEYSTORE_MUTATION_LOCAL.depth = depth
-            return
-
-        lock_path = keystore_path().with_suffix(keystore_path().suffix + ".lock")
-        descriptor: int | None = None
-        try:
-            lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(lock_path.parent, 0o700)
-            descriptor = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
-            os.fchmod(descriptor, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
-        except OSError:
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
-            raise PrivacyKeystoreError(
-                f"{ERROR_KEYSTORE_INVALID}: Keystore mutation lock is unavailable."
-            ) from None
-        try:
-            _KEYSTORE_MUTATION_LOCAL.depth = 1
-            yield
-        finally:
-            _KEYSTORE_MUTATION_LOCAL.depth = 0
-            if descriptor is not None:
-                try:
-                    fcntl.flock(descriptor, fcntl.LOCK_UN)
-                finally:
-                    os.close(descriptor)
 
 
 def keystore_path() -> Path:
@@ -149,8 +106,6 @@ def keystore_status() -> dict[str, Any]:
         "keystoreAvailable": KEYSTORE_CRYPTO_AVAILABLE,
         "keystoreInitialized": initialized,
         "keystoreLocked": initialized and session is None,
-        "keystorePath": str(keystore_path()),
-        "sessionPath": str(session_path()),
     }
 
 
@@ -164,22 +119,12 @@ def initialize_keystore(
     ``legacy_keys`` are (key_id, key) pairs imported as decrypt-only entries
     so envelopes written by the old plaintext key files stay readable.
     """
-    with _exclusive_keystore_mutation():
-        return _initialize_keystore(password, legacy_keys=legacy_keys)
-
-
-def _initialize_keystore(
-    password: str,
-    *,
-    legacy_keys: list[tuple[str, bytes]] | None = None,
-) -> dict[str, Any]:
-    require_active_process_suite()
     _require_crypto()
     password = _valid_password(password)
     path = keystore_path()
     if path.is_file():
         raise PrivacyKeystoreError(
-            f"{ERROR_ALREADY_INITIALIZED}: Privacy keystore already exists: {path}"
+            f"{ERROR_ALREADY_INITIALIZED}: Privacy keystore already exists."
         )
 
     salt = secrets.token_bytes(SCRYPT_SALT_BYTES)
@@ -215,19 +160,14 @@ def _initialize_keystore(
 
 
 def unlock_keystore(password: str) -> dict[str, Any]:
-    with _exclusive_keystore_mutation():
-        return _unlock_keystore(password)
-
-
-def _unlock_keystore(password: str) -> dict[str, Any]:
-    require_active_process_suite()
     _require_crypto()
+    password = _bounded_password(password)
     payload = _load_keystore()
     kdf = payload.get("kdf") or {}
     try:
         salt = _b64url_decode(str(kdf.get("salt", "")))
         kek = _derive_kek(
-            str(password or ""),
+            password,
             salt,
             int(kdf.get("n") or SCRYPT_N),
             int(kdf.get("r") or SCRYPT_R),
@@ -265,23 +205,15 @@ def _unlock_keystore(password: str) -> dict[str, Any]:
 
 
 def lock_keystore() -> dict[str, Any]:
-    with _exclusive_keystore_mutation():
-        path = session_path()
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        _invalidate_private_runtimes("lock")
-        return keystore_status()
+    path = session_path()
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    return keystore_status()
 
 
 def change_keystore_password(current_password: str, new_password: str) -> dict[str, Any]:
-    with _exclusive_keystore_mutation():
-        return _change_keystore_password(current_password, new_password)
-
-
-def _change_keystore_password(current_password: str, new_password: str) -> dict[str, Any]:
-    require_active_process_suite()
     _require_crypto()
     new_password = _valid_password(new_password)
     # Re-verify the current password against the file rather than trusting
@@ -320,12 +252,6 @@ def add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[s
     The password is verified against the on-disk keystore, duplicate key IDs
     are ignored, and the refreshed session contains every decryptable key.
     """
-    with _exclusive_keystore_mutation():
-        return _add_keys_to_keystore(password, keys)
-
-
-def _add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[str, Any]:
-    require_active_process_suite()
     _require_crypto()
     unlock_keystore(password)
     payload = _load_keystore()
@@ -359,115 +285,9 @@ def _add_keys_to_keystore(password: str, keys: list[tuple[str, bytes]]) -> dict[
     return {"token": token, **keystore_status()}
 
 
-def import_decrypt_only_key_verified(
-    password: str,
-    key_id: str,
-    key: bytes,
-) -> dict[str, Any]:
-    """Wrap, persist, reopen, and verify one decrypt-only historical key."""
-
-    with _exclusive_keystore_mutation():
-        return _import_decrypt_only_key_verified(password, key_id, key)
-
-
-def _import_decrypt_only_key_verified(
-    password: str,
-    key_id: str,
-    key: bytes,
-) -> dict[str, Any]:
-    """Locked implementation for one verified decrypt-only import."""
-
-    require_active_process_suite()
-    _require_crypto()
-    key_id = str(key_id or "").strip()
-    if not key_id or not isinstance(key, bytes) or len(key) != KEY_BYTES:
-        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Historical key is invalid.")
-    unlock_keystore(password)
-    original_payload = _load_keystore()
-    session = _read_session()
-    if session is None:
-        raise PrivacyKeystoreError(f"{ERROR_LOCKED}: Privacy keystore is locked.")
-    kek = _kek_from_payload(password, original_payload)
-    entries = list(original_payload.get("keys") or [])
-    matching = [
-        entry
-        for entry in entries
-        if isinstance(entry, dict) and str(entry.get("keyId") or "").strip() == key_id
-    ]
-    if not matching:
-        entries.append(_wrap_entry(kek, key_id, key, primary=False))
-    candidate = dict(original_payload)
-    candidate["keys"] = entries
-    _write_private_json(keystore_path(), candidate)
-    try:
-        reopened = _load_keystore()
-        reopened_kek = _kek_from_payload(password, reopened)
-        reopened_entry = next(
-            entry
-            for entry in reopened.get("keys") or []
-            if isinstance(entry, dict) and str(entry.get("keyId") or "").strip() == key_id
-        )
-        verified = AESGCM(reopened_kek).decrypt(  # type: ignore[operator]
-            _b64url_decode(str(reopened_entry.get("nonce") or "")),
-            _b64url_decode(str(reopened_entry.get("wrapped_key") or "")),
-            _wrap_aad(key_id),
-        )
-        if not hmac.compare_digest(verified, key):
-            raise ValueError
-    except Exception:
-        _write_private_json(keystore_path(), original_payload)
-        unlock_keystore(password)
-        raise PrivacyKeystoreError(
-            f"{ERROR_KEYSTORE_INVALID}: Historical key verification failed."
-        ) from None
-
-    unlocked = dict(session["keys"])
-    unlocked[key_id] = key
-    token = _write_session(session["primary_key_id"], unlocked)
-    return {"token": token, **keystore_status()}
-
-
 def rotate_primary_key(password: str) -> dict[str, Any]:
     """Generate a fresh primary key and keep older keys for decryption."""
-    with _exclusive_keystore_mutation():
-        from .external_operation_state import exclusive_external_operation_state
-
-        # Starting an external operation and choosing a new primary key are one
-        # admission boundary.  Holding the public-index lock closes the race
-        # between the active-state check and the keystore replacement.
-        with exclusive_external_operation_state():
-            return _rotate_primary_key(password)
-
-
-def _rotate_primary_key(password: str) -> dict[str, Any]:
-    require_active_process_suite()
     _require_crypto()
-    try:
-        from .mode_state import has_non_idle_mode_transition
-
-        if has_non_idle_mode_transition():
-            raise PrivacyKeystoreError(
-                f"{ERROR_KEYSTORE_INVALID}: Key rotation is blocked by a privacy mode transition."
-            )
-    except PrivacyKeystoreError:
-        raise
-    except Exception:
-        raise PrivacyKeystoreError(
-            f"{ERROR_KEYSTORE_INVALID}: Mode transition state is unavailable."
-        ) from None
-    try:
-        from .external_operation_state import has_active_external_operations
-
-        if has_active_external_operations():
-            raise PrivacyKeystoreError(
-                f"{ERROR_KEYSTORE_INVALID}: Key rotation is blocked by an active external protected operation."
-            )
-    except PrivacyKeystoreError:
-        raise
-    except Exception:
-        raise PrivacyKeystoreError(
-            f"{ERROR_KEYSTORE_INVALID}: External protected-operation state is unavailable."
-        ) from None
     unlock_keystore(password)
     payload = _load_keystore()
     session = _read_session()
@@ -494,37 +314,19 @@ def _rotate_primary_key(password: str) -> dict[str, Any]:
 
 def primary_session_key() -> tuple[bytes, str]:
     """Return (key, key_id) for encryption, or raise a locked/uninitialized error."""
-    require_active_process_suite()
     session = _require_session()
     key_id = session["primary_key_id"]
     return session["keys"][key_id], key_id
 
 
-def require_unlocked_session() -> None:
-    """Require a current unlocked session without returning key material."""
-
-    require_active_process_suite()
-    _require_session()
-
-
 def session_key_for(key_id: str) -> bytes | None:
-    require_active_process_suite()
     session = _read_session()
     if session is None:
         return None
     return session["keys"].get(str(key_id or "").strip())
 
 
-def unlocked_session_key_ids() -> tuple[str, ...]:
-    """Return opaque IDs for every retained key in the current unlocked session."""
-
-    require_active_process_suite()
-    session = _require_session()
-    return tuple(sorted(str(key_id) for key_id in session["keys"]))
-
-
 def session_token() -> str | None:
-    require_active_process_suite()
     session = _read_session()
     return session["token"] if session else None
 
@@ -537,10 +339,19 @@ def _require_crypto() -> None:
 
 
 def _valid_password(password: str) -> str:
-    password = str(password or "")
+    password = _bounded_password(password)
     if len(password) < MIN_PASSWORD_LENGTH:
         raise PrivacyKeystoreError(
             f"{ERROR_PASSWORD_TOO_SHORT}: Privacy password must be at least {MIN_PASSWORD_LENGTH} characters."
+        )
+    return password
+
+
+def _bounded_password(password: str) -> str:
+    password = str(password or "")
+    if len(password.encode("utf-8")) > MAX_PASSWORD_BYTES:
+        raise PrivacyKeystoreError(
+            f"{ERROR_PASSWORD_INVALID}: Privacy password is too long."
         )
     return password
 
@@ -594,15 +405,76 @@ def _load_keystore() -> dict[str, Any]:
     path = keystore_path()
     if not path.is_file():
         raise PrivacyKeystoreError(
-            f"{ERROR_UNINITIALIZED}: Privacy keystore has not been created yet: {path}"
+            f"{ERROR_UNINITIALIZED}: Privacy keystore has not been created yet."
         )
     try:
+        if path.stat().st_size > MAX_KEYSTORE_BYTES:
+            raise PrivacyKeystoreError(
+                f"{ERROR_KEYSTORE_INVALID}: Keystore file is too large."
+            )
         payload = json.loads(path.read_text(encoding="utf-8"))
+    except PrivacyKeystoreError:
+        raise
     except Exception as exc:  # noqa: BLE001 - unreadable keystore should be a readable error.
-        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Could not read keystore '{path}': {exc}") from exc
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Could not read privacy keystore: {exc}") from exc
+    return _validate_keystore_payload(payload)
+
+
+def _validate_keystore_payload(payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict) or payload.get("schema") != KEYSTORE_SCHEMA:
-        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: File is not a Helto privacy keystore: {path}")
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: File is not a Helto privacy keystore.")
+    if payload.get("version") != KEYSTORE_VERSION:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore version is unsupported.")
+
+    kdf = payload.get("kdf")
+    if not isinstance(kdf, dict) or kdf.get("name") != "scrypt":
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore KDF is unsupported.")
+    try:
+        salt = _b64url_decode(str(kdf.get("salt") or ""))
+        n = _strict_int(kdf.get("n"))
+        r = _strict_int(kdf.get("r"))
+        p = _strict_int(kdf.get("p"))
+    except Exception as exc:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore KDF metadata is invalid.") from exc
+    if not 16 <= len(salt) <= 64:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore KDF salt is invalid.")
+    if n < MIN_SCRYPT_N or n > MAX_SCRYPT_N or n & (n - 1):
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore scrypt n is outside supported bounds.")
+    if not 1 <= r <= MAX_SCRYPT_R or not 1 <= p <= MAX_SCRYPT_P:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore scrypt parameters are outside supported bounds.")
+    if 128 * n * r > MAX_SCRYPT_MEMORY_BYTES or n * r * p > MAX_SCRYPT_WORK:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore scrypt cost is outside supported bounds.")
+
+    entries = payload.get("keys")
+    if not isinstance(entries, list) or not entries or len(entries) > MAX_KEY_ENTRIES:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key list is invalid.")
+    seen_ids: set[str] = set()
+    primary_count = 0
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key entry is invalid.")
+        key_id = str(entry.get("keyId") or "").strip()
+        if not key_id or len(key_id) > 128 or key_id in seen_ids:
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key identifier is invalid.")
+        seen_ids.add(key_id)
+        try:
+            nonce = _b64url_decode(str(entry.get("nonce") or ""))
+            wrapped = _b64url_decode(str(entry.get("wrapped_key") or ""))
+        except Exception as exc:
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key encoding is invalid.") from exc
+        if len(nonce) != 12 or len(wrapped) != KEY_BYTES + 16:
+            raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore key entry is malformed.")
+        if entry.get("primary") is True:
+            primary_count += 1
+    if primary_count != 1:
+        raise PrivacyKeystoreError(f"{ERROR_KEYSTORE_INVALID}: Keystore must contain one primary key.")
     return payload
+
+
+def _strict_int(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError("parameter is not an integer")
+    return value
 
 
 def _require_session() -> dict[str, Any]:
@@ -621,6 +493,8 @@ def _require_session() -> dict[str, Any]:
 def _read_session() -> dict[str, Any] | None:
     path = session_path()
     try:
+        if path.stat().st_size > MAX_SESSION_BYTES:
+            return None
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
@@ -652,31 +526,26 @@ def _write_session(primary_key_id: str, keys: dict[str, bytes]) -> str:
         ],
     }
     _write_private_json(session_path(), payload)
-    _invalidate_private_runtimes("session-replaced")
     return token
 
 
-def _invalidate_private_runtimes(reason: str) -> None:
-    from .associations import invalidate_association_session
-    from .artifacts import invalidate_artifact_session
-    from .execution import invalidate_execution_session
-    from .opaque_references import invalidate_opaque_reference_session
-    from .subject_mode import invalidate_subject_mode_session
-
-    invalidate_association_session(reason)
-    invalidate_artifact_session(reason)
-    invalidate_execution_session(reason)
-    invalidate_opaque_reference_session(reason)
-    invalidate_subject_mode_session(reason)
-
-
 def _write_private_json(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_private_bytes(
-        path,
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True).encode(
-            "utf-8"
-        ),
-    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    tmp_path.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
 
 
 def _b64url_encode(data: bytes) -> str:
@@ -685,4 +554,4 @@ def _b64url_encode(data: bytes) -> str:
 
 def _b64url_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+    return base64.b64decode((value + padding).encode("ascii"), altchars=b"-_", validate=True)

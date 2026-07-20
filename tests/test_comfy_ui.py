@@ -1,6 +1,4 @@
 import json
-import sys
-import types
 
 import pytest
 
@@ -15,7 +13,6 @@ from helto_privacy.comfy_ui import (
 )
 from helto_privacy.envelope import PrivacyEnvelopeCodec
 from helto_privacy.keystore import KEYSTORE_CRYPTO_AVAILABLE
-from tests._legacy_envelope_fixture import write_legacy_state_fixture
 
 pytestmark = pytest.mark.skipif(
     not KEYSTORE_CRYPTO_AVAILABLE,
@@ -51,81 +48,21 @@ class _FakeRoutes:
 class _FakePromptServer:
     def __init__(self):
         self.routes = _FakeRoutes()
-        self.app = _FakeApp()
-
-
-class _FakeApp:
-    def __init__(self):
-        self.middlewares = []
-        self.pre_frozen = False
-        self.frozen = False
 
 
 def _legacy_key_file(directory, codec_schema="helto.test-pack"):
-    envelope, _key, _key_id = write_legacy_state_fixture(
-        directory,
-        codec_schema,
-        {"secret": "legacy"},
-    )
+    codec = PrivacyEnvelopeCodec(codec_schema)
+    envelope = codec.encrypt_state({"secret": "legacy"}, base_dir=directory)
     return envelope
 
 
-def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path, monkeypatch):
-    aiohttp = types.ModuleType("aiohttp")
-    aiohttp.web = types.SimpleNamespace()
-    monkeypatch.setitem(sys.modules, "aiohttp", aiohttp)
+def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path):
+    pytest.importorskip("aiohttp", reason="route registration needs aiohttp (provided by ComfyUI)")
     server = _FakePromptServer()
     assert register_helto_privacy_ui(tmp_path / "pack_a", prompt_server=server) is True
-    assert server.app.middlewares[0].__name__ == "_prompt_submission_middleware"
     first_count = len(server.routes.paths)
     assert first_count >= 6
     assert ("GET", comfy_ui.UI_MODULE_ROUTE) in server.routes.paths
-    assert ("GET", comfy_ui.CLIENT_MODULE_ROUTE) in server.routes.paths
-    assert ("GET", comfy_ui.ARTIFACTS_MODULE_ROUTE) in server.routes.paths
-    assert ("GET", comfy_ui.SNAPSHOT_MODULE_ROUTE) in server.routes.paths
-    assert ("GET", comfy_ui.SUBMISSION_MODULE_ROUTE) in server.routes.paths
-    assert ("GET", comfy_ui.PROFILE_MODULE_ROUTE) in server.routes.paths
-    assert (
-        "GET",
-        f"{comfy_ui.ROUTE_PREFIX}/suite/activation-request",
-    ) in server.routes.paths
-    assert (
-        "POST",
-        f"{comfy_ui.ROUTE_PREFIX}/suite/activate",
-    ) in server.routes.paths
-    assert ("GET", f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}") in server.routes.paths
-    assert (
-        "POST",
-        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/subject-modes/"
-        "{binding_id}/prepare",
-    ) in server.routes.paths
-    external_base = (
-        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/modes/"
-        "{scope_id}/transition"
-    )
-    assert ("POST", f"{external_base}/reserve") in server.routes.paths
-    assert ("POST", f"{external_base}/client-heartbeat") in server.routes.paths
-    assert ("POST", f"{external_base}/rebase") in server.routes.paths
-    assert ("GET", f"{external_base}/status") in server.routes.paths
-    for phase in ("prepare", "resume", "apply-ack", "verify", "finalize", "rollback"):
-        assert (
-            "POST",
-            f"{external_base}/{{transition_id}}/{phase}",
-        ) in server.routes.paths
-    external_operation_base = (
-        f"{comfy_ui.ROUTE_PREFIX}/profiles/{{pack_id}}/operations/"
-        "{operation_id}/external"
-    )
-    assert ("POST", f"{external_operation_base}/prepare") in server.routes.paths
-    assert (
-        "GET",
-        f"{external_operation_base}/{{transaction_id}}/status",
-    ) in server.routes.paths
-    for phase in ("resume", "apply", "rollback"):
-        assert (
-            "POST",
-            f"{external_operation_base}/{{transaction_id}}/{phase}",
-        ) in server.routes.paths
 
     # A second pack registering only contributes its legacy dir.
     assert register_helto_privacy_ui(tmp_path / "pack_b", prompt_server=server) is True
@@ -169,6 +106,20 @@ def test_unlock_sweeps_legacy_keys_registered_after_init(tmp_path):
     assert PrivacyEnvelopeCodec("helto.late-pack").decrypt_state(envelope) == {"secret": "legacy"}
 
 
+def test_unlock_removes_previously_retired_plaintext_key(tmp_path):
+    keystore.initialize_keystore(PASSWORD)
+    keystore.lock_keystore()
+    pack = tmp_path / "pack"
+    pack.mkdir()
+    retired = pack / "privacy_key.json.migrated"
+    retired.write_text('{"key":"legacy-plaintext"}', encoding="utf-8")
+    register_legacy_key_dir(pack)
+
+    _unlock_and_migrate(PASSWORD)
+
+    assert not retired.exists()
+
+
 def test_unlock_without_legacy_keys_is_plain_unlock():
     keystore.initialize_keystore(PASSWORD)
     keystore.lock_keystore()
@@ -179,7 +130,7 @@ def test_unlock_without_legacy_keys_is_plain_unlock():
     assert keystore.session_token() == result["token"]
 
 
-def test_collect_legacy_keys_keeps_duplicate_sources_for_verified_unlink(tmp_path):
+def test_collect_legacy_keys_skips_malformed_and_duplicate_files(tmp_path):
     good = tmp_path / "good"
     _legacy_key_file(good)
     duplicate = tmp_path / "duplicate"
@@ -187,62 +138,24 @@ def test_collect_legacy_keys_keeps_duplicate_sources_for_verified_unlink(tmp_pat
     (duplicate / "privacy_key.json").write_text(
         (good / "privacy_key.json").read_text(encoding="utf-8"), encoding="utf-8"
     )
-    for directory in (good, duplicate):
+    broken = tmp_path / "broken"
+    broken.mkdir(parents=True)
+    (broken / "privacy_key.json").write_text("{not json", encoding="utf-8")
+    for directory in (good, duplicate, broken):
         register_legacy_key_dir(directory)
 
     collected = _collect_legacy_keys()
 
-    assert len(collected) == 2
-    assert collected[0].path == good / "privacy_key.json"
-    assert collected[1].path == duplicate / "privacy_key.json"
-
-
-def test_collect_legacy_keys_fails_closed_for_malformed_source(tmp_path):
-    broken = tmp_path / "broken"
-    broken.mkdir(parents=True)
-    (broken / "privacy_key.json").write_text("{not json", encoding="utf-8")
-    register_legacy_key_dir(broken)
-
-    with pytest.raises(keystore.PrivacyKeystoreError, match="PRIVACY_LEGACY_KEY_INVALID"):
-        _collect_legacy_keys()
+    assert len(collected) == 1
+    assert collected[0][2] == good / "privacy_key.json"
 
 
 def test_ui_module_ships_in_package():
     source = (comfy_ui._WEB_DIR / "privacy_ui.js").read_text(encoding="utf-8")
     assert "export async function showPrivacyKeystoreDialog" in source
     assert "/helto_privacy" in source
-    assert "privacy_client.js" in source
-
-    client_source = (comfy_ui._WEB_DIR / "privacy_client.js").read_text(
-        encoding="utf-8"
-    )
-    assert "helto_privacy_token" in client_source
-    assert "X-Helto-Privacy-Token" in client_source
-
-    records_source = (comfy_ui._WEB_DIR / "privacy_records.js").read_text(
-        encoding="utf-8"
-    )
-    assert "isOpaquePrivateRecordId" in records_source
-    assert "redactPrivateRecordShell" in records_source
-
-    artifacts_source = (comfy_ui._WEB_DIR / "privacy_artifacts.js").read_text(
-        encoding="utf-8"
-    )
-    assert "normalizeArtifactLease" in artifacts_source
-    assert "resolveArtifactLeaseURL" in artifacts_source
-
-    profile_source = (comfy_ui._WEB_DIR / "privacy_profile.js").read_text(encoding="utf-8")
-    assert "export async function connectPrivacyPack" in profile_source
-    assert 'export const PRIVACY_CONTRACT_V3 = "helto.privacy.v3"' in profile_source
-
-    snapshot_source = (comfy_ui._WEB_DIR / "privacy_snapshot.js").read_text(
-        encoding="utf-8"
-    )
-    assert "createPrivacySnapshotCoordinator" in snapshot_source
-    submission_source = (comfy_ui._WEB_DIR / "privacy_submission.js").read_text(
-        encoding="utf-8"
-    )
-    assert "createPrivacyPromptSubmissionService" in submission_source
+    assert "helto_privacy_token" in source
+    assert "X-Helto-Privacy-Token" in source
 
 
 def test_register_survives_missing_prompt_server():

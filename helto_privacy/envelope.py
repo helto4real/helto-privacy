@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import math
 import os
@@ -22,19 +23,17 @@ except Exception as exc:  # noqa: BLE001 - dependency may be absent in ComfyUI i
 
 from . import keystore as default_keystore
 from .keystore import PrivacyKeystoreError
-from ._legacy_key_source import (
-    JSON_FORMAT,
-    LegacyKeySourceError,
-    read_legacy_key_source,
-    unlink_unchanged_legacy_key_source,
-)
-from .suite_runtime import require_active_process_suite
 
 
 ENVELOPE_VERSION = 1
 ALGORITHM = "AES-256-GCM"
 KEY_FILE_NAME = "privacy_key.json"
 BYTE_CHUNK_SIZE = 64 * 1024 * 1024
+ERROR_KEY_MISSING = "PRIVACY_KEY_MISSING"
+ERROR_KEY_INVALID = "PRIVACY_KEY_INVALID"
+ERROR_KEY_MISMATCH = "PRIVACY_KEY_MISMATCH"
+ERROR_DECRYPT_FAILED = "PRIVACY_DECRYPT_FAILED"
+ERROR_PAYLOAD_INVALID = "PRIVACY_PAYLOAD_INVALID"
 
 
 class PrivacyError(RuntimeError):
@@ -54,34 +53,34 @@ def initialize_keystore_with_legacy_migration(
     legacy_dir: str | os.PathLike[str] | None,
 ) -> dict[str, Any]:
     """Initialize or extend the shared keystore with a legacy plaintext key."""
-    require_active_process_suite()
+    codec = PrivacyEnvelopeCodec("helto.legacy-migration")
     path = key_path(legacy_dir)
-    source = None
+    legacy_keys: list[tuple[str, bytes]] = []
     if path.exists():
         try:
-            source = read_legacy_key_source(path, JSON_FORMAT)
-        except LegacyKeySourceError as exc:
+            legacy_key, legacy_key_id = codec._load_or_create_key(legacy_dir, create=False)
+            legacy_keys.append((legacy_key_id, legacy_key))
+        except PrivacyError as exc:
             raise PrivacyError(f"Cannot migrate existing privacy key file '{path}': {exc}") from exc
 
     try:
         if default_keystore.keystore_exists():
-            result = default_keystore.unlock_keystore(password)
-        else:
-            result = default_keystore.initialize_keystore(password)
-        if source is not None:
-            result = default_keystore.import_decrypt_only_key_verified(
-                password,
-                source.key_id,
-                source.key,
+            result = (
+                default_keystore.add_keys_to_keystore(password, legacy_keys)
+                if legacy_keys
+                else default_keystore.unlock_keystore(password)
             )
+        else:
+            result = default_keystore.initialize_keystore(password, legacy_keys=legacy_keys)
     except PrivacyKeystoreError as exc:
         raise PrivacyError(str(exc)) from exc
 
-    if source is not None:
+    if legacy_keys:
         try:
-            unlink_unchanged_legacy_key_source(source)
-        except LegacyKeySourceError as exc:
-            raise PrivacyError("Cannot unlink imported historical privacy key source.") from exc
+            path.unlink(missing_ok=True)
+            path.with_name(path.name + ".migrated").unlink(missing_ok=True)
+        except OSError:
+            pass
     return result
 
 
@@ -98,14 +97,14 @@ class PrivacyEnvelopeCodec:
         self.key_provider = key_provider or default_keystore
 
     def crypto_status(self, base_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-        status = self.key_provider.keystore_status()
+        path = key_path(base_dir)
         return {
             "available": CRYPTO_AVAILABLE,
             "algorithm": ALGORITHM,
-            "keyExists": bool(status.get("keystoreInitialized", False)),
-            "keyPath": str(status.get("keystorePath") or ""),
+            "keyExists": path.exists(),
+            "keyPath": str(path),
             "error": "" if CRYPTO_AVAILABLE else f"Python package 'cryptography' is required: {CRYPTO_IMPORT_ERROR}",
-            **status,
+            **self.key_provider.keystore_status(),
         }
 
     def is_encrypted_payload(self, value: Any) -> bool:
@@ -122,8 +121,7 @@ class PrivacyEnvelopeCodec:
         )
 
     def encrypt_state(self, state: Mapping[str, Any], base_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-        require_active_process_suite()
-        key, key_id = self._current_key(base_dir)
+        key, key_id = self._load_or_create_key(base_dir, create=True)
         nonce = secrets.token_bytes(12)
         plaintext = json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ciphertext = AESGCM(key).encrypt(nonce, plaintext, self._aad(key_id))  # type: ignore[operator]
@@ -138,14 +136,13 @@ class PrivacyEnvelopeCodec:
         }
 
     def decrypt_state(self, payload: Any, base_dir: str | os.PathLike[str] | None = None) -> dict[str, Any]:
-        require_active_process_suite()
         if isinstance(payload, str):
             try:
                 payload = json.loads(payload)
             except Exception as exc:
-                raise PrivacyError(f"Encrypted state payload is not valid JSON: {exc}") from exc
+                raise PrivacyError(f"{ERROR_PAYLOAD_INVALID}: Encrypted state payload is not valid JSON: {exc}") from exc
         if not self.is_encrypted_payload(payload):
-            raise PrivacyError("Data is not an encrypted privacy payload.")
+            raise PrivacyError(f"{ERROR_PAYLOAD_INVALID}: Data is not an encrypted privacy payload.")
         key_id = str(payload.get("keyId", ""))
         key = self._key_for_payload(
             key_id,
@@ -160,9 +157,9 @@ class PrivacyEnvelopeCodec:
         except PrivacyError:
             raise
         except Exception as exc:  # noqa: BLE001 - auth/tag/key failures should be user-readable.
-            raise PrivacyError(f"Could not decrypt state payload: {exc}") from exc
+            raise PrivacyError(f"{ERROR_DECRYPT_FAILED}: Could not decrypt state payload: {exc}") from exc
         if not isinstance(loaded, Mapping):
-            raise PrivacyError("Encrypted state payload did not contain an object.")
+            raise PrivacyError(f"{ERROR_PAYLOAD_INVALID}: Encrypted state payload did not contain an object.")
         return dict(loaded)
 
     def encrypt_bytes(
@@ -170,19 +167,9 @@ class PrivacyEnvelopeCodec:
         data: bytes,
         purpose: str,
         base_dir: str | os.PathLike[str] | None = None,
-        *,
-        chunk_size: int | None = None,
     ) -> dict[str, Any]:
-        require_active_process_suite()
-        key, key_id = self._current_key(base_dir)
-        if chunk_size is None:
-            chunk_size = self._byte_chunk_size()
-        elif (
-            not isinstance(chunk_size, int)
-            or isinstance(chunk_size, bool)
-            or chunk_size < 1
-        ):
-            raise PrivacyError("Encrypted byte chunk size is invalid.")
+        key, key_id = self._load_or_create_key(base_dir, create=True)
+        chunk_size = self._byte_chunk_size()
         if len(data) > chunk_size:
             return self._encrypt_bytes_chunked(data, purpose, key, key_id, chunk_size)
         nonce = secrets.token_bytes(12)
@@ -204,17 +191,6 @@ class PrivacyEnvelopeCodec:
         purpose: str,
         base_dir: str | os.PathLike[str] | None = None,
     ) -> bytes:
-        return b"".join(self.iter_decrypt_bytes(payload, purpose, base_dir))
-
-    def iter_decrypt_bytes(
-        self,
-        payload: Any,
-        purpose: str,
-        base_dir: str | os.PathLike[str] | None = None,
-    ):
-        """Yield authenticated plaintext chunks without named plaintext staging."""
-
-        require_active_process_suite()
         if isinstance(payload, str):
             try:
                 payload = json.loads(payload)
@@ -236,68 +212,62 @@ class PrivacyEnvelopeCodec:
             "Encrypted byte payload was created with a different local privacy key.",
         )
         if schema == self.chunked_byte_schema:
-            yield from self._iter_decrypt_bytes_chunked(payload, purpose, key, key_id)
-            return
+            return self._decrypt_bytes_chunked(payload, purpose, key, key_id)
         if schema != self.byte_schema:
             raise PrivacyError("Data is not an encrypted byte payload.")
         try:
             nonce = _b64url_decode(str(payload.get("nonce", "")))
             ciphertext = _b64url_decode(str(payload.get("ciphertext", "")))
-            yield AESGCM(key).decrypt(nonce, ciphertext, self._bytes_aad(key_id, purpose))  # type: ignore[operator]
+            return AESGCM(key).decrypt(nonce, ciphertext, self._bytes_aad(key_id, purpose))  # type: ignore[operator]
         except Exception as exc:  # noqa: BLE001 - auth/tag/key failures should be user-readable.
             raise PrivacyError(f"Could not decrypt byte payload: {exc}") from exc
 
-    def iter_decrypt_chunked_bytes(
-        self,
-        payload: Any,
-        purpose: str,
-        chunks,
-        total_chunks: int,
-        base_dir: str | os.PathLike[str] | None = None,
-    ):
-        """Yield chunked plaintext from a bounded external ciphertext iterator."""
-
-        require_active_process_suite()
-        if not (
-            isinstance(payload, Mapping)
-            and payload.get("encrypted") is True
-            and payload.get("algorithm") == ALGORITHM
-            and payload.get("schema") == self.chunked_byte_schema
-            and str(payload.get("purpose", "")) == purpose
-            and isinstance(total_chunks, int)
-            and not isinstance(total_chunks, bool)
-            and total_chunks > 0
-        ):
-            raise PrivacyError("Data is not an encrypted chunked byte payload.")
-        key_id = str(payload.get("keyId", ""))
-        key = self._key_for_payload(
-            key_id,
-            base_dir,
-            "Encrypted byte payload was created with a different local privacy key.",
-        )
-        yield from self._iter_decrypt_bytes_chunked(
-            payload,
-            purpose,
-            key,
-            key_id,
-            chunks=chunks,
-            total_chunks=total_chunks,
-        )
-
-    def _current_key(
+    def _load_or_create_key(
         self,
         base_dir: str | os.PathLike[str] | None = None,
+        create: bool = True,
     ) -> tuple[bytes, str]:
         if not CRYPTO_AVAILABLE:
             raise PrivacyError(f"Python package 'cryptography' is required for privacy mode: {CRYPTO_IMPORT_ERROR}")
-        if base_dir is not None:
-            raise PrivacyError(
-                "Current privacy envelopes do not read or write legacy key directories."
-            )
-        try:
-            return self.key_provider.primary_session_key()
-        except PrivacyKeystoreError as exc:
-            raise PrivacyError(str(exc)) from exc
+
+        if base_dir is None:
+            if not self.key_provider.keystore_exists():
+                raise PrivacyError(
+                    "PRIVACY_KEYSTORE_UNINITIALIZED: Privacy keystore has not been created yet. "
+                    "Open the Helto privacy dialog and set a privacy password."
+                )
+            try:
+                return self.key_provider.primary_session_key()
+            except PrivacyKeystoreError as exc:
+                raise PrivacyError(str(exc)) from exc
+
+        path = key_path(base_dir)
+        if path.exists():
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                key = _b64url_decode(str(payload.get("key", "")))
+                key_id = str(payload.get("keyId", "")).strip()
+            except Exception as exc:  # noqa: BLE001 - bad local key should become a readable privacy error.
+                raise PrivacyError(f"{ERROR_KEY_INVALID}: Could not read privacy key file '{path}': {exc}") from exc
+            if len(key) != 32 or not key_id:
+                raise PrivacyError(f"{ERROR_KEY_INVALID}: Privacy key file '{path}' is malformed.")
+            return key, key_id
+
+        if not create:
+            raise PrivacyError(f"{ERROR_KEY_MISSING}: Privacy key file is missing: {path}")
+
+        key = secrets.token_bytes(32)
+        key_id = _b64url_encode(hashlib.sha256(key).digest()[:12])
+        _write_private_json(
+            path,
+            {
+                "version": 1,
+                "algorithm": ALGORITHM,
+                "keyId": key_id,
+                "key": _b64url_encode(key),
+            },
+        )
+        return key, key_id
 
     def _key_for_payload(
         self,
@@ -305,13 +275,14 @@ class PrivacyEnvelopeCodec:
         base_dir: str | os.PathLike[str] | None,
         mismatch_error: str,
     ) -> bytes:
-        key, key_id = self._current_key(base_dir)
+        key, key_id = self._load_or_create_key(base_dir, create=False)
         if payload_key_id == key_id:
             return key
-        alt = self.key_provider.session_key_for(payload_key_id)
-        if alt is not None:
-            return alt
-        raise PrivacyError(mismatch_error)
+        if base_dir is None and self.key_provider.keystore_exists():
+            alt = self.key_provider.session_key_for(payload_key_id)
+            if alt is not None:
+                return alt
+        raise PrivacyError(f"{ERROR_KEY_MISMATCH}: {mismatch_error}")
 
     def _aad(self, key_id: str) -> bytes:
         return f"{self.schema}|{ENVELOPE_VERSION}|{ALGORITHM}|{key_id}".encode("utf-8")
@@ -361,18 +332,6 @@ class PrivacyEnvelopeCodec:
         }
 
     def _decrypt_bytes_chunked(self, payload: Mapping[str, Any], purpose: str, key: bytes, key_id: str) -> bytes:
-        return b"".join(self._iter_decrypt_bytes_chunked(payload, purpose, key, key_id))
-
-    def _iter_decrypt_bytes_chunked(
-        self,
-        payload: Mapping[str, Any],
-        purpose: str,
-        key: bytes,
-        key_id: str,
-        *,
-        chunks=None,
-        total_chunks: int | None = None,
-    ):
         try:
             plaintext_size = int(payload.get("plaintextSize"))
             chunk_size = int(payload.get("chunkSize"))
@@ -380,45 +339,59 @@ class PrivacyEnvelopeCodec:
             raise PrivacyError("Encrypted byte payload has invalid chunk metadata.") from exc
         if plaintext_size < 0 or chunk_size <= 0:
             raise PrivacyError("Encrypted byte payload has invalid chunk metadata.")
-        if chunks is None:
-            chunks = payload.get("chunks")
-            if not isinstance(chunks, list) or not chunks:
-                raise PrivacyError("Encrypted byte payload does not contain chunks.")
-            total_chunks = len(chunks)
-        if total_chunks is None or total_chunks <= 0:
-            raise PrivacyError("Encrypted byte payload has invalid chunk metadata.")
+        chunks = payload.get("chunks")
+        if not isinstance(chunks, list) or not chunks:
+            raise PrivacyError("Encrypted byte payload does not contain chunks.")
+        total_chunks = len(chunks)
         expected_indexes = set(range(total_chunks))
         seen_indexes = set()
-        plaintext_total = 0
+        plaintext_parts: list[bytes] = [b""] * total_chunks
         try:
             for entry in chunks:
                 if not isinstance(entry, Mapping):
                     raise PrivacyError("Encrypted byte payload contains an invalid chunk.")
                 index = int(entry.get("index"))
-                if (
-                    index not in expected_indexes
-                    or index in seen_indexes
-                    or index != len(seen_indexes)
-                ):
+                if index not in expected_indexes or index in seen_indexes:
                     raise PrivacyError("Encrypted byte payload contains invalid chunk indexes.")
                 nonce = _b64url_decode(str(entry.get("nonce", "")))
                 ciphertext = _b64url_decode(str(entry.get("ciphertext", "")))
-                plaintext = AESGCM(key).decrypt(  # type: ignore[operator]
+                plaintext_parts[index] = AESGCM(key).decrypt(  # type: ignore[operator]
                     nonce,
                     ciphertext,
                     self._chunk_bytes_aad(key_id, purpose, index, total_chunks, plaintext_size),
                 )
                 seen_indexes.add(index)
-                plaintext_total += len(plaintext)
-                yield plaintext
         except PrivacyError:
             raise
         except Exception as exc:  # noqa: BLE001 - auth/tag/key failures should be user-readable.
             raise PrivacyError(f"Could not decrypt chunked byte payload: {exc}") from exc
         if seen_indexes != expected_indexes:
             raise PrivacyError("Encrypted byte payload is missing chunks.")
-        if plaintext_total != plaintext_size:
+        plaintext = b"".join(plaintext_parts)
+        if len(plaintext) != plaintext_size:
             raise PrivacyError("Encrypted byte payload decrypted to an unexpected size.")
+        return plaintext
+
+
+def _write_private_json(path: Path, payload: Mapping[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o700)
+    except OSError:
+        pass
+    text = json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp_path, 0o600)
+    except OSError:
+        pass
+    tmp_path.replace(path)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
 
 def _b64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")

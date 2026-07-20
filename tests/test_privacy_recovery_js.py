@@ -2,24 +2,14 @@ import subprocess
 import textwrap
 from pathlib import Path
 
-import pytest
-
-from tests.privacy_js_test_support import write_privacy_client_dependencies
-
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIVACY_UI = ROOT / "helto_privacy" / "web" / "privacy_ui.js"
-PRIVACY_CLIENT = ROOT / "helto_privacy" / "web" / "privacy_client.js"
 
 
 def run_node_module_test(tmp_path, body: str) -> None:
-    (tmp_path / "package.json").write_text('{"type":"module"}', encoding="utf-8")
-    module_path = tmp_path / "privacy_ui.js"
+    module_path = tmp_path / "privacy_ui.mjs"
     module_path.write_text(PRIVACY_UI.read_text(encoding="utf-8"), encoding="utf-8")
-    (tmp_path / "privacy_client.js").write_text(
-        PRIVACY_CLIENT.read_text(encoding="utf-8"), encoding="utf-8"
-    )
-    write_privacy_client_dependencies(tmp_path)
     script_path = tmp_path / "test.mjs"
     script_path.write_text(
         textwrap.dedent(
@@ -109,12 +99,9 @@ def test_scan_detects_recovery_categories_without_leaking_values(tmp_path):
         tmp_path,
         """
         privacy.registerPrivacyRecoveryDescriptors("utils", [descriptor()]);
-        const titledNode = node("VERY_SECRET_PATH");
-        titledNode.title = "SYNTHETIC_PRIVATE_TITLE_CANARY";
-        titledNode.label = "SYNTHETIC_PRIVATE_LABEL_CANARY";
         const graph = { nodes: [
           node("__HELTO_ENC__:private-path"),
-          titledNode,
+          node("VERY_SECRET_PATH"),
           node(JSON.stringify(envelope("wrong.schema"))),
           node("[]", {}),
         ] };
@@ -135,8 +122,6 @@ def test_scan_detects_recovery_categories_without_leaking_values(tmp_path):
         assert(!publicIssues.includes("private-path"));
         assert(!dialogModel.includes("VERY_SECRET_PATH"));
         assert(!dialogModel.includes("private-path"));
-        assert(!dialogModel.includes("SYNTHETIC_PRIVATE_TITLE_CANARY"));
-        assert(!dialogModel.includes("SYNTHETIC_PRIVATE_LABEL_CANARY"));
         """,
     )
 
@@ -192,9 +177,8 @@ def test_reencrypt_writes_registered_json_envelope(tmp_path):
             defaultValue: "[]",
             sensitive: true,
             schema: "helto.test",
-            reencrypt: (plaintext, context) => {
+            reencrypt: (plaintext) => {
               captured = plaintext;
-              assert.equal("token" in context, false);
               return { encrypted: envelope("helto.test") };
             },
           }],
@@ -209,11 +193,7 @@ def test_reencrypt_writes_registered_json_envelope(tmp_path):
     )
 
 
-@pytest.mark.parametrize("backend_locked", [True, False])
-def test_missing_browser_token_opens_auto_unlock_flow_and_retries(
-    tmp_path,
-    backend_locked,
-):
+def test_locked_encryption_opens_auto_unlock_flow_and_retries(tmp_path):
     run_node_module_test(
         tmp_path,
         """
@@ -290,11 +270,7 @@ def test_missing_browser_token_opens_auto_unlock_flow_and_retries(
         globalThis.fetch = async (url) => {
           fetchCalls.push(String(url));
           if (String(url).endsWith("/status")) {
-            return fakeResponse({
-              ok: true,
-              keystoreInitialized: true,
-              keystoreLocked: __BACKEND_LOCKED__,
-            });
+            return fakeResponse({ ok: true, keystoreInitialized: true, keystoreLocked: true });
           }
           if (String(url).endsWith("/unlock")) {
             return fakeResponse({ ok: true, token: "token-1", keystoreInitialized: true, keystoreLocked: false });
@@ -325,7 +301,7 @@ def test_missing_browser_token_opens_auto_unlock_flow_and_retries(
         assert(fetchCalls.some((url) => url.endsWith("/status")));
         assert(fetchCalls.some((url) => url.endsWith("/unlock")));
         assert.equal(storage.get("helto_privacy_token"), "token-1");
-        """.replace("__BACKEND_LOCKED__", str(backend_locked).lower()),
+        """,
     )
 
 
@@ -341,5 +317,117 @@ def test_fail_closed_helper_rejects_invalid_encryption_response(tmp_path):
           }),
           /PRIVACY_ENCRYPTION_FAILED/,
         );
+        """,
+    )
+
+
+def test_unreadable_value_classifier_preserves_locked_envelopes(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_LOCKED: locked")), false);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_TOKEN_REQUIRED: unlock")), false);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_KEYSTORE_UNINITIALIZED: missing")), true);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_KEY_MISMATCH: wrong key")), true);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("PRIVACY_DECRYPT_FAILED: invalid tag")), true);
+        assert.equal(privacy.isUnreadablePrivacyValueError(new Error("Failed to fetch")), false);
+
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_KEYSTORE_UNINITIALIZED: missing")), true);
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_KEY_MISSING: gone")), true);
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_KEY_MISMATCH: wrong key")), false);
+        assert.equal(privacy.isPrivacyKeyUnavailableError(new Error("PRIVACY_LOCKED: locked")), false);
+        """,
+    )
+
+
+def test_unreadable_reset_confirmation_is_single_flight_and_defaults_to_keep(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        class FakeElement {
+          constructor(tag, ownerDocument) {
+            this.tagName = tag.toUpperCase();
+            this.ownerDocument = ownerDocument;
+            this.children = [];
+            this.listeners = {};
+            this.className = "";
+            this.textContent = "";
+            this.parentNode = null;
+          }
+          append(...items) {
+            for (const item of items) {
+              item.parentNode = this;
+              this.children.push(item);
+            }
+          }
+          remove() {
+            if (!this.parentNode) return;
+            const index = this.parentNode.children.indexOf(this);
+            if (index >= 0) this.parentNode.children.splice(index, 1);
+            this.parentNode = null;
+          }
+          setAttribute() {}
+          focus() { this.ownerDocument.activeElement = this; }
+          addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+          click() {
+            const event = { target: this };
+            for (const fn of this.listeners.click ?? []) fn(event);
+          }
+          querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+          querySelectorAll(selector) {
+            const found = [];
+            const matches = (element) => {
+              if (selector === "button") return element.tagName === "BUTTON";
+              if (selector.startsWith(".")) {
+                return String(element.className).split(/\\s+/).includes(selector.slice(1));
+              }
+              return false;
+            };
+            const visit = (element) => {
+              if (matches(element)) found.push(element);
+              for (const child of element.children || []) visit(child);
+            };
+            visit(this);
+            return found;
+          }
+        }
+
+        class FakeDocument {
+          constructor() {
+            this.head = new FakeElement("head", this);
+            this.body = new FakeElement("body", this);
+            this.activeElement = null;
+          }
+          createElement(tag) { return new FakeElement(tag, this); }
+          getElementById(id) {
+            return [...this.head.children, ...this.body.children].find((item) => item.id === id) || null;
+          }
+          querySelector(selector) { return this.body.querySelector(selector); }
+          querySelectorAll(selector) { return this.body.querySelectorAll(selector); }
+        }
+
+        const documentRef = new FakeDocument();
+        const first = privacy.confirmUnreadablePrivacyReset({ documentRef });
+        const second = privacy.confirmUnreadablePrivacyReset({ documentRef });
+
+        assert.equal(privacy.isUnreadablePrivacyResetDialogOpen(documentRef), true);
+        assert.equal(documentRef.querySelectorAll(".helto-privacy-unreadable-dialog").length, 1);
+        const buttons = documentRef.querySelectorAll("button");
+        assert.deepEqual(buttons.map((button) => button.textContent), [
+          "Keep encrypted values",
+          "Reset affected values",
+        ]);
+        assert.equal(documentRef.activeElement, buttons[0]);
+        assert.equal(buttons[1].className, "danger");
+
+        buttons[0].click();
+        assert.equal(await first, false);
+        assert.equal(await second, false);
+        assert.equal(privacy.isUnreadablePrivacyResetDialogOpen(documentRef), false);
+
+        const destructive = privacy.confirmUnreadablePrivacyReset({ documentRef });
+        documentRef.querySelectorAll("button")[1].click();
+        assert.equal(await destructive, true);
+        assert.equal(await privacy.confirmUnreadablePrivacyReset({ documentRef: null }), false);
         """,
     )

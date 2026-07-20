@@ -4,11 +4,6 @@ Instructions for an agent migrating a ComfyUI node pack from a local
 plaintext key file (`config/privacy_key.json`) to this shared package.
 Migration is part of adoption — do not treat them as separate projects.
 
-For typed records and singleton pack state that must follow an effective public
-or private scope, see [Dual-mode records and singletons](docs/dual-mode-records-singletons.md).
-Its representation hooks are building blocks for the coordinated transition
-service; consumers must not call them as an independent privacy toggle.
-
 Read `README.md` first for the file contract. The finished reference
 implementation is `~/git/comfyui-helto-director` (commit `dd669d9`,
 "Use shared privacy package and refresh media tokens"); when in doubt, copy
@@ -63,7 +58,7 @@ Then pick your case:
   (you would corrupt compatibility with the pack's existing data). Keep the
   pack's own envelope code and only replace its *key source* with the
   keystore primitives (`primary_session_key()`, `session_key_for(key_id)`,
-  plus a declared verified legacy-key import for its key file). The
+  plus `initialize_keystore_with_legacy_migration` for its key file). The
   route/frontend/test steps below still apply.
 
 ## Step 1 — Dependency
@@ -71,7 +66,7 @@ Then pick your case:
 Add to the pack's `requirements.txt` (create it if missing):
 
 ```
-helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@<coordinated-suite-tag>
+helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.5.0
 cryptography>=42.0
 ```
 
@@ -89,6 +84,8 @@ codec, preserving whatever function names the rest of the pack already calls
 ```python
 from pathlib import Path
 from helto_privacy import PrivacyEnvelopeCodec, PrivacyError  # noqa: F401
+from helto_privacy import envelope as _envelope
+from helto_privacy import initialize_keystore_with_legacy_migration
 
 _SCHEMA = "helto.<this-pack's-existing-schema>"   # from Step 0 — DO NOT invent a new one
 _codec = PrivacyEnvelopeCodec(_SCHEMA)
@@ -99,161 +96,112 @@ def config_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "config"
 
 
-def encrypt_state(state):
-    return _codec.encrypt_state(state)
+def encrypt_state(state, base_dir=None):
+    return _codec.encrypt_state(state, base_dir=base_dir)
 
-def decrypt_state(payload):
-    return _codec.decrypt_state(payload)
+def decrypt_state(payload, base_dir=None):
+    return _codec.decrypt_state(payload, base_dir=base_dir)
 
 # ...same one-liners for encrypt_bytes/decrypt_bytes/is_encrypted_payload/crypto_status...
+
+def initialize_privacy_keystore(password: str):
+    return initialize_keystore_with_legacy_migration(password, config_dir())
 ```
 
-> **No current legacy-key fallback.** The codec requires the initialized,
-> unlocked shared keystore and rejects `base_dir` for current reads and writes.
-> Keep `config_dir()` only to anchor the pack's declared historical key/data
-> sources. Register those locations through the migration contract; exact
-> readers and verified key import are the only paths allowed to access them.
+> **Warning — CWD footgun.** The package's own legacy fallback
+> (`helto_privacy.envelope.key_path(None)`) resolves to
+> `Path.cwd()/config`, which under ComfyUI is the *ComfyUI* directory, not
+> the pack. Never rely on it. Always route legacy-file access through the
+> pack-anchored `config_dir()` above: pass it to
+> `initialize_keystore_with_legacy_migration`, and if the pack needs a
+> legacy fallback for envelopes while no keystore exists, pass
+> `base_dir=config_dir()` explicitly at those call sites. Once the user has
+> a keystore (this user does), `base_dir=None` resolves to the keystore and
+> the fallback never triggers.
 
 If the pack loads under two module namespaces (ComfyUI loader packages under
 a runtime name, like the Director's `comfyui_helto_director_runtime.*`),
 both copies share state automatically because all state lives in files —
 but keep that in mind when tests monkeypatch module attributes (see Step 5).
 
-## Step 3 — Register the shared UI and migration declarations
+## Step 3 — Register the shared UI (this also handles migration)
 
 In the pack's `__init__.py`, right where routes are registered today:
 
 ```python
 from helto_privacy import register_helto_privacy_ui
 
-register_helto_privacy_ui()
+register_helto_privacy_ui(legacy_key_dir=_PACKAGE_ROOT / "config")
 ```
-
-The managed profile installation must also embed the coordinated suite ID and
-register it only after the profile has installed successfully:
-
-```python
-from helto_privacy import (
-    ConsumerSuiteDeclaration,
-    register_consumer_suite_declaration,
-)
-
-SUITE_ID = "<coordinated immutable suite id>"
-
-# After install(profile, adapters) has returned successfully:
-register_consumer_suite_declaration(
-    ConsumerSuiteDeclaration(profile.distribution, SUITE_ID)
-)
-```
-
-Do not embed a manifest digest in the consumer artifact. The detached manifest
-binds the immutable suite ID to the consumer artifact hash, avoiding a circular
-artifact-hash dependency.
 
 This one call (idempotent across packs — the first pack in the ComfyUI
-process wins) registers the
+process wins, later calls only contribute their legacy dir) registers the
 canonical endpoints `/helto_privacy/status`, `/unlock`, `/lock`,
-`/keystore/init`, `/keystore/change_password`, profile mode status/transition
-routes, and serves the shared browser client and UI at
-`/helto_privacy/ui/privacy.js`.
+`/keystore/init`, `/keystore/change_password`, and serves the shared unlock
+dialog at `/helto_privacy/ui/privacy.js`.
 
-Legacy migration is profile-declared rather than inferred from an inactive
-directory. Register exact shared readers and import historical keys through the
-pack-bound migration capability described in
-[`docs/legacy-migration.md`](docs/legacy-migration.md). A verified import wraps
-the key as decrypt-only, reopens and verifies it, then unlinks and syncs the
-plaintext source. It never creates a `.migrated` plaintext backup. The old
-directory registration and `initialize_keystore_with_legacy_migration` seams
-remain temporarily for coordinated consumer cutover and should not be used by
-new integrations.
+**Migration is automatic.** Because the pack registered its legacy key
+directory, its `privacy_key.json` is imported as a decrypt-only key at the
+next keystore init *or unlock* — the only moments the password is in hand —
+and renamed to `privacy_key.json.migrated` (a recoverable backup: never
+delete it programmatically, never commit it; gitignore `config/*.json` and
+`config/*.json.migrated`). The pack does NOT need its own "Set password"
+action, unlock endpoints, or migration branching. Wrong passwords surface as
+`PRIVACY_PASSWORD_INVALID` — show the message as-is.
+
+(`initialize_keystore_with_legacy_migration(password, legacy_dir)` still
+exists for non-ComfyUI callers and scripted migration.)
 
 ## Step 4 — Gate routes, import the shared frontend
 
-**Dispatch every privacy route through the bound pack authorization handle.**
-Any endpoint that decrypts, encrypts, saves, queues, executes, or serves
-privacy-mode content must name its scope and operation:
+**Gate every privacy route the pack owns.** Any endpoint that decrypts,
+encrypts, or serves privacy-mode content must call the guard first:
 
 ```python
-from helto_privacy import PrivacyRouteError
+from helto_privacy import aiohttp_check_privacy_token
 
 @routes.post(f"{PREFIX}/decrypt")
 async def post_decrypt(request):
-    async def decrypt(authorization):
-        return await product_service.decrypt(authorization)
-
-    try:
-        return await privacy.authorization.dispatch(
-            request,
-            "declared-scope-id",
-            "state.decrypt",
-            decrypt,
-        )
-    except PrivacyRouteError as error:
-        return web.json_response(
-            {"ok": False, "error": error.code},
-            status=error.http_status,
-        )
+    denied = aiohttp_check_privacy_token(request)
+    if denied is not None:
+        return denied
+    ...
 ```
 
-Dispatch requires an active exact suite and an initialized, unlocked keystore;
-absence is never authorization. It accepts the current token from the header
-**or** cookie, refuses scopes with incomplete transitions, and gives product
-code only an opaque authorization capability. The cookie exists because
-`<img>`/media elements cannot send custom headers; dispatch privacy-mode
-thumbnail/preview routes too, not just JSON endpoints. The old token guards are
-compatibility wrappers and now fail closed when no keystore exists.
-Unauthenticated setup, unlock, lock, password, and browser-attestation mutations
-also require same-origin browser metadata and `application/json`; do not call
-them through cross-origin forms or plaintext request bodies. The shared client
-sets the media-compatible session cookie with `SameSite=Strict`.
+The guard is a no-op until a keystore exists (legacy installs keep working),
+and accepts the token from the header **or** the cookie — the cookie exists
+because `<img>`/media elements cannot send custom headers; gate privacy-mode
+thumbnail/preview routes too, not just JSON endpoints.
 
-**Frontend: connect the exact attested profile — do not copy request, session,
-mode, or dialog code into the pack.**
+**Frontend: import the served module — do not copy dialog code into the
+pack.**
 
 ```js
-const suite = await fetch("/helto_privacy/status", { cache: "no-store" })
-  .then((response) => response.json());
-if (suite.suiteStatus !== "active" || !suite.suiteManifestDigest) {
-  throw new Error("Helto privacy installation is blocked");
+let privacy = null;
+try {
+  privacy = await import("/helto_privacy/ui/privacy.js");
+} catch {
+  /* package not installed server-side: show
+     "Unlock via Timeline Director → Global Settings" instead. */
 }
-const { connectPrivacyPack } = await import(
-  `/helto_privacy/ui/privacy_profile/${suite.suiteManifestDigest}.js`
-);
-const privacy = await connectPrivacyPack({
-  app,
-  packId: PROFILE_ID,
-  profileFingerprint: PROFILE_FINGERPRINT,
-  suiteManifestDigest: suite.suiteManifestDigest,
-  adapters: browserAdapters,
-});
 
-await privacy.records(RECORD_RESOURCE_ID).invoke(
-  "record.use",
-  { recordId: opaqueRecordId },
-);
+// When an operation fails with a locked error:
+if (privacy?.isPrivacyLockedError(error)) {
+  const unlocked = await privacy.showPrivacyKeystoreDialog("auto");
+  if (unlocked) retryTheOperation();
+}
+
+// Before rendering privacy-mode <img>/media elements:
+privacy?.ensureStoredPrivacyTokenCookie();
 ```
 
-Every declared browser adapter must implement
-`onPrivacySessionChange({ state, revision })` and clear stale runtime state on
-lock/revision changes. The snapshot contains no token. The request client owns
-header/cookie restoration and one bounded unlock retry. Consumers call only
-operations declared for the selected typed resource handle; there is no generic
-authorization request port, arbitrary URL, or caller-selected HTTP method.
-Consumers have no token
-getter and must not inspect token storage or construct token-bearing requests. The shared
-surface mounts once across all connected packs and owns setup, unlock, password
-change, lock, readiness, recovery, mode status, confirmation, and transitions.
-Missing/stale shared code is a blocked installation, not a local fallback.
-
-For concealed product UI, reuse the shared Helto classes
-`.helto-hidden-collapsed`, `.helto-text-masked`, `.is-private`,
-`.helto-private-text`, and `.helto-private-label`. Do not weaken their opaque
-background, transparent glyph/caret/placeholder, or pointer-blocking rules.
-Call `concealPrivacyContent(element, { mode })` before locked content can be
-observed; it destructively removes values, labels, media URLs, and subtree text
-from the DOM and accessibility tree. After authorization, call
-`preparePrivacyReveal(element)` and re-render from the authorized result. No
-hover or focus state restores content, and the helper retains no plaintext.
+`showPrivacyKeystoreDialog("auto")` picks setup vs unlock from keystore
+status and resolves immediately if already unlocked; explicit modes
+`"unlock"`, `"setup"`, `"change"` exist for settings-menu buttons. The module
+also exports `fetchPrivacyStatus`, `lockPrivacyKeystore`,
+`getStoredPrivacyToken` (attach as `X-Helto-Privacy-Token` on the pack's own
+fetch/XHR calls), and `isPrivacyLockedError`. Token storage is per origin, so
+an unlock through any pack — or the Timeline Director — covers this pack too.
 
 ## Step 5 — Privacy Recovery
 
@@ -308,8 +256,7 @@ show plaintext field contents. The scanner handles:
 Old legacy values without a pack-supplied migration adapter are reset-only.
 Do not try to decrypt or display them in the browser.
 
-For recovery-only re-encryption, replace fail-open helpers with the shared
-fail-closed helper.
+Replace fail-open serialization helpers with the shared fail-closed helper.
 If privacy is enabled and encryption fails, this helper opens the shared
 unlock/setup dialog, retries once, then throws a privacy error. Do not catch
 that error and write plaintext.
@@ -335,401 +282,7 @@ it accepts only a valid envelope for the registered schema; otherwise it
 blocks with `PRIVACY_ENCRYPTION_FAILED` or
 `PRIVACY_ENCRYPTION_UNAVAILABLE`.
 
-Do not use this recovery helper as the normal save/queue implementation after
-the coordinated cutover. Normal serialization uses the snapshot coordinator
-below so every projection shares one generation and envelope.
-
-## Step 6 — Bind privacy snapshots and serialization
-
-Each protected-field browser adapter implements the full attested contract,
-including these snapshot methods:
-
-```js
-const browserAdapters = {
-  "prompt-state-ui": {
-    normalize(node) {
-      return normalizeProductState(node.runtimeState);
-    },
-    readProtected(node) {
-      return node.widgets.find((widget) => widget.name === "private_state").value;
-    },
-    writeProtected(node, envelope) {
-      writeExactSerializedWidgetValue(node, "private_state", envelope);
-    },
-    // apply, clear, onPrivacySessionChange, and reconciliation methods...
-  },
-};
-```
-
-`readProtected` must return the exact serialized ciphertext. `writeProtected`
-must update the live widget plus every ComfyUI serialized representation used
-by workflow and prompt projections. It must never write plaintext.
-
-After every product edit, mark the declared field generation. Do not encrypt
-inside a widget serializer:
-
-```js
-const workflow = privacy.workflow("prompt-library");
-workflow.markEdited(node, "private-state");
-```
-
-The shared runtime eagerly prepares that generation. Async save, export,
-queue-manager, replay, or direct API entry points wrap the complete operation
-in `await workflow.runWithSnapshot(reason, async ({ graphToPrompt }) => {
-... })`; this pins one transaction across every projection in the callback and
-serializes overlapping operations. Use the callback's scoped `graphToPrompt`
-invoker when that integration needs prompt generation. Do not call the wrapped
-`app.graphToPrompt()` from inside the callback: ordinary app calls intentionally
-queue as separate transactions. `workflow.settle(reason)` prepares a
-transaction for an immediately following synchronous serializer. Synchronous
-serialization calls
-`workflow.requireSettled("serialize")` and aborts if the generation is not
-already settled. Supported reasons include `manual-save`,
-`autosave`, `export`, `graph-to-prompt`, `direct-queue`, `queue-manager`,
-`partial-execution`, `subgraph`, and `replay`.
-
-Use `workflow.workflowProjection(node, fieldId)` only for protected workflow
-storage. `workflow.executionProjection(...)` rejects locked, failed, or
-unsupported state. A successful settlement pins one immutable runtime
-transaction; projections reject if the generation changes outside an active
-barrier, while graph-to-prompt keeps its captured transaction pinned across
-both ComfyUI passes. Execution-bearing reasons fail before queue logic when any
-private field is locked or failed. Never catch a `PRIVACY_SNAPSHOT_*` error and
-substitute an old envelope, empty/default state, or plaintext.
-
-Queue products should import `privacy_queue.js` and create one
-`createPrivacyQueueCoordinator`. Its capture methods settle the graph-wide
-barrier for every batch item. Its replay method accepts a stored workflow
-snapshot, but requires the product adapter to rebuild a new prompt inside a
-fresh `runWithSnapshot("replay", ...)` transaction; it never submits the stored
-executable payload or its expired grants directly.
-
-## Step 7 — Move private execution behind grants
-
-For every product input that affects a private result, set `execution=True` on
-its `ProtectedField`, declare one `SubjectModeBinding`, and link one
-`SemanticExecutionProjection`. The binding scope must name a browser
-mode-editor adapter whose node types cover the binding. Bind an execution
-resource to two server adapters:
-
-```python
-SubjectModeBinding(
-    id="generation-mode",
-    scope_id="generate",
-    input_name="privacy_mode_reference",
-    node_types=("HeltoGenerate",),
-),
-SemanticExecutionProjection(
-    id="generate-image",
-    execution_resource_id="generation",
-    workflow_resource_id="prompt-state",
-    projection_adapter="generation-projection",
-    dispatch_adapter="generation-dispatch",
-    subject_mode_binding_id="generation-mode",
-),
-```
-
-The projection adapter implements `project(fields, declaration)` and returns
-only canonical JSON product semantics. The dispatch adapter implements
-`dispatch(value, context, cancellation)`. It calls
-`cancellation.checkpoint()` before any private effect or result publication and
-at safe boundaries during long work. Do not log, persist, retain, or attach the
-decrypted `fields` or projected `value` outside this call. Mutable values are
-cleared after synchronous completion or after an async dispatcher finishes.
-
-Inside the snapshot boundary, replace private executable inputs with one fresh
-reference:
-
-```js
-const prepared = await privacy.workflow("prompt-state").runWithSnapshot(
-  "direct-queue",
-  () => privacy.execution("generation").prepare(node, "generate-image"),
-);
-queueInput.private_execution = prepared.reference;
-```
-
-The shared browser coordinator prepares one version-2 subject-mode reference
-per matching node and binding. It injects the protected execution reference
-only when that binding resolves private; public mode forbids an execution
-reference. Both references are output-only and must never be copied into the
-persisted workflow.
-
-`prepare()` rejects calls outside an active execution-bearing transaction. Do
-not call the canonical prepare route directly; it is the fixed internal
-transport for the typed browser handle, not a second queue path.
-
-The backend product boundary calls:
-
-```python
-resolved = privacy.execution("generation").dispatch(
-    reference,
-    context,
-    subject_id=unique_id,
-)
-```
-
-It then uses `resolved.value`. A reference is single-use,
-current-session-only, and bound to the exact node identity without placing the
-raw ID in the reference. Declare ComfyUI's hidden `UNIQUE_ID` input and pass it
-through; never derive or accept a caller-selected replacement.
-Preparation remains ciphertext-only; decryption, semantic projection, and the
-opaque identity are created at dispatch immediately before product logic.
-Missing metadata, lock, unsupported state, decrypt failure, tampering, profile
-conflict, or replay must abort product logic. Never catch a
-`PRIVACY_EXECUTION_*` error to run with empty/default, stale, or public plaintext
-state.
-
-Use `cache_store(resolved.cache_identity, resolved.value)` and `cache_load(...)`
-only for private results that may live in process RAM. A later fresh grant for
-the same semantics consumes that RAM entry before product dispatch. The
-identity is opaque and session-keyed; it is not a persistent cache key. Lock,
-key rotation, session replacement, process restart, or profile invalidation
-clears the partition and revokes pending grants. Public-mode execution remains
-on the consumer's normal public path.
-
-If product output also depends on dispatch context outside the protected
-semantic projection, pass a bounded JSON `cache_discriminator` to
-`dispatch(...)`. Include every result-changing value (for example seed and
-reroll). Omitting it means the consumer is declaring that the protected
-semantic projection alone determines the cached result.
-
-Delete the pack's local token resolver, unkeyed semantic hash, persistent
-private cache, decrypt-to-default fallback, and replay reuse. The shared route,
-browser execution handle, resolver, cancellation signal, and RAM cache are the
-only private execution path.
-
-## Step 7a — Project private diagnostics through server mode
-
-For run information, debug summaries, and other backend-produced diagnostic
-objects, keep product structure and calculations in the consumer. Declare one
-`ProtectedOperation` with `scope_id`, a required root
-`SensitiveFieldDeclaration("*", CONSUMER_DERIVED)`, specific sensitive classes,
-and `SafeDiagnosticField` leaves for the few coarse private facts that may be
-released. Safe leaves support only `BOOLEAN` and non-negative `COUNT`.
-
-The operation adapter implements `project(value, declaration)` without reading
-request flags, tokens, or mode. Call the typed backend handle only after the
-normal product value is built:
-
-```python
-projected = privacy.operations("generation").project("emit-run-info", run_info)
-return projected.value
-```
-
-The handle resolves mode from the bound server mode source. Public mode keeps
-the product schema unchanged; private mode is allowlist-only and rejects an
-extra or wrongly typed diagnostic. Remove consumer encryption, request-derived
-privacy authority, debug omission, and one-off redaction only after this handle
-is active in the coordinated profile.
-
-If the operation belongs to a specific node, set its
-`subject_mode_binding_id`, consume the node's subject reference with
-`privacy.subject_modes(binding_id).consume(reference, unique_id)`, and pass the
-active lease as `subject_mode=` to `project`. A linked operation cannot use the
-global mode path. Close the lease after all linked consumers finish; lock,
-session replacement, profile invalidation, or expiry also revokes it.
-
-Consume every bound node invocation exactly once with a context manager. This
-also applies when the node resolves public and when its binding is used only by
-an execution projection: run the ordinary public path inside the context, then
-close the otherwise-unused lease. Never leave a validated subject reference
-pending for replay until its TTL.
-
-## Step 8 — Move private record libraries behind minimal shells
-
-Declare each private record kind on its typed record resource. Mint IDs with
-`generate_private_record_id()`—never names, UUIDs from consumer data, paths,
-timestamps, or content-derived hashes. A reveal-capable declaration gives each
-fixed operation its own explicit output-field allowlist:
-
-```python
-RecordDeclaration(
-    "prompt-record",
-    "library",
-    "main",
-    "helto.example.prompt-record.v1",
-    "prompt-store",
-    projections=(
-        RecordRevealProjection("use", ("prompt",)),
-        RecordRevealProjection("details", ("summary",)),
-    ),
-    mutation_operations=("create", "replace", "patch", "duplicate"),
-    safe_projection=(),
-    fixed_private_label="Private record",
-)
-```
-
-The store implements `list_ids`, `read_record(id) -> RecordSnapshot`, and
-`compare_and_swap_record(id, expected_snapshot, replacement_snapshot) -> bool`,
-plus the mode-transition methods. The compare-and-swap compares the exact
-revision and protected representation atomically, advances the revision by one,
-and returns `False` without changing storage on conflict. A delete commits a
-revisioned tombstone; do not physically erase its revision. Adapters with only
-blind `read_protected`/`write_protected`/`delete` methods fail installation.
-Mutation-capable stores also
-implement `mutate(current, operation, value)` and return one complete normalized
-record; the shared handle owns opaque ID generation, encryption, atomic
-write/read-back verification, rollback, and generic errors. Reveal-capable stores also
-implement `project(value, operation)`. Listing reads only opaque snapshots to
-classify every representation against the effective mode; it never decrypts.
-Public, private, malformed, or mixed-mode drift blocks the whole listing.
-`project` returns canonical JSON and every returned top-level field must
-appear in that operation's `RecordRevealProjection.safe_fields`; omission means
-sensitive. Do not put names,
-descriptions, tags, timestamps, counts, paths, filenames, hashes, media facts,
-or debug values into a locked listing.
-
-Replace the pack's record routes with the typed browser handle:
-
-```js
-const records = privacy.records("library");
-const shells = await records.list("prompt-record");
-const revealed = await records.reveal("prompt-record", opaqueId, "use");
-const created = await records.create("prompt-record", { prompt: "authorized" });
-await records.mutate("prompt-record", opaqueId, "patch", { prompt: "updated" });
-await records.delete("prompt-record", opaqueId); // Shared Helto confirmation modal.
-```
-
-The shared handle rebuilds locked shells as `{ id, kind, private: true,
-label: "Private record" }` and discards every extra field. It supports only
-declared `use`, `preview`, or `details` reveals. Authorized create, replace,
-patch, and duplicate use the shared mutation route and return only opaque
-receipts. Delete and protected-envelope replacement work
-while locked after shared confirmation; replacement accepts a protected current
-envelope only. Do not register a generic `ProtectedOperation` on a record
-resource or retain local crypto, shell-building, record-token, raw-error, or
-decrypt-to-default routes. Product naming, payload normalization, and document
-persistence remain in the adapter.
-
-Bind each historical record format with an exact
-`LegacyReaderBinding(..., LegacyLocationKind.RECORD, record_kind)`. Do not probe
-or migrate while listing. The first authorized reveal, patch, replace, or
-duplicate recovers any interrupted protected journal, reads through the exact
-registered reader, writes the current record schema, and resolves the
-obligation only after decrypting and comparing the read-back value. A malformed
-current-schema envelope is a current failure and must never fall through to a
-legacy reader. Keep legacy readers read-only; the store adapter continues to
-own only opaque persistence and product normalization.
-
-Audit declared record inventory items through
-`records(RECORD_RESOURCE_ID).audit_legacy(...)` with a `record.audit`
-authorization. This typed path returns only whether the exact reader matched;
-it never returns raw record plaintext. Resolve any discovered obligation by a
-normal authorized reveal or mutation before sealing the reader's audit scope.
-Generic `migration.*` operations reject record bindings.
-
-Shared privacy serializes legacy-bound record writes in migration-lock then
-record-lock order. Do not mutate the same store outside the bound handle: doing
-so can race verified rollback. Duplicate first migrates the source, then creates
-the new current target. Locked delete and confirmed protected replacement stay
-available without decrypting and do not claim a migration receipt.
-If either operation supersedes an interrupted journal, later recovery preserves
-the newer store state without fabricating discard evidence. A prepared
-obligation remains unresolved; an already verified finalize-pending receipt
-remains valid.
-
-Use `private_record_response_headers()` for private media/record responses and
-`safe_record_diagnostic()` for coarse diagnostics. Never include an original
-filename, path, prompt, name, tag, exception string, token, workflow value, or
-record payload in logs, errors, filenames, or diagnostics. Errors expose only a
-stable `PRIVACY_RECORD_*` code and fresh `hp-record-*` correlation ID.
-
-## Step 9 — Move pack state and secrets behind protected singletons
-
-Declare queue state, provider credentials, and other one-value pack state as
-`SingletonDeclaration` entries on a `ResourceKind.SINGLETON` resource. Choose
-`SingletonPayloadKind.FIELD` for canonical JSON mappings or `BLOB` for opaque
-bytes. Keep provider meaning, queue normalization, SQLite/JSON schemas, and
-product update rules in the consumer adapter.
-
-The store adapter returns `SingletonSnapshot` from `read_singleton(id)` and
-creates an atomic compare-and-swap transaction from
-`begin_singleton_replace(id, expected_revision, replacement)`. That transaction
-implements `commit() -> bool` and `read_back()`. The store adapter also
-implements `rollback_singleton_replace(id, exact_committed_snapshot,
-restored_snapshot) -> bool` as an atomic exact-snapshot compare-and-swap, plus
-the normal mode-transition methods. A successful rollback writes the original
-protected representation at a new monotonic revision; `False` means a
-concurrent writer won and authoritative state was unchanged. Never expose
-plaintext to the transaction: the replacement snapshot already contains only
-a current shared envelope or a revisioned tombstone.
-`commit() is False` is the atomic compare-and-swap conflict signal and must
-leave authoritative state unchanged; never implement it as a partial write.
-
-Use `privacy.singletons(resource).status(id)` for generic locked-safe status,
-then `replace_field`, `replace_blob`, `reveal_field`, `reveal_blob`, or `delete`
-with the exact `singleton.replace`, `singleton.reveal`, or `singleton.delete`
-authorization. A stale revision is a conflict, not a retry with defaults.
-Malformed, locked, partially migrated, or failed persistence remains
-authoritative and blocked.
-
-Plaintext or historical pack state is a migration source, not a permanent
-fallback. Bind its reader at `LegacyLocationKind.PACK_STATE`; retire the source
-only in the migration transaction's finalization after the singleton has been
-atomically written and decrypted/read back as the expected normalized value.
-
-## Step 10 — Move generated privacy artifacts behind the managed lifecycle
-
-Declare every generated mask, thumbnail, waveform, replay payload, temporary
-preview, and execution spill as an `ArtifactDeclaration`. Choose exactly one
-shared retention class: `DURABLE_ADJUNCT`, `REGENERABLE_CACHE`,
-`RUN_SCOPED_SPILL`, or `SERVED_TRANSIENT`. The consumer owns payload
-encoding/decoding, allowed-root validation for existing user files, cache keys,
-and regeneration. `helto-privacy` owns encrypted atomic storage, permissions,
-owners, expiry/eviction, cleanup retry, startup sweeping, and serving.
-
-Artifact adapters implement `encode(value) -> bytes`, `decode(bytes)`, and
-`purge_plaintext_derivatives(artifact_kind)`, plus the mode-transition methods.
-The purge must remove every consumer-owned plaintext derivative; failure aborts
-the public-to-private transition. Do not decrypt to a named temporary file.
-
-Use one `ArtifactPublicationService` for all preview kinds on an artifact
-resource. Node execution writes without needing a browser request capability;
-return the opaque reference and let the attested browser artifact handle obtain
-the `artifact.preview` lease. The shared service performs replacement,
-retirement, owner release, and startup sweep once for that resource.
-
-Existing allowed user files use `RootBoundSourceLeasePublisher` instead of an
-artifact copy. The consumer validates its alias, extension, roots, and media
-type, then returns `root_bound_source(...)`. The shared lease route securely
-reopens the exact authorized inode and streams bounded chunks without a
-path-bearing token or full plaintext materialization.
-
-```python
-owner = generate_artifact_owner_id()
-media = privacy.artifacts("media")
-reference = await media.write("thumbnail", owner, thumbnail_bytes)
-
-async with media.run() as run:
-    spill = await run.write("render-spill", spill_bytes)
-    await consume_spill(spill)
-```
-
-Replace local private-media URLs and encrypted path tokens with the attested
-browser handle:
-
-```js
-const lease = await privacy.artifacts("media").lease(
-  "thumbnail",
-  artifactReference,
-  "preview",
-);
-const { resolveArtifactLeaseURL } = await import(
-  "/helto_privacy/ui/privacy_artifacts.js"
-);
-image.src = resolveArtifactLeaseURL(lease, api.apiURL.bind(api));
-```
-
-The returned URL is a short-lived random lease ID only. Never add a path,
-filename, artifact reference, or session token to it. Never register a generic
-`ProtectedOperation` on an artifact resource. Lock, restart, expiry, profile
-conflict, and one-use consumption revoke leases automatically. The shared
-service streams plaintext only inside the authorized ComfyUI process; it does
-not add a browser/agent decrypt surface. Browser automation can still observe
-content the authorized UI actually renders, so rendered acceptance uses only an
-isolated browser session and synthetic privacy fixtures.
-
-## Step 11 — Tests (non-negotiable hygiene)
+## Step 6 — Tests (non-negotiable hygiene)
 
 A test run once minted a real key file inside a repo's `config/` and it
 nearly got committed. Every adopting pack must add an **autouse** fixture
@@ -757,7 +310,7 @@ Rules:
   safe).
 - Port the behavior tests from
   `~/git/comfyui-helto-director/tests/timeline/test_privacy_keystore.py`:
-  lifecycle, wrong password, verified legacy import + source unlink, old-envelope
+  lifecycle, wrong password, legacy import + `.migrated` rename, old-envelope
   decrypt after migration, locked errors, token gating.
 - Add one compat test: a hardcoded envelope produced by the pack's OLD code
   (generate it once with a throwaway key embedded in the test) must decrypt
@@ -766,31 +319,7 @@ Rules:
   manual testing. Stage paths explicitly and check `git log -p` for anything
   resembling `"key"`/`"wrapped_key"` values before pushing.
 
-Execution adoptions also test protected-reference tampering, locked and failed
-decrypt, exact execution-field membership, semantic identity stability across
-randomized envelopes, identity change after unlock/rotation, single-use grants,
-active cancellation, async plaintext cleanup, and RAM-cache invalidation.
-
-Record adoptions also test non-decrypting locked lists, four-field shells,
-opaque-ID rejection, authorization before read, allowlist rejection, decrypt
-failure, mutable plaintext cleanup, locked confirmed delete/replacement,
-one-use confirmation, generic filenames/headers, correlation-only errors, and
-browser-side removal of injected names, paths, timestamps, and labels.
-
-Artifact adoptions also test ciphertext-only durable files, purpose mismatch,
-private permissions, retention replacement/expiry/eviction, `BaseException`
-run cleanup, startup sweep, unreadable-cache disposal, cleanup retry, bounded
-off-event-loop work, one-use session-scoped leases, generic response names,
-and transition-time plaintext derivative purge.
-
-## Step 12 — Validation checklist
-
-Bind the pack's real adapters to the shared acceptance catalog using
-`ContractAdapterCase`; every case must prove that it reached the compiled
-shared handle. Do not satisfy the contract with a consumer-local mock privacy
-engine. The coordinated suite runner supplies synthetic canaries, deterministic
-faults, all 24 registration orders, and signed zero-waiver evidence as described
-in [docs/acceptance-harness.md](docs/acceptance-harness.md).
+## Step 7 — Validation checklist
 
 - [ ] Full pack test suite green, plus the new privacy tests.
 - [ ] Suite leaves no files in `config/`, `~/.config/helto`, or the real
@@ -804,31 +333,14 @@ in [docs/acceptance-harness.md](docs/acceptance-harness.md).
       `keyId` matches `keystore_status()`), decrypts its pre-migration
       envelopes, and returns 401 + `PRIVACY_TOKEN_REQUIRED` on privacy routes
       without the token.
-- [ ] Private queue payloads contain a protected reference but no semantic
-      plaintext or pre-dispatch identity. Successful backend dispatch returns
-      an opaque `hp-exec-v1:` identity; product logic is not invoked for a
-      locked, tampered, failed, or replayed reference.
-- [ ] Locking or rotating during a disposable synthetic private run requests
-      cancellation at the next safe checkpoint and removes the private RAM
-      cache. No external or persistent cache receives the result.
-- [ ] Locked record listings call only `list_ids` and expose exactly opaque ID,
-      kind, `private: true`, and `Private record`; reveal failures do not invoke
-      product projection, while confirmed delete/replacement remain usable.
-- [ ] Record responses and rendered shells contain none of the synthetic name,
-      path, filename, timestamp, tag, hash, diagnostic, or exception canaries.
-- [ ] Artifact references and lease payloads contain no path, original filename,
-      token, plaintext, or consumer value; lock and restart invalidate every
-      lease, and generated plaintext never appears as a named file.
-- [ ] A verified import removed `privacy_key.json` without creating another
-      plaintext copy, and a failed import left the source untouched.
+- [ ] `privacy_key.json` is gone (renamed `.migrated`) and gitignored.
 - [ ] Commit style: single-line imperative subject, matching the pack's
       history.
 
 ## Do NOT
 
 - Change the pack's envelope schema string or any AAD format.
-- Delete legacy key sources before the verified importer has persisted,
-  reopened, and matched the wrapped entry.
+- Delete key files (`.migrated` backups stay until the user removes them).
 - Copy the keystore implementation into the pack — depend on the package;
   version bumps happen here, once.
 - Log passwords, tokens, or key material anywhere, including test output.

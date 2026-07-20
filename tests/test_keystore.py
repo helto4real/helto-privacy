@@ -1,5 +1,4 @@
 import json
-from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -15,8 +14,6 @@ from helto_privacy.keystore import (
     KEYSTORE_CRYPTO_AVAILABLE,
     PrivacyKeystoreError,
 )
-from helto_privacy.suite_runtime import SuiteBlockedError
-from tests._legacy_envelope_fixture import write_legacy_state_fixture
 
 pytestmark = pytest.mark.skipif(
     not KEYSTORE_CRYPTO_AVAILABLE,
@@ -55,57 +52,6 @@ def test_initialize_unlock_lock_lifecycle():
     assert codec.decrypt_state(envelope) == {"secret": "prompt"}
 
 
-def test_direct_keystore_writers_and_secret_reads_require_active_suite(
-    monkeypatch,
-    isolated_privacy_paths,
-):
-    monkeypatch.setattr(
-        keystore,
-        "require_active_process_suite",
-        isolated_privacy_paths[2],
-    )
-
-    blocked_operations = (
-        lambda: keystore.initialize_keystore(PASSWORD),
-        lambda: keystore.unlock_keystore(PASSWORD),
-        lambda: keystore.change_keystore_password(PASSWORD, "new password"),
-        lambda: keystore.add_keys_to_keystore(PASSWORD, []),
-        lambda: keystore.import_decrypt_only_key_verified(
-            PASSWORD,
-            "synthetic-key",
-            bytes(range(32)),
-        ),
-        lambda: keystore.rotate_primary_key(PASSWORD),
-        keystore.primary_session_key,
-        lambda: keystore.session_key_for("opaque-key"),
-        keystore.session_token,
-    )
-    for operation in blocked_operations:
-        with pytest.raises(SuiteBlockedError) as blocked:
-            operation()
-        assert blocked.value.code == "suite_incomplete"
-
-    assert keystore.lock_keystore()["keystoreInitialized"] is False
-
-
-def test_route_guard_blocks_before_keystore_initialization_when_suite_inactive(
-    monkeypatch,
-    isolated_privacy_paths,
-):
-    import helto_privacy.guard as guard
-
-    monkeypatch.setattr(
-        guard,
-        "require_active_process_suite",
-        isolated_privacy_paths[3],
-    )
-
-    assert check_privacy_token(_FakeRequest()) == {
-        "status": 409,
-        "error": "PRIVACY_SUITE_BLOCKED",
-    }
-
-
 def test_unlock_rejects_wrong_password():
     keystore.initialize_keystore(PASSWORD)
     keystore.lock_keystore()
@@ -122,6 +68,40 @@ def test_unlock_reads_kdf_params_from_file(monkeypatch):
     assert keystore.unlock_keystore(PASSWORD)["token"]
 
 
+def test_status_does_not_disclose_local_paths():
+    status = keystore.keystore_status()
+
+    assert "keystorePath" not in status
+    assert "sessionPath" not in status
+
+
+def test_unlock_rejects_unbounded_kdf_before_derivation(monkeypatch):
+    keystore.initialize_keystore(PASSWORD)
+    keystore.lock_keystore()
+    payload = json.loads(keystore.keystore_path().read_text(encoding="utf-8"))
+    payload["kdf"]["n"] = 2**30
+    keystore.keystore_path().write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(
+        keystore,
+        "_derive_kek",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("must reject before scrypt")),
+    )
+
+    with pytest.raises(PrivacyKeystoreError, match="outside supported bounds"):
+        keystore.unlock_keystore(PASSWORD)
+
+
+def test_unlock_rejects_oversized_password_before_reading_keystore(monkeypatch):
+    monkeypatch.setattr(
+        keystore,
+        "_load_keystore",
+        lambda: (_ for _ in ()).throw(AssertionError("must reject before reading keystore")),
+    )
+
+    with pytest.raises(PrivacyKeystoreError, match="password is too long"):
+        keystore.unlock_keystore("x" * (keystore.MAX_PASSWORD_BYTES + 1))
+
+
 def test_initialize_requires_minimum_password_length():
     with pytest.raises(PrivacyKeystoreError, match="PRIVACY_PASSWORD_TOO_SHORT"):
         keystore.initialize_keystore("short")
@@ -136,12 +116,9 @@ def test_initialize_twice_is_rejected():
 
 def test_legacy_key_is_imported_and_retired():
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
-    legacy_path = envelope_module.config_dir() / "privacy_key.json"
-    legacy_envelope, _legacy_key, _legacy_key_id = write_legacy_state_fixture(
-        envelope_module.config_dir(),
-        DIRECTOR_SCHEMA,
-        {"old": "workflow"},
-    )
+    legacy_dir = envelope_module.config_dir()
+    legacy_envelope = codec.encrypt_state({"old": "workflow"}, base_dir=legacy_dir)
+    legacy_path = legacy_dir / "privacy_key.json"
     assert legacy_path.exists()
 
     initialize_keystore_with_legacy_migration(PASSWORD, envelope_module.config_dir())
@@ -158,11 +135,8 @@ def test_add_keys_to_existing_keystore_imports_decrypt_only_key(tmp_path):
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
     keystore.initialize_keystore(PASSWORD)
     second_dir = tmp_path / "second_pack"
-    legacy_envelope, legacy_key, legacy_key_id = write_legacy_state_fixture(
-        second_dir,
-        DIRECTOR_SCHEMA,
-        {"old": "other pack"},
-    )
+    legacy_envelope = codec.encrypt_state({"old": "other pack"}, base_dir=second_dir)
+    legacy_key, legacy_key_id = codec._load_or_create_key(second_dir, create=False)
 
     with pytest.raises(PrivacyKeystoreError, match="PRIVACY_PASSWORD_INVALID"):
         keystore.add_keys_to_keystore("wrong password", [(legacy_key_id, legacy_key)])
@@ -176,30 +150,6 @@ def test_add_keys_to_existing_keystore_imports_decrypt_only_key(tmp_path):
     raw = json.loads(keystore.keystore_path().read_text(encoding="utf-8"))
     assert [entry["keyId"] for entry in raw["keys"]].count(legacy_key_id) == 1
     assert codec.decrypt_state(legacy_envelope) == {"old": "other pack"}
-
-
-def test_concurrent_verified_imports_preserve_every_wrapped_key():
-    keystore.initialize_keystore(PASSWORD)
-    keys = (
-        ("synthetic-key-a", bytes(range(32))),
-        ("synthetic-key-b", bytes(reversed(range(32)))),
-    )
-
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        results = tuple(
-            executor.map(
-                lambda item: keystore.import_decrypt_only_key_verified(
-                    PASSWORD,
-                    item[0],
-                    item[1],
-                ),
-                keys,
-            )
-        )
-
-    assert all(result["token"] for result in results)
-    assert keystore.session_key_for("synthetic-key-a") == keys[0][1]
-    assert keystore.session_key_for("synthetic-key-b") == keys[1][1]
 
 
 def test_rotate_primary_key_keeps_old_envelopes_decryptable():
@@ -258,17 +208,22 @@ def test_session_cache_survives_module_state_reset():
     assert codec.decrypt_state(envelope) == {"secret": "prompt"}
 
 
-def test_explicit_base_dir_cannot_bypass_locked_keystore(tmp_path):
+def test_explicit_base_dir_keeps_legacy_behavior(tmp_path):
     codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
     keystore.initialize_keystore(PASSWORD)
     keystore.lock_keystore()
 
-    with pytest.raises(PrivacyError, match="legacy key directories"):
-        codec.encrypt_state(
-            {"secret": "prompt"},
-            base_dir=tmp_path / "standalone",
-        )
-    assert not (tmp_path / "standalone" / "privacy_key.json").exists()
+    envelope = codec.encrypt_state({"secret": "prompt"}, base_dir=tmp_path / "standalone")
+    assert codec.decrypt_state(envelope, base_dir=tmp_path / "standalone") == {"secret": "prompt"}
+
+
+def test_default_codec_refuses_plaintext_key_fallback():
+    codec = PrivacyEnvelopeCodec(DIRECTOR_SCHEMA)
+
+    with pytest.raises(PrivacyError, match="PRIVACY_KEYSTORE_UNINITIALIZED"):
+        codec.encrypt_state({"secret": "prompt"})
+
+    assert not (envelope_module.config_dir() / "privacy_key.json").exists()
 
 
 class _FakeRequest:
@@ -282,10 +237,7 @@ class _FakeRequest:
 
 
 def test_check_privacy_token_gates_by_keystore_state():
-    assert check_privacy_token(_FakeRequest()) == {
-        "status": 409,
-        "error": "PRIVACY_KEYSTORE_UNINITIALIZED",
-    }
+    assert check_privacy_token(_FakeRequest()) is None
 
     result = keystore.initialize_keystore(PASSWORD)
     token = result["token"]
@@ -296,7 +248,10 @@ def test_check_privacy_token_gates_by_keystore_state():
     missing = check_privacy_token(_FakeRequest())
     assert missing == {
         "status": 401,
-        "error": "PRIVACY_TOKEN_REQUIRED",
+        "error": (
+            "PRIVACY_TOKEN_REQUIRED: This ComfyUI has a privacy keystore; "
+            "unlock it to obtain a session token."
+        ),
     }
     wrong = check_privacy_token(_FakeRequest(header_token="not-the-token"))
     assert wrong is not None and wrong["status"] == 401
@@ -305,4 +260,4 @@ def test_check_privacy_token_gates_by_keystore_state():
     locked = check_privacy_token(_FakeRequest(header_token=token))
     assert locked is not None
     assert locked["status"] == 401
-    assert locked["error"] == "PRIVACY_LOCKED"
+    assert locked["error"].startswith("PRIVACY_LOCKED")
