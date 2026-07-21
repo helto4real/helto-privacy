@@ -11,15 +11,16 @@ The keystore format is intentionally stable:
   `HELTO_PRIVACY_KEYSTORE`.
 - Session file: `$XDG_RUNTIME_DIR/helto/privacy_session.json`, or
   `HELTO_PRIVACY_SESSION_DIR`.
-- Keystore schema: `helto.privacy-keystore`, version `1`.
-- Key-wrap AAD: `helto.privacy-keystore|1|<keyId>`.
+- Keystore schema: `helto.privacy-keystore`. Version `1` password stores remain
+  readable; version `2` stores declare either password or YubiKey FIDO2 unlock.
+- Key-wrap AAD: `helto.privacy-keystore|<version>|<keyId>`.
 - Files are written through a temporary file and atomic replace; keystore and
   session files are mode `0600`, and directories are mode `0700` where the
   platform allows it.
 - Route token names are `X-Helto-Privacy-Token` and `helto_privacy_token`.
 
-The only runtime dependency is `cryptography>=42.0`. The package does not
-import ComfyUI.
+The base runtime dependency is `cryptography>=42.0`. YubiKey support uses the
+optional `fido2>=2.2.1,<3` extra. The package does not import ComfyUI.
 
 ## Quickstart
 
@@ -47,6 +48,45 @@ initialize_keystore("correct horse battery")
 unlock_keystore("correct horse battery")
 lock_keystore()
 ```
+
+### YubiKey FIDO2 unlock
+
+Install the optional support in every Python environment that loads
+`helto-privacy`:
+
+```text
+pip install 'helto-privacy[yubikey]'
+```
+
+This uses the same USB HID/FIDO2 interface used by browsers and FIDO SSH keys;
+it does not require PC/SC. Run the local enrollment command:
+
+```text
+helto-privacy yubikey enroll
+```
+
+The command never accepts secrets as arguments. It prompts for the existing
+privacy password when converting a password store and the YubiKey FIDO2 PIN.
+With multiple connected security keys, disconnect all but the intended key or
+select its non-secret HID path with `--device /dev/hidrawN` during enrollment.
+
+Enrollment creates a non-discoverable FIDO2 credential with `hmac-secret` and
+hardware-enforced `credProtect=userVerificationRequired`. It does not consume a
+resident passkey slot and does not modify existing passkeys, OpenPGP, PIV, OTP,
+SSH, or signing keys. Enrollment requires the PIN and two touches (credential
+creation and secret verification). Each later unlock obtains a fresh signed
+assertion and hardware-derived secret with one PIN verification and one touch.
+Existing encrypted envelopes are not rewritten: their DEKs are rewrapped under
+the FIDO2-derived KEK, and only the keystore file changes.
+
+Conversion is intentionally YubiKey-only. The old privacy password stops
+working, and losing the sole enrolled YubiKey permanently loses access to the
+encrypted data. Upgrade every active Helto environment to a version-2-capable
+`helto-privacy` before enrolling. Enrollment fails closed unless the connected
+key advertises FIDO2, `hmac-secret`, `credProtect`, and a configured client PIN.
+Wrong PIN attempts consume the authenticator's retry counter. To protect that
+counter, YubiKey unlock requests are accepted only from a loopback client on
+the ComfyUI host.
 
 Existing node packs with a legacy `privacy_key.json` can migrate it:
 
@@ -106,7 +146,7 @@ For each Helto node pack:
 1. Add:
 
    ```text
-   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.5.0
+   helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.6.0
    cryptography>=42.0
    ```
 
@@ -122,8 +162,10 @@ For each Helto node pack:
 ## Threat Model
 
 Gained: stolen disks, backups, and synced dotfiles cannot decrypt private
-state without the password. Other network clients cannot call privacy routes
-without the session token.
+state without the configured password or enrolled YubiKey. YubiKey stores
+require the matching device, its PIN, and a physical touch for each unlock
+action. Other network clients cannot call privacy routes without the session
+token.
 
 Not gained: malware running as the same OS user while the keystore is unlocked
 can read the session cache. Use full-disk encryption and encrypted swap for

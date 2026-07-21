@@ -20,7 +20,7 @@ def check_privacy_token(request: Any) -> dict[str, Any] | None:
     if expected is None:
         return {
             "status": 401,
-            "error": f"{keystore.ERROR_LOCKED}: Privacy keystore is locked. Unlock it with your privacy password.",
+            "error": f"{keystore.ERROR_LOCKED}: Privacy keystore is locked. Authenticate to unlock it.",
         }
 
     headers = _mapping(getattr(request, "headers", {}))

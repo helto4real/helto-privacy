@@ -1,4 +1,7 @@
+import asyncio
 import json
+import sys
+import types
 
 import pytest
 
@@ -33,6 +36,7 @@ class _FakeRoutes:
 
     def __init__(self):
         self.paths = []
+        self.handlers = {}
 
     def get(self, path):
         return self._decorator("GET", path)
@@ -42,12 +46,35 @@ class _FakeRoutes:
 
     def _decorator(self, method, path):
         self.paths.append((method, path))
-        return lambda handler: handler
+
+        def register(handler):
+            self.handlers[(method, path)] = handler
+            return handler
+
+        return register
 
 
 class _FakePromptServer:
     def __init__(self):
         self.routes = _FakeRoutes()
+
+
+class _FakeWebResponse:
+    def __init__(self, *, text="", status=200, **_kwargs):
+        self.text = text
+        self.status = status
+
+
+def _install_fake_aiohttp(monkeypatch):
+    web = types.SimpleNamespace(
+        json_response=lambda data, status=200: _FakeWebResponse(
+            text=json.dumps(data), status=status
+        ),
+        Response=_FakeWebResponse,
+    )
+    module = types.ModuleType("aiohttp")
+    module.web = web
+    monkeypatch.setitem(sys.modules, "aiohttp", module)
 
 
 def _legacy_key_file(directory, codec_schema="helto.test-pack"):
@@ -56,8 +83,8 @@ def _legacy_key_file(directory, codec_schema="helto.test-pack"):
     return envelope
 
 
-def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path):
-    pytest.importorskip("aiohttp", reason="route registration needs aiohttp (provided by ComfyUI)")
+def test_register_is_idempotent_and_collects_legacy_dirs(tmp_path, monkeypatch):
+    _install_fake_aiohttp(monkeypatch)
     server = _FakePromptServer()
     assert register_helto_privacy_ui(tmp_path / "pack_a", prompt_server=server) is True
     first_count = len(server.routes.paths)
@@ -161,3 +188,71 @@ def test_ui_module_ships_in_package():
 def test_register_survives_missing_prompt_server():
     assert register_helto_privacy_ui(prompt_server=None) is False
     assert comfy_ui._ROUTES_REGISTERED is False
+
+
+@pytest.mark.parametrize(
+    ("remote", "expected"),
+    [("127.0.0.1", True), ("::1", True), ("192.168.1.50", False), (None, False)],
+)
+def test_yubikey_loopback_request_check(remote, expected):
+    assert comfy_ui._is_loopback_request(type("Request", (), {"remote": remote})()) is expected
+
+
+def test_unlock_route_uses_pin_for_yubikey_store(monkeypatch):
+    _install_fake_aiohttp(monkeypatch)
+
+    async def run_inline(operation, *args):
+        return operation(*args)
+
+    monkeypatch.setattr(comfy_ui.asyncio, "to_thread", run_inline)
+    server = _FakePromptServer()
+    register_helto_privacy_ui(prompt_server=server)
+    captured = []
+    monkeypatch.setattr(keystore, "keystore_unlock_method", lambda: keystore.AUTH_YUBIKEY_FIDO2)
+    monkeypatch.setattr(
+        comfy_ui,
+        "_unlock_and_migrate",
+        lambda credential: captured.append(credential) or {
+            "token": "new-token",
+            "unlockMethod": keystore.AUTH_YUBIKEY_FIDO2,
+        },
+    )
+
+    class Request:
+        remote = "127.0.0.1"
+
+        async def json(self):
+            return {"pin": "654321", "password": "must-not-be-used"}
+
+    response = asyncio.run(
+        server.routes.handlers[("POST", "/helto_privacy/unlock")](Request())
+    )
+
+    assert response.status == 200
+    assert captured == ["654321"]
+    assert json.loads(response.text)["token"] == "new-token"
+
+
+def test_yubikey_unlock_route_rejects_non_loopback_requests(monkeypatch):
+    _install_fake_aiohttp(monkeypatch)
+    server = _FakePromptServer()
+    register_helto_privacy_ui(prompt_server=server)
+    monkeypatch.setattr(keystore, "keystore_unlock_method", lambda: keystore.AUTH_YUBIKEY_FIDO2)
+    monkeypatch.setattr(
+        comfy_ui,
+        "_unlock_and_migrate",
+        lambda _credential: (_ for _ in ()).throw(AssertionError("must not reach hardware")),
+    )
+
+    class Request:
+        remote = "192.168.1.50"
+
+        async def json(self):
+            return {"pin": "000000"}
+
+    response = asyncio.run(
+        server.routes.handlers[("POST", "/helto_privacy/unlock")](Request())
+    )
+
+    assert response.status == 403
+    assert "PRIVACY_YUBIKEY_LOCAL_REQUIRED" in json.loads(response.text)["error"]

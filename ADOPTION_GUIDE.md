@@ -11,7 +11,7 @@ its patterns rather than inventing new ones.
 
 ## What adoption gives the pack
 
-- Keys live password-protected in one keystore
+- Keys live in one password- or YubiKey-protected keystore
   (`~/.config/helto/privacy_keystore.json`) shared by every Helto pack.
 - One unlock covers all packs: the unlocked-session cache in
   `$XDG_RUNTIME_DIR/helto/` is machine-wide per user, and the browser token
@@ -30,7 +30,7 @@ The user has a live keystore with real encrypted data. These are frozen:
 | Keystore path / env override | `~/.config/helto/privacy_keystore.json` / `HELTO_PRIVACY_KEYSTORE` |
 | Session dir env override | `HELTO_PRIVACY_SESSION_DIR` |
 | Token header / cookie | `X-Helto-Privacy-Token` / `helto_privacy_token` |
-| Error prefixes (frontends match on them) | `PRIVACY_LOCKED`, `PRIVACY_TOKEN_REQUIRED`, `PRIVACY_KEYSTORE_UNINITIALIZED`, `PRIVACY_KEYSTORE_EXISTS`, `PRIVACY_PASSWORD_INVALID`, `PRIVACY_PASSWORD_TOO_SHORT`, `PRIVACY_KEYSTORE_INVALID` |
+| Error prefixes (frontends match on them) | `PRIVACY_LOCKED`, `PRIVACY_TOKEN_REQUIRED`, `PRIVACY_KEYSTORE_UNINITIALIZED`, `PRIVACY_KEYSTORE_EXISTS`, `PRIVACY_PASSWORD_INVALID`, `PRIVACY_PASSWORD_TOO_SHORT`, `PRIVACY_KEYSTORE_INVALID`, `PRIVACY_AUTH_METHOD_INVALID`, `PRIVACY_YUBIKEY_*` |
 | **The pack's own envelope schema string** | whatever it uses today — never change it, or the pack's existing envelopes become undecryptable |
 
 ## Step 0 — Survey the target pack
@@ -66,13 +66,23 @@ Then pick your case:
 Add to the pack's `requirements.txt` (create it if missing):
 
 ```
-helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.5.0
+helto-privacy @ git+https://github.com/helto4real/helto-privacy.git@v0.6.0
 cryptography>=42.0
 ```
 
 Keep the explicit `cryptography` line — some ComfyUI installs resolve
 requirements without full dependency resolution. Mirror both in
 `pyproject.toml` `[project] dependencies` if the pack declares any.
+
+YubiKey-enabled environments must install the package's `yubikey` extra (or
+equivalently install `fido2>=2.2.1,<3`). The implementation uses FIDO2 USB HID
+and does not require PC/SC. Upgrade every consumer environment before running
+`helto-privacy yubikey enroll`; a converted version-2 YubiKey-only keystore
+cannot be unlocked by older package versions. YubiKey PIN unlock is restricted
+to loopback requests on the ComfyUI host to protect the device's PIN retries.
+Enrollment requires a device advertising `hmac-secret`, `credProtect`, and a
+configured FIDO2 PIN. It creates a non-discoverable credential and therefore
+does not consume a resident passkey slot or alter existing SSH/signing keys.
 
 ## Step 2 — Replace the crypto internals, keep the pack's API
 
@@ -196,7 +206,9 @@ privacy?.ensureStoredPrivacyTokenCookie();
 ```
 
 `showPrivacyKeystoreDialog("auto")` picks setup vs unlock from keystore
-status and resolves immediately if already unlocked; explicit modes
+status. Password stores resolve immediately if already unlocked. YubiKey
+stores always show the PIN dialog and require a touch for every unlock action,
+even when a session already exists. Explicit modes
 `"unlock"`, `"setup"`, `"change"` exist for settings-menu buttons. The module
 also exports `fetchPrivacyStatus`, `lockPrivacyKeystore`,
 `getStoredPrivacyToken` (attach as `X-Helto-Privacy-Token` on the pack's own

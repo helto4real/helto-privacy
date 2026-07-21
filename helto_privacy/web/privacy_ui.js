@@ -164,8 +164,15 @@ export async function initializePrivacyKeystore(password) {
   return result;
 }
 
-export async function unlockPrivacyKeystore(password) {
-  const result = await fetchPrivacyJson("unlock", { password });
+export async function unlockPrivacyKeystore(credential, unlockMethod = null) {
+  if (!unlockMethod) {
+    const status = await fetchPrivacyStatus();
+    unlockMethod = status.unlockMethod || "password";
+  }
+  const payload = unlockMethod === "yubikey-fido2"
+    ? { pin: credential }
+    : { password: credential };
+  const result = await fetchPrivacyJson("unlock", payload);
   storePrivacyToken(result.token || "");
   return result;
 }
@@ -1038,6 +1045,14 @@ const MODES = {
     action: "Unlock",
     run: (values) => unlockPrivacyKeystore(values.password),
   },
+  yubikey: {
+    title: "Unlock Privacy Keystore",
+    hint: "Enter your YubiKey FIDO2 PIN, submit, then touch the connected YubiKey. The PIN and touch are required for every unlock action.",
+    fields: [{ name: "pin", label: "YubiKey PIN" }],
+    action: "Unlock with YubiKey",
+    working: "Waiting for YubiKey touch...",
+    run: (values) => unlockPrivacyKeystore(values.pin, "yubikey-fido2"),
+  },
   setup: {
     title: "Set Privacy Password",
     hint: "Creates a password-protected keystore shared by all Helto node packs. Existing pack keys are imported so saved work stays readable.",
@@ -1155,14 +1170,19 @@ export async function confirmUnreadablePrivacyReset({ documentRef = globalThis.d
 
 // Shows the dialog for `mode` ("unlock" | "setup" | "change"). Resolves with
 // the endpoint result on success, or null when cancelled. `mode: "auto"`
-// picks setup/unlock from keystore status and resolves immediately with the
-// status when the keystore is already unlocked.
+// picks setup/unlock from keystore status. Unlocked password stores resolve
+// immediately; YubiKey stores always require a fresh PIN and touch.
 export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef = globalThis.document } = {}) {
-  if (mode === "auto") {
+  if (mode === "auto" || mode === "unlock") {
     const status = await fetchPrivacyStatus();
-    if (!status.keystoreInitialized) mode = "setup";
-    else if (status.keystoreLocked) mode = "unlock";
-    else return status;
+    if (!status.keystoreInitialized) {
+      if (mode === "auto") mode = "setup";
+    } else if (status.unlockMethod === "yubikey-fido2") {
+      mode = "yubikey";
+    } else if (mode === "auto") {
+      if (status.keystoreLocked) mode = "unlock";
+      else return status;
+    }
   }
   const spec = MODES[mode] ?? MODES.unlock;
   if (!documentRef?.createElement || !documentRef.body) return null;
@@ -1227,7 +1247,7 @@ export async function showPrivacyKeystoreDialog(mode = "unlock", { documentRef =
       const values = {};
       for (const [name, input] of inputs) values[name] = input.value || "";
       submitButton.disabled = true;
-      status.textContent = "Working...";
+      status.textContent = spec.working || "Working...";
       try {
         const result = await spec.run(values);
         finish(result);

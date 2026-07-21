@@ -305,6 +305,143 @@ def test_locked_encryption_opens_auto_unlock_flow_and_retries(tmp_path):
     )
 
 
+def test_yubikey_auto_unlock_prompts_even_when_session_is_unlocked(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        function fakeResponse(payload, status = 200) {
+          return {
+            ok: status < 400,
+            status,
+            statusText: status < 400 ? "OK" : "Error",
+            text: async () => JSON.stringify(payload),
+          };
+        }
+
+        class FakeElement {
+          constructor(tag, ownerDocument) {
+            this.tagName = tag.toUpperCase();
+            this.ownerDocument = ownerDocument;
+            this.children = [];
+            this.listeners = {};
+            this.className = "";
+            this.value = "";
+            this.textContent = "";
+            this.parentNode = null;
+          }
+          append(...items) {
+            for (const item of items) {
+              item.parentNode = this;
+              this.children.push(item);
+            }
+          }
+          remove() {
+            if (!this.parentNode) return;
+            const index = this.parentNode.children.indexOf(this);
+            if (index >= 0) this.parentNode.children.splice(index, 1);
+          }
+          setAttribute() {}
+          focus() { this.ownerDocument.activeElement = this; }
+          addEventListener(type, fn) { (this.listeners[type] ??= []).push(fn); }
+          click() { for (const fn of this.listeners.click ?? []) fn({ target: this }); }
+          querySelector(selector) { return this.querySelectorAll(selector)[0] || null; }
+          querySelectorAll(selector) {
+            const found = [];
+            const matches = (element) => {
+              if (selector === "input") return element.tagName === "INPUT";
+              if (selector === "button.primary") {
+                return element.tagName === "BUTTON" && String(element.className).split(/\\s+/).includes("primary");
+              }
+              if (selector.startsWith(".")) return String(element.className).split(/\\s+/).includes(selector.slice(1));
+              return false;
+            };
+            const visit = (element) => {
+              if (matches(element)) found.push(element);
+              for (const child of element.children || []) visit(child);
+            };
+            visit(this);
+            return found;
+          }
+        }
+
+        class FakeDocument {
+          constructor() {
+            this.head = new FakeElement("head", this);
+            this.body = new FakeElement("body", this);
+            this.activeElement = null;
+          }
+          createElement(tag) { return new FakeElement(tag, this); }
+          getElementById() { return null; }
+          querySelector(selector) { return this.body.querySelector(selector); }
+          querySelectorAll(selector) { return this.body.querySelectorAll(selector); }
+        }
+
+        const storage = new Map([["helto_privacy_token", "old-token"]]);
+        globalThis.localStorage = {
+          getItem: (key) => storage.get(key) || "",
+          setItem: (key, value) => storage.set(key, String(value)),
+          removeItem: (key) => storage.delete(key),
+        };
+        globalThis.document = new FakeDocument();
+        const requests = [];
+        globalThis.fetch = async (url, options = {}) => {
+          requests.push({ url: String(url), options });
+          if (String(url).endsWith("/status")) {
+            return fakeResponse({
+              ok: true,
+              keystoreInitialized: true,
+              keystoreLocked: false,
+              unlockMethod: "yubikey-fido2",
+              touchRequired: true,
+            });
+          }
+          if (String(url).endsWith("/unlock")) {
+            assert.deepEqual(JSON.parse(options.body), { pin: "654321" });
+            return fakeResponse({ ok: true, token: "new-token", unlockMethod: "yubikey-fido2" });
+          }
+          throw new Error(`Unexpected fetch: ${url}`);
+        };
+
+        const pending = privacy.showPrivacyKeystoreDialog("auto");
+        for (let i = 0; i < 20 && !globalThis.document.querySelector("input"); i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        }
+        const input = globalThis.document.querySelector("input");
+        assert(input, "YubiKey PIN dialog must open for an already-unlocked session");
+        input.value = "654321";
+        globalThis.document.querySelector("button.primary").click();
+        const result = await pending;
+
+        assert.equal(result.token, "new-token");
+        assert.equal(storage.get("helto_privacy_token"), "new-token");
+        assert.equal(requests.filter((item) => item.url.endsWith("/unlock")).length, 1);
+        """,
+    )
+
+
+def test_password_auto_unlock_keeps_existing_unlocked_shortcut(tmp_path):
+    run_node_module_test(
+        tmp_path,
+        """
+        globalThis.fetch = async (url) => ({
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          text: async () => JSON.stringify({
+            ok: true,
+            keystoreInitialized: true,
+            keystoreLocked: false,
+            unlockMethod: "password",
+          }),
+        });
+
+        const result = await privacy.showPrivacyKeystoreDialog("auto", { documentRef: null });
+        assert.equal(result.unlockMethod, "password");
+        assert.equal(result.keystoreLocked, false);
+        """,
+    )
+
+
 def test_fail_closed_helper_rejects_invalid_encryption_response(tmp_path):
     run_node_module_test(
         tmp_path,

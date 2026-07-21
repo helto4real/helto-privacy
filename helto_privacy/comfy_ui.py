@@ -15,14 +15,16 @@ Registered surface (pack-neutral, stable):
 
 Legacy migration is automatic: packs register the directory holding their old
 plaintext ``privacy_key.json``; whenever the keystore is created or unlocked
-(the only moments the password is available), every registered legacy key is
-imported as a decrypt-only entry and the plaintext key file is removed.
+(the only moments its wrapping credential is available), every registered
+legacy key is imported as a decrypt-only entry and the plaintext key file is
+removed.
 """
 
 from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import os
@@ -38,7 +40,7 @@ _WEB_DIR = Path(__file__).resolve().parent / "web"
 
 _ROUTES_REGISTERED = False
 _LEGACY_KEY_DIRS: list[Path] = []
-_PASSWORD_OPERATION_SEMAPHORE = asyncio.Semaphore(1)
+_CREDENTIAL_OPERATION_SEMAPHORE = asyncio.Semaphore(1)
 
 
 def register_legacy_key_dir(path: str | os.PathLike[str] | None) -> None:
@@ -93,10 +95,27 @@ def register_helto_privacy_ui(
     async def post_helto_privacy_unlock(request):
         try:
             payload = await request.json()
-            password = str(payload.get("password") or "")
-            # scrypt is deliberately slow; keep it off the event loop.
-            async with _PASSWORD_OPERATION_SEMAPHORE:
-                result = await asyncio.to_thread(_unlock_and_migrate, password)
+            method = keystore.keystore_unlock_method()
+            if method == keystore.AUTH_YUBIKEY_FIDO2 and not _is_loopback_request(request):
+                return web.json_response(
+                    {
+                        "ok": False,
+                        "error": (
+                            "PRIVACY_YUBIKEY_LOCAL_REQUIRED: YubiKey PIN unlock is "
+                            "allowed only from the local machine."
+                        ),
+                    },
+                    status=403,
+                )
+            raw_credential = (
+                payload.get("pin")
+                if method == keystore.AUTH_YUBIKEY_FIDO2
+                else payload.get("password")
+            )
+            credential = str(raw_credential or "")
+            # Password KDF and FIDO device operations stay off the event loop.
+            async with _CREDENTIAL_OPERATION_SEMAPHORE:
+                result = await asyncio.to_thread(_unlock_and_migrate, credential)
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
@@ -115,7 +134,7 @@ def register_helto_privacy_ui(
         try:
             payload = await request.json()
             password = str(payload.get("password") or "")
-            async with _PASSWORD_OPERATION_SEMAPHORE:
+            async with _CREDENTIAL_OPERATION_SEMAPHORE:
                 result = await asyncio.to_thread(_initialize_and_migrate, password)
             return web.json_response({"ok": True, **result})
         except PrivacyKeystoreError as exc:
@@ -127,7 +146,7 @@ def register_helto_privacy_ui(
     async def post_helto_privacy_change_password(request):
         try:
             payload = await request.json()
-            async with _PASSWORD_OPERATION_SEMAPHORE:
+            async with _CREDENTIAL_OPERATION_SEMAPHORE:
                 result = await asyncio.to_thread(
                     keystore.change_keystore_password,
                     str(payload.get("current_password") or ""),
@@ -166,14 +185,11 @@ def _initialize_and_migrate(password: str) -> dict[str, Any]:
 
 
 def _unlock_and_migrate(password: str) -> dict[str, Any]:
-    result = keystore.unlock_keystore(password)
     legacy = _collect_legacy_keys()
-    if legacy:
-        # Packs adopted after keystore creation get their old keys imported
-        # the first time the user unlocks with the password in hand.
-        result = keystore.add_keys_to_keystore(
-            password, [(key_id, key) for key_id, key, _path in legacy]
-        )
+    result = keystore.unlock_keystore(
+        password,
+        legacy_keys=[(key_id, key) for key_id, key, _path in legacy],
+    )
     _remove_registered_legacy_files()
     return result
 
@@ -215,3 +231,11 @@ def _remove_registered_legacy_files() -> None:
 def _b64url_decode(value: str) -> bytes:
     padding = "=" * (-len(value) % 4)
     return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def _is_loopback_request(request: Any) -> bool:
+    remote = str(getattr(request, "remote", "") or "").split("%", 1)[0]
+    try:
+        return ipaddress.ip_address(remote).is_loopback
+    except ValueError:
+        return False
